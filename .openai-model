@@ -2,8 +2,7 @@
 # The API key stays in ~/.dbeaver-ai-complete; only the model choice lives here.
 # Precedence: OPENAI_MODEL env var > this file > ~/.dbeaver-ai-complete > default (gpt-4.1).
 #
-# gpt-5.4 chosen as the best coding model that fully works through the Chat
-# Completions proxy: newest generation that still supports function tools +
-# temperature and stays fast (~1.5s). The codex line (gpt-5.3-codex) is OpenAI's
-# SOTA for coding but requires the Responses API, which this proxy doesn't speak.
-OPENAI_MODEL=gpt-5.4
+# gpt-5.3-codex is OpenAI's SOTA coding model. It is served ONLY via the Responses
+# API, so the proxy auto-routes codex models there (translating Anthropic Messages
+# <-> Responses, tools + streaming). Override the surface with OPENAI_API=chat|responses.
+OPENAI_MODEL=gpt-5.3-codex

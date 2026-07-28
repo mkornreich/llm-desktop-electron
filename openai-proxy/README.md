@@ -39,21 +39,23 @@ child's env are the ground truth; both say OpenAI.
 - **API key** (and `maxTokens`/`temperature` defaults): `~/.dbeaver-ai-complete`
   (`KEY=VALUE`). The key is **never logged**.
 - **Model** for this project: the repo-root dot file **`.openai-model`**
-  (`OPENAI_MODEL=…`). Currently **`gpt-5.4`** — chosen as the best coding model
-  that fully works through Chat Completions (newest gen that still supports
-  function tools + temperature and stays fast). Model-resolution precedence:
-  `OPENAI_MODEL` env → `.openai-model` → `~/.dbeaver-ai-complete` `model` →
-  `gpt-4.1`.
+  (`OPENAI_MODEL=…`). Currently **`gpt-5.3-codex`** — OpenAI's SOTA coding model.
+  Model-resolution precedence: `OPENAI_MODEL` env → `.openai-model` →
+  `~/.dbeaver-ai-complete` `model` → `gpt-4.1`.
+- **API surface:** the proxy speaks both **Chat Completions** and the **Responses
+  API**. Codex models are served only via Responses, so any model whose name
+  contains `codex` auto-routes there; override with `OPENAI_API=responses|chat`
+  (env or `.openai-model`).
 - The proxy auto-uses `max_completion_tokens` for `gpt-5*`/`o*` models and drops
   `temperature` if a model rejects it.
 - Other env overrides: `OPENAI_BASE_URL`, `PORT`, `OPENAI_MAX_OUTPUT_TOKENS`
   (default 32768), `OPENAI_MAX_TOOLS` (default 128).
 
-> **Best-for-coding caveat:** OpenAI's SOTA coding models are the `*-codex` line
-> (e.g. `gpt-5.3-codex`), but they're served **only** via the Responses API,
-> which this Chat-Completions proxy doesn't speak. Adding a Responses-API path
-> would unlock them. Among Chat-Completions models, `gpt-5.6`/reasoning variants
-> refuse function tools or non-default temperature, so `gpt-5.4` is the sweet spot.
+> **Model notes:** `gpt-5.3-codex` (Responses API) is the current pick — verified
+> end-to-end incl. tools, streaming, and tool-result round-trips. For a
+> Chat-Completions model instead, `gpt-5.4` is the best (keeps function tools +
+> temperature, fast); `gpt-5.6`/reasoning variants refuse tools or non-default
+> temperature. Temperature is omitted on the Responses path (codex uses default).
 
 ## Run the app on OpenAI
 

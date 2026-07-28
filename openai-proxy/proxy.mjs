@@ -40,6 +40,11 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || PROJECT.apiKey || FILE.apiK
 // Precedence: env var > project dot file > global dbeaver file > default.
 const OPENAI_MODEL =
   process.env.OPENAI_MODEL || PROJECT.OPENAI_MODEL || PROJECT.model || FILE.model || "gpt-4.1";
+// API surface: OpenAI's codex models are served only via the Responses API;
+// everything else uses Chat Completions. Override with OPENAI_API=responses|chat.
+const OPENAI_API = (process.env.OPENAI_API || PROJECT.OPENAI_API ||
+  (/codex/i.test(OPENAI_MODEL) ? "responses" : "chat")).toLowerCase();
+const USE_RESPONSES = OPENAI_API === "responses";
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const DEFAULT_MAX_TOKENS = parseInt(FILE.maxTokens || "1024", 10) || 1024;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
@@ -244,6 +249,143 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
   res.end();
 }
 
+// ================= OpenAI Responses API path (for codex / responses-only models) =================
+// Anthropic Messages -> Responses request
+function toResponses(body) {
+  const input = [];
+  for (const m of body.messages || []) {
+    const content = m.content;
+    if (typeof content === "string") {
+      input.push({ role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: content }] });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    const text = [], toolCalls = [], toolResults = [];
+    for (const blk of content) {
+      if (blk.type === "text") text.push(blk.text);
+      else if (blk.type === "tool_use") toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
+      else if (blk.type === "tool_result") toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id, output: typeof blk.content === "string" ? blk.content : Array.isArray(blk.content) ? blk.content.map((c) => c.text || "").join("\n") : JSON.stringify(blk.content) });
+      else if (blk.type === "image") text.push("[image omitted by proxy]");
+    }
+    if (m.role === "assistant") {
+      if (text.length) input.push({ role: "assistant", content: [{ type: "output_text", text: text.join("\n") }] });
+      for (const tc of toolCalls) input.push(tc);
+    } else {
+      for (const tr of toolResults) input.push(tr); // tool results are top-level items, not user content
+      if (text.length) input.push({ role: "user", content: [{ type: "input_text", text: text.join("\n") }] });
+    }
+  }
+  const out = { model: OPENAI_MODEL, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
+  if (body.system) out.instructions = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system;
+  const nameMap = new Map();
+  if (body.tools?.length) {
+    let tools = body.tools;
+    if (tools.length > MAX_TOOLS) { log(`clamping tools ${tools.length}->${MAX_TOOLS} (OpenAI cap)`); tools = tools.slice(0, MAX_TOOLS); }
+    out.tools = tools.map((t) => { // Responses tools are flat: {type,name,description,parameters}
+      const name = sanitizeToolName(t.name);
+      if (name !== t.name) nameMap.set(name, t.name);
+      return { type: "function", name, description: t.description, parameters: t.input_schema };
+    });
+  }
+  if (body.tool_choice) {
+    const tc = body.tool_choice;
+    if (tc.type === "auto") out.tool_choice = "auto";
+    else if (tc.type === "any") out.tool_choice = "required";
+    else if (tc.type === "tool") out.tool_choice = { type: "function", name: sanitizeToolName(tc.name) };
+  }
+  // temperature intentionally omitted — codex/reasoning models only accept the default.
+  return { payload: out, nameMap };
+}
+
+async function callResponses(payload) {
+  const doFetch = (b) => fetch(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(b) });
+  let res = await doFetch(payload);
+  if (res.status === 400) {
+    const txt = await res.clone().text();
+    const cap = txt.match(/at most (\d+)/);
+    if (cap && payload.max_output_tokens != null) res = await doFetch({ ...payload, max_output_tokens: Math.min(payload.max_output_tokens, parseInt(cap[1], 10)) });
+  }
+  return res;
+}
+
+function respStopReason(resp, hasTool) {
+  if (hasTool) return "tool_use";
+  if (resp?.status === "incomplete" && resp?.incomplete_details?.reason === "max_output_tokens") return "max_tokens";
+  return "end_turn";
+}
+
+// Responses (non-streaming) -> Anthropic message
+function fromResponses(resp, reqModel, nameMap) {
+  const content = [];
+  let hasTool = false;
+  for (const item of resp.output || []) {
+    if (item.type === "message") {
+      for (const c of item.content || []) if (c.type === "output_text" && c.text) content.push({ type: "text", text: c.text });
+    } else if (item.type === "function_call") {
+      hasTool = true;
+      content.push({ type: "tool_use", id: item.call_id || item.id, name: (nameMap && nameMap.get(item.name)) || item.name, input: safeParse(item.arguments || "{}") });
+    } // reasoning items are dropped
+  }
+  return {
+    id: rid("msg_"), type: "message", role: "assistant", model: reqModel, content,
+    stop_reason: respStopReason(resp, hasTool), stop_sequence: null,
+    usage: { input_tokens: resp.usage?.input_tokens || 0, output_tokens: resp.usage?.output_tokens || 0 },
+  };
+}
+
+// Responses SSE -> Anthropic SSE
+async function streamResponses(res, upstream, reqModel, nameMap) {
+  const msgId = rid("msg_");
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+  sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+  sse(res, "ping", { type: "ping" });
+  const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
+  let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
+  const open = (itemId, cb) => {
+    let it = items.get(itemId);
+    if (!it) { it = { aIndex: nextIndex++, opened: false, closed: false }; items.set(itemId, it); }
+    if (!it.opened) { sse(res, "content_block_start", { type: "content_block_start", index: it.aIndex, content_block: cb }); it.opened = true; }
+    return it;
+  };
+  const close = (itemId) => { const it = items.get(itemId); if (it && it.opened && !it.closed) { sse(res, "content_block_stop", { type: "content_block_stop", index: it.aIndex }); it.closed = true; } };
+
+  const reader = upstream.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      let j; try { j = JSON.parse(t.slice(5).trim()); } catch { continue; }
+      switch (j.type) {
+        case "response.output_item.added":
+          if (j.item?.type === "function_call") { hasTool = true; open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: (nameMap && nameMap.get(j.item.name)) || j.item.name || "", input: {} }); }
+          break;
+        case "response.output_text.delta":
+          { const it = open(j.item_id, { type: "text", text: "" }); sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: j.delta } }); }
+          break;
+        case "response.function_call_arguments.delta":
+          { const it = items.get(j.item_id); if (it) sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: j.delta } }); }
+          break;
+        case "response.output_item.done":
+          if (j.item?.id) close(j.item.id);
+          break;
+        case "response.completed": usage = j.response?.usage; break;
+        case "response.incomplete": usage = j.response?.usage; incomplete = true; break;
+      }
+    }
+  }
+  for (const id of items.keys()) close(id);
+  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn"), stop_sequence: null }, usage: { output_tokens: usage?.output_tokens || 0 } });
+  sse(res, "message_stop", { type: "message_stop" });
+  res.end();
+}
+
 // ---------- server ----------
 function readBody(req) {
   return new Promise((resolve) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => resolve(b)); });
@@ -254,7 +396,7 @@ function anthropicError(res, code, type, message) { sendJSON(res, code, { type: 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
   if (req.method === "GET" && (url === "/" || url === "/health"))
-    return sendJSON(res, 200, { ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL });
+    return sendJSON(res, 200, { ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL, api: OPENAI_API });
 
   if (req.method === "POST" && url === "/v1/messages/count_tokens") {
     const body = safeParse(await readBody(req));
@@ -269,6 +411,22 @@ const server = http.createServer(async (req, res) => {
     const raw = await readBody(req);
     const body = safeParse(raw);
     const reqModel = body.model || OPENAI_MODEL;
+
+    if (USE_RESPONSES) {
+      const { payload, nameMap } = toResponses(body);
+      log(`/v1/messages [responses] model=${reqModel}->${OPENAI_MODEL} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
+      let upstream;
+      try { upstream = await callResponses(payload); }
+      catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
+      if (!upstream.ok) {
+        const errTxt = await upstream.text();
+        log(`OpenAI(responses) ${upstream.status}: ${errTxt.slice(0, 300)}`);
+        return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
+      }
+      if (payload.stream) { try { await streamResponses(res, upstream, reqModel, nameMap); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+      return sendJSON(res, 200, fromResponses(await upstream.json(), reqModel, nameMap));
+    }
+
     const { payload, nameMap } = toOpenAI(body);
     log(`/v1/messages model=${reqModel}->${OPENAI_MODEL} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
     let upstream;
@@ -288,5 +446,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL})`);
+  log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API})`);
 });
