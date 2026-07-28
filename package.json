@@ -1,0 +1,12 @@
+{
+  "name": "claude-desktop-electron-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runs the unpacked Claude Desktop app.asar under a stock Electron runtime.",
+  "scripts": {
+    "start": "electron app"
+  },
+  "devDependencies": {
+    "electron": "43.2.0"
+  }
+}

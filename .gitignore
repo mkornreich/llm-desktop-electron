@@ -1,0 +1,12 @@
+# Electron runtime — reinstall with `npm install` (also holds the
+# Resources/app.asar symlink, which run.sh recreates on launch)
+node_modules/
+
+# Isolated app profile — session/login data, not source
+user-data/
+
+# Runtime logs
+*.log
+
+# macOS
+.DS_Store
