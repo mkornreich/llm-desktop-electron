@@ -8,5 +8,8 @@ user-data/
 # Runtime logs
 *.log
 
+# Local backups of patched files (originals are preserved in git history)
+*.orig
+
 # macOS
 .DS_Store

@@ -27,6 +27,17 @@ if [ ! -e "$RES/app.asar" ] || [ "$(readlink "$RES/app.asar" 2>/dev/null)" != "$
   ln -sfn "$PWD/app" "$RES/app.asar"
 fi
 
+# The app spawns every subprocess (shell-PATH probe, Claude Code, ...) through a
+# "disclaimer" helper (Contents/Helpers/disclaimer) — a macOS TCC-attribution
+# wrapper present in the signed Claude.app but absent from stock Electron. It is
+# invoked as `disclaimer <cmd> <args...>`, so a passthrough shim restores spawns.
+HELPERS="node_modules/electron/dist/Electron.app/Contents/Helpers"
+if [ ! -x "$HELPERS/disclaimer" ]; then
+  mkdir -p "$HELPERS"
+  printf '#!/bin/sh\nexec "$@"\n' > "$HELPERS/disclaimer"
+  chmod +x "$HELPERS/disclaimer"
+fi
+
 exec "$ELECTRON" app \
   --user-data-dir="$PWD/user-data" \
   --enable-logging \

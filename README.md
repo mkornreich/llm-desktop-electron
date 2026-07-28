@@ -62,6 +62,19 @@ Electron binary doesn't carry (e.g. the VM/"virtualization" features, which the
 app itself reports as unavailable) — will not work here. `--remote-debugging-port`
 is refused by the app's built-in, cryptographically-signed CDP gate.
 
+## Run the Claude Code sub-layer on OpenAI (experiment)
+
+```bash
+./run-openai.sh
+```
+
+Routes the app's **Claude Code / agent** calls through a local Anthropic→OpenAI
+translation proxy so that sub-layer runs on OpenAI (`gpt-4.1`, key read from
+`~/.dbeaver-ai-complete`). Verified end-to-end with the in-app agent. The main
+chat window is remote claude.ai and is unaffected. See
+[openai-proxy/README.md](openai-proxy/README.md) for scope, limits, and the
+patches involved.
+
 ## Reset
 
 Delete `user-data/` to wipe the session and start fresh.
