@@ -36,10 +36,24 @@ child's env are the ground truth; both say OpenAI.
 
 ## Config
 
-Read at runtime from `~/.dbeaver-ai-complete` (`KEY=VALUE`): `apiKey`, `model`
-(default `gpt-4.1`), `maxTokens`, `temperature`. The key is **never logged**.
-Env overrides: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `PORT`,
-`OPENAI_MAX_OUTPUT_TOKENS` (default 32768), `OPENAI_MAX_TOOLS` (default 128).
+- **API key** (and `maxTokens`/`temperature` defaults): `~/.dbeaver-ai-complete`
+  (`KEY=VALUE`). The key is **never logged**.
+- **Model** for this project: the repo-root dot file **`.openai-model`**
+  (`OPENAI_MODEL=…`). Currently **`gpt-5.4`** — chosen as the best coding model
+  that fully works through Chat Completions (newest gen that still supports
+  function tools + temperature and stays fast). Model-resolution precedence:
+  `OPENAI_MODEL` env → `.openai-model` → `~/.dbeaver-ai-complete` `model` →
+  `gpt-4.1`.
+- The proxy auto-uses `max_completion_tokens` for `gpt-5*`/`o*` models and drops
+  `temperature` if a model rejects it.
+- Other env overrides: `OPENAI_BASE_URL`, `PORT`, `OPENAI_MAX_OUTPUT_TOKENS`
+  (default 32768), `OPENAI_MAX_TOOLS` (default 128).
+
+> **Best-for-coding caveat:** OpenAI's SOTA coding models are the `*-codex` line
+> (e.g. `gpt-5.3-codex`), but they're served **only** via the Responses API,
+> which this Chat-Completions proxy doesn't speak. Adding a Responses-API path
+> would unlock them. Among Chat-Completions models, `gpt-5.6`/reasoning variants
+> refuse function tools or non-default temperature, so `gpt-5.4` is the sweet spot.
 
 ## Run the app on OpenAI
 

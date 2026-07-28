@@ -17,24 +17,29 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 // ---------- config ----------
-function loadConfig() {
+function loadKV(path) {
   const cfg = {};
-  const p = os.homedir() + "/.dbeaver-ai-complete";
   try {
-    for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
-      const i = line.indexOf("=");
-      if (i > 0) cfg[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    for (const line of fs.readFileSync(path, "utf8").split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const i = t.indexOf("=");
+      if (i > 0) cfg[t.slice(0, i).trim()] = t.slice(i + 1).trim();
     }
-  } catch (e) {
-    console.error(`[proxy] could not read ${p}: ${e.message}`);
-  }
+  } catch { /* file may be absent — that's fine */ }
   return cfg;
 }
-const FILE = loadConfig();
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || FILE.apiKey || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || FILE.model || "gpt-4.1";
+const FILE = loadKV(os.homedir() + "/.dbeaver-ai-complete");
+// Per-project override — a dot file at the repo root storing THIS project's model
+// choice (the API key stays in ~/.dbeaver-ai-complete; only the model lives here).
+const PROJECT = loadKV(fileURLToPath(new URL("../.openai-model", import.meta.url)));
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || PROJECT.apiKey || FILE.apiKey || "";
+// Precedence: env var > project dot file > global dbeaver file > default.
+const OPENAI_MODEL =
+  process.env.OPENAI_MODEL || PROJECT.OPENAI_MODEL || PROJECT.model || FILE.model || "gpt-4.1";
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const DEFAULT_MAX_TOKENS = parseInt(FILE.maxTokens || "1024", 10) || 1024;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
@@ -100,7 +105,14 @@ function toOpenAI(body) {
       if (text.length) messages.push({ role: "user", content: text.join("\n") });
     }
   }
-  const out = { model: OPENAI_MODEL, messages, max_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS), stream: !!body.stream };
+  const outTokens = Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS);
+  // gpt-5.x and o-series require `max_completion_tokens` instead of `max_tokens`;
+  // send the right one up front so every call doesn't 400-then-retry.
+  const usesCompletionTokens = /^(gpt-5|o[1-9])/.test(OPENAI_MODEL);
+  const out = {
+    model: OPENAI_MODEL, messages, stream: !!body.stream,
+    ...(usesCompletionTokens ? { max_completion_tokens: outTokens } : { max_tokens: outTokens }),
+  };
   const temp = body.temperature ?? DEFAULT_TEMP;
   if (temp != null) out.temperature = temp;
   if (body.top_p != null) out.top_p = body.top_p;
@@ -154,12 +166,20 @@ async function callOpenAI(payload) {
     const txt = await res.clone().text();
     let retry = null;
     const cap = txt.match(/at most (\d+)/); // "supports at most N completion tokens"
-    if (cap && payload.max_tokens != null)
-      retry = { ...payload, max_tokens: Math.min(payload.max_tokens, parseInt(cap[1], 10)) };
+    if (cap) {
+      retry = { ...payload };
+      const lim = parseInt(cap[1], 10);
+      if (retry.max_tokens != null) retry.max_tokens = Math.min(retry.max_tokens, lim);
+      if (retry.max_completion_tokens != null) retry.max_completion_tokens = Math.min(retry.max_completion_tokens, lim);
+    }
     if (/max_completion_tokens|max_tokens.*not supported|unsupported.*max_tokens/i.test(txt)) {
       const base = retry || payload;
-      retry = { ...base, max_completion_tokens: base.max_tokens };
+      retry = { ...base, max_completion_tokens: base.max_tokens ?? base.max_completion_tokens };
       delete retry.max_tokens;
+    }
+    if (/temperature/i.test(txt)) { // some models allow only the default temperature
+      retry = { ...(retry || payload) };
+      delete retry.temperature;
     }
     if (retry) res = await doFetch(retry);
   }
