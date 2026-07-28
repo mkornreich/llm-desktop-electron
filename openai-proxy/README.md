@@ -46,6 +46,15 @@ child's env are the ground truth; both say OpenAI.
   API**. Codex models are served only via Responses, so any model whose name
   contains `codex` auto-routes there; override with `OPENAI_API=responses|chat`
   (env or `.openai-model`).
+- **Safety classifier → fast model:** Claude Code's auto-mode runs a separate,
+  latency-sensitive classifier LLM call before each risky action; on the slow
+  codex model it intermittently timed out and fail-closed ("`claude-opus-4-8
+  temporarily unavailable`"). The proxy detects that request by its system prompt
+  (*"risk levels for actions…"*) and routes it to **`OPENAI_CLASSIFIER_MODEL`**
+  (default here `gpt-4.1-mini`, Chat Completions) instead of the main model. The
+  main agent still uses `OPENAI_MODEL`. Per-request routing: requests naming an
+  OpenAI model directly are passed through; classifier requests → classifier
+  model; everything else → main model.
 - The proxy auto-uses `max_completion_tokens` for `gpt-5*`/`o*` models and drops
   `temperature` if a model rejects it.
 - Other env overrides: `OPENAI_BASE_URL`, `PORT`, `OPENAI_MAX_OUTPUT_TOKENS`

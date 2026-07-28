@@ -1,8 +1,19 @@
-# OpenAI model for this project's local + agent inference (read by openai-proxy/proxy.mjs).
-# The API key stays in ~/.dbeaver-ai-complete; only the model choice lives here.
+# OpenAI model config for this project (read by openai-proxy/proxy.mjs).
+# The API key stays in ~/.dbeaver-ai-complete; only model choices live here.
 # Precedence: OPENAI_MODEL env var > this file > ~/.dbeaver-ai-complete > default (gpt-4.1).
-#
-# gpt-5.3-codex is OpenAI's SOTA coding model. It is served ONLY via the Responses
-# API, so the proxy auto-routes codex models there (translating Anthropic Messages
-# <-> Responses, tools + streaming). Override the surface with OPENAI_API=chat|responses.
+
+# Main coding model. gpt-5.3-codex is OpenAI's SOTA coding model, served only via
+# the Responses API — the proxy auto-routes codex models there.
 OPENAI_MODEL=gpt-5.3-codex
+
+# Fast model for Claude Code's auto-mode SAFETY CLASSIFIER — a separate, latency-
+# sensitive LLM call made before each risky action. Routing it to a small fast
+# model (instead of the slow codex model) avoids the "claude-opus-4-8 temporarily
+# unavailable" fail-closed blocks. The proxy detects the classifier request by its
+# system prompt and sends it to this model via Chat Completions.
+OPENAI_CLASSIFIER_MODEL=gpt-4.1-mini
+
+# Also request that model on the agent side. NOTE: the desktop builds the agent's
+# env from a curated set, so this may not reach the in-app agent — the proxy-side
+# routing above is the reliable mechanism; this is for the CLI agent / propagation.
+CLAUDE_CODE_BG_CLASSIFIER_MODEL=gpt-4.1-mini

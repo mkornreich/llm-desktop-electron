@@ -45,6 +45,10 @@ const OPENAI_MODEL =
 const OPENAI_API = (process.env.OPENAI_API || PROJECT.OPENAI_API ||
   (/codex/i.test(OPENAI_MODEL) ? "responses" : "chat")).toLowerCase();
 const USE_RESPONSES = OPENAI_API === "responses";
+// A faster/cheaper model for the auto-mode safety classifier (a separate LLM call
+// Claude Code makes before each risky action). The main coding model can be slow
+// for these latency-sensitive checks, so route them to a small fast model here.
+const OPENAI_CLASSIFIER_MODEL = process.env.OPENAI_CLASSIFIER_MODEL || PROJECT.OPENAI_CLASSIFIER_MODEL || "";
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const DEFAULT_MAX_TOKENS = parseInt(FILE.maxTokens || "1024", 10) || 1024;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
@@ -68,6 +72,21 @@ const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 const log = (...a) => console.log("[proxy]", ...a);
 const sanitizeToolName = (n) => String(n || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
 
+// ---- per-request model routing ----
+const OPENAI_MODEL_RE = /^(gpt-|o[1-9]|chatgpt|ft:)/i;
+// The auto-mode safety classifier's request carries this distinctive system prompt.
+function isClassifierRequest(body) {
+  const s = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join(" ") : (body.system || "");
+  return /risk levels for actions that the Claude Code agent|broader safety framework|command_injection_detected/i.test(s);
+}
+function pickModel(body) {
+  const req = String(body.model || "");
+  if (OPENAI_MODEL_RE.test(req)) return req;                              // agent already asked for an OpenAI model (e.g. via CLAUDE_CODE_BG_CLASSIFIER_MODEL)
+  if (OPENAI_CLASSIFIER_MODEL && isClassifierRequest(body)) return OPENAI_CLASSIFIER_MODEL; // fast model for the safety classifier
+  return OPENAI_MODEL;
+}
+const apiForModel = (model) => (/codex/i.test(model) ? "responses" : "chat");
+
 function mapFinish(reason, hasTools) {
   if (hasTools) return "tool_use";
   switch (reason) {
@@ -80,7 +99,7 @@ function mapFinish(reason, hasTools) {
 }
 
 // ---------- request translation: Anthropic -> OpenAI ----------
-function toOpenAI(body) {
+function toOpenAI(body, model) {
   const messages = [];
   if (body.system) {
     const sys = Array.isArray(body.system)
@@ -113,9 +132,9 @@ function toOpenAI(body) {
   const outTokens = Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS);
   // gpt-5.x and o-series require `max_completion_tokens` instead of `max_tokens`;
   // send the right one up front so every call doesn't 400-then-retry.
-  const usesCompletionTokens = /^(gpt-5|o[1-9])/.test(OPENAI_MODEL);
+  const usesCompletionTokens = /^(gpt-5|o[1-9])/.test(model);
   const out = {
-    model: OPENAI_MODEL, messages, stream: !!body.stream,
+    model, messages, stream: !!body.stream,
     ...(usesCompletionTokens ? { max_completion_tokens: outTokens } : { max_tokens: outTokens }),
   };
   const temp = body.temperature ?? DEFAULT_TEMP;
@@ -251,7 +270,7 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
 
 // ================= OpenAI Responses API path (for codex / responses-only models) =================
 // Anthropic Messages -> Responses request
-function toResponses(body) {
+function toResponses(body, model) {
   const input = [];
   for (const m of body.messages || []) {
     const content = m.content;
@@ -275,7 +294,7 @@ function toResponses(body) {
       if (text.length) input.push({ role: "user", content: [{ type: "input_text", text: text.join("\n") }] });
     }
   }
-  const out = { model: OPENAI_MODEL, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
+  const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
   if (body.system) out.instructions = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system;
   const nameMap = new Map();
   if (body.tools?.length) {
@@ -396,7 +415,7 @@ function anthropicError(res, code, type, message) { sendJSON(res, code, { type: 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
   if (req.method === "GET" && (url === "/" || url === "/health"))
-    return sendJSON(res, 200, { ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL, api: OPENAI_API });
+    return sendJSON(res, 200, { ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL, api: OPENAI_API, classifier_model: OPENAI_CLASSIFIER_MODEL || null });
 
   if (req.method === "POST" && url === "/v1/messages/count_tokens") {
     const body = safeParse(await readBody(req));
@@ -411,10 +430,12 @@ const server = http.createServer(async (req, res) => {
     const raw = await readBody(req);
     const body = safeParse(raw);
     const reqModel = body.model || OPENAI_MODEL;
+    const model = pickModel(body);                       // main model, fast classifier model, or passthrough
+    const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
 
-    if (USE_RESPONSES) {
-      const { payload, nameMap } = toResponses(body);
-      log(`/v1/messages [responses] model=${reqModel}->${OPENAI_MODEL} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
+    if (useResp) {
+      const { payload, nameMap } = toResponses(body, model);
+      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
       let upstream;
       try { upstream = await callResponses(payload); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
@@ -427,8 +448,8 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, fromResponses(await upstream.json(), reqModel, nameMap));
     }
 
-    const { payload, nameMap } = toOpenAI(body);
-    log(`/v1/messages model=${reqModel}->${OPENAI_MODEL} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
+    const { payload, nameMap } = toOpenAI(body, model);
+    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
     let upstream;
     try { upstream = await callOpenAI(payload); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
@@ -446,5 +467,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API})`);
+  log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
 });

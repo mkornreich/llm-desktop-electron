@@ -42,4 +42,14 @@ else
   echo "[run-openai] WARN: no 'claude' on PATH — in-app Claude Code will fail to download its binary"
 fi
 
+# Ask the agent to use a distinct model for its background safety classifier (from
+# the .openai-model dotfile). Best-effort: the desktop curates the agent env, so
+# this may not propagate in-app — the proxy detects the classifier and routes it to
+# OPENAI_CLASSIFIER_MODEL regardless. (Does reach the CLI agent.)
+BG_CLASSIFIER=$(sed -n 's/^CLAUDE_CODE_BG_CLASSIFIER_MODEL=//p' .openai-model 2>/dev/null | head -1)
+if [ -n "${BG_CLASSIFIER:-}" ]; then
+  export CLAUDE_CODE_BG_CLASSIFIER_MODEL="$BG_CLASSIFIER"
+  echo "[run-openai] CLAUDE_CODE_BG_CLASSIFIER_MODEL=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
+fi
+
 exec ./run.sh "$@"
