@@ -124,6 +124,20 @@ Built-in connectors catalog: M365 (remote + local), Web search (Brave), Box (non
 
 **Used for:** usage analytics, crash/error reporting, optional enterprise OTLP.
 
+> **Turning this section off.** Everything above is disabled by `DISABLE_TELEMETRY=1`
+> in the **`.privacy`** dot file (read by `run.sh`, so it covers `run-openai.sh` too).
+> It takes three levers, because there are three independent telemetry paths: env vars
+> for the bundled Claude Code agent; `PRIVACY_DISABLE_TELEMETRY` + env-gated patches in
+> `index.chunk-CnWKsyE_.js` for the desktop shell (whose gates are otherwise reachable
+> only from a root-owned MDM plist); and `--host-resolver-rules` DNS sinkholing for the
+> remote web app's own Datadog/Sentry, which run in the renderer and consult neither.
+> Verified with `--log-net-log`: `[EventLogging]` flushes drop 56→0 per 90s, the app
+> logs `Sentry disabled (disableEssentialTelemetry)`, `isolated-segment.html` is
+> `ERR_BLOCKED_BY_CLIENT`, and 76 Datadog/Sentry attempts resolve to
+> `ERR_NAME_NOT_RESOLVED` with **0 bytes sent** — while the app stays logged in and
+> still loads its org/feature config. Set the flag to `0` to restore stock behavior
+> (control-tested: telemetry returns).
+
 ---
 
 ## 7. Updates / assets / extensions / plugins

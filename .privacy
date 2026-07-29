@@ -1,0 +1,30 @@
+# Privacy / telemetry settings for this build. Read by run.sh, so it applies to both
+# ./run.sh and ./run-openai.sh. Set to 0 (or delete this file) to restore the app's
+# default telemetry behavior. See ANTHROPIC_ENDPOINTS.md for the full traffic list.
+#
+# DISABLE_TELEMETRY=1 -> turn OFF all telemetry & analytics. Three levers are needed,
+# because the app has three independent telemetry paths:
+#
+#  1. Bundled Claude Code agent — respects the standard env vars, so run.sh exports
+#     DISABLE_TELEMETRY, DO_NOT_TRACK, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
+#
+#  2. Desktop shell (Electron main) — does NOT respect those env vars. It gates on the
+#     managed config Me().telemetry.disable{Nonessential,NonessentialServices,Essential},
+#     which is only settable from a root-owned MDM plist in /Library/Managed Preferences.
+#     So run.sh exports PRIVACY_DISABLE_TELEMETRY and env-gated patches in
+#     app/.vite/build/index.chunk-CnWKsyE_.js force those gates on. That silences the
+#     [EventLogging] flusher (claude.ai /api/event_logging/v2/batch), nonessential
+#     services, and Sentry, and cancels telemetry-PATH requests (/api/event_logging,
+#     the OTLP /v1/logs|traces|metrics exporter, and a.claude.ai/isolated-segment.html)
+#     which ride first-party or admin-configured hosts and therefore cannot be blocked
+#     by hostname.
+#
+#  3. Remote claude.ai web app in the renderer — its Datadog RUM + Sentry are loaded
+#     from assets-proxy.anthropic.com and consult none of the above, so run.sh
+#     DNS-sinkholes their dedicated hosts via Chromium --host-resolver-rules.
+#
+# Verified with --log-net-log: desktop [EventLogging] flushes 0 (was ~56/90s), app logs
+# "Sentry disabled (disableEssentialTelemetry)", and 0 bytes sent to datadog (66 attempts
+# blocked), sentry (6 blocked), segment/GA/GTM and event_logging (no traffic at all) —
+# while claude.ai app APIs still send normally and the app stays logged in.
+DISABLE_TELEMETRY=1

@@ -53,4 +53,6 @@ while IFS='=' read -r k v; do
   esac
 done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' .openai-model 2>/dev/null)
 
+# The privacy/telemetry toggle lives in run.sh (driven by the .privacy dot file), so
+# it applies to this launcher too — nothing to do here.
 exec ./run.sh "$@"
