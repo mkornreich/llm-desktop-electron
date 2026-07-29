@@ -46,6 +46,13 @@ child's env are the ground truth; both say OpenAI.
   API**. Codex models are served only via Responses, so any model whose name
   contains `codex` auto-routes there; override with `OPENAI_API=responses|chat`
   (env or `.openai-model`).
+- **Model picker → OpenAI models:** with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`
+  (set in `.openai-model`, forwarded by `run-openai.sh`), the app discovers models
+  from the proxy's `GET /v1/models` and lists them in the picker. The served list is
+  `OPENAI_PICKER_MODELS` (default: `gpt-5.3-codex`, `gpt-5.4`, `gpt-4.1`,
+  `gpt-4.1-mini`, `gpt-4o`). Selecting one makes the agent request that id, which the
+  proxy passes straight through — a functional OpenAI chooser for the code/agent
+  surface. (The remote claude.ai chat picker is separate and unaffected.)
 - **Safety classifier → fast model:** Claude Code's auto-mode runs a separate,
   latency-sensitive classifier LLM call before each risky action; on the slow
   codex model it intermittently timed out and fail-closed ("`claude-opus-4-8

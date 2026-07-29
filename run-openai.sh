@@ -42,14 +42,15 @@ else
   echo "[run-openai] WARN: no 'claude' on PATH — in-app Claude Code will fail to download its binary"
 fi
 
-# Ask the agent to use a distinct model for its background safety classifier (from
-# the .openai-model dotfile). Best-effort: the desktop curates the agent env, so
-# this may not propagate in-app — the proxy detects the classifier and routes it to
-# OPENAI_CLASSIFIER_MODEL regardless. (Does reach the CLI agent.)
-BG_CLASSIFIER=$(sed -n 's/^CLAUDE_CODE_BG_CLASSIFIER_MODEL=//p' .openai-model 2>/dev/null | head -1)
-if [ -n "${BG_CLASSIFIER:-}" ]; then
-  export CLAUDE_CODE_BG_CLASSIFIER_MODEL="$BG_CLASSIFIER"
-  echo "[run-openai] CLAUDE_CODE_BG_CLASSIFIER_MODEL=${CLAUDE_CODE_BG_CLASSIFIER_MODEL}"
-fi
+# Forward CLAUDE_CODE_* settings from the dotfile into the environment, e.g.
+# CLAUDE_CODE_BG_CLASSIFIER_MODEL and CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+# (the latter makes the app list the proxy's /v1/models in the picker). The desktop
+# reads its own env so these reach it; the curated agent-child env may drop some —
+# the proxy-side routing/discovery is the reliable path.
+while IFS='=' read -r k v; do
+  case "$k" in
+    CLAUDE_CODE_*) export "$k=$v"; echo "[run-openai] $k=$v" ;;
+  esac
+done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' .openai-model 2>/dev/null)
 
 exec ./run.sh "$@"

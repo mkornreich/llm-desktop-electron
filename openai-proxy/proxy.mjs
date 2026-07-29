@@ -49,6 +49,14 @@ const USE_RESPONSES = OPENAI_API === "responses";
 // Claude Code makes before each risky action). The main coding model can be slow
 // for these latency-sensitive checks, so route them to a small fast model here.
 const OPENAI_CLASSIFIER_MODEL = process.env.OPENAI_CLASSIFIER_MODEL || PROJECT.OPENAI_CLASSIFIER_MODEL || "";
+// Models advertised on GET /v1/models — what the app's gateway model-discovery
+// (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) lists in the picker. Selecting one
+// makes the agent request that id, which the proxy passes straight through.
+// Comma-separated "id:Display Name" pairs; override via OPENAI_PICKER_MODELS.
+const PICKER_MODELS = (process.env.OPENAI_PICKER_MODELS || PROJECT.OPENAI_PICKER_MODELS ||
+  "gpt-5.3-codex:GPT-5.3 Codex,gpt-5.4:GPT-5.4,gpt-4.1:GPT-4.1,gpt-4.1-mini:GPT-4.1 mini,gpt-4o:GPT-4o")
+  .split(",").map((s) => { const [id, ...n] = s.split(":"); return { id: (id || "").trim(), name: (n.join(":").trim() || (id || "").trim()) }; })
+  .filter((m) => m.id);
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const DEFAULT_MAX_TOKENS = parseInt(FILE.maxTokens || "1024", 10) || 1024;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
@@ -423,8 +431,13 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(res, 200, { input_tokens: Math.ceil(txt.length / 4) }); // rough estimate
   }
 
-  if (req.method === "GET" && url === "/v1/models")
-    return sendJSON(res, 200, { data: [{ type: "model", id: OPENAI_MODEL, display_name: OPENAI_MODEL }] });
+  if (req.method === "GET" && url === "/v1/models") {
+    log(`/v1/models discovery -> ${PICKER_MODELS.map((m) => m.id).join(", ")}`);
+    return sendJSON(res, 200, {
+      data: PICKER_MODELS.map((m) => ({ type: "model", id: m.id, display_name: m.name, created_at: "2025-01-01T00:00:00Z" })),
+      has_more: false, first_id: PICKER_MODELS[0]?.id ?? null, last_id: PICKER_MODELS[PICKER_MODELS.length - 1]?.id ?? null,
+    });
+  }
 
   if (req.method === "POST" && url === "/v1/messages") {
     const raw = await readBody(req);

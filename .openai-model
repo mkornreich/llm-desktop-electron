@@ -17,3 +17,10 @@ OPENAI_CLASSIFIER_MODEL=gpt-4.1-mini
 # env from a curated set, so this may not reach the in-app agent — the proxy-side
 # routing above is the reliable mechanism; this is for the CLI agent / propagation.
 CLAUDE_CODE_BG_CLASSIFIER_MODEL=gpt-4.1-mini
+
+# Make the model picker list OpenAI models: with gateway model-discovery on, the
+# app fetches GET <base>/v1/models and shows those ids. The proxy serves the list
+# from OPENAI_PICKER_MODELS (default gpt-5.3-codex / gpt-5.4 / gpt-4.1 / -mini / 4o).
+# Selecting one makes the agent request that id, which the proxy passes through.
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+# OPENAI_PICKER_MODELS=gpt-5.3-codex:GPT-5.3 Codex,gpt-4.1-mini:GPT-4.1 mini
