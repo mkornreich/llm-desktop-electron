@@ -109,6 +109,44 @@ const OUTPUT_FIXUPS = (process.env.OPENAI_OUTPUT_FIXUPS || PROJECT.OPENAI_OUTPUT
 // every step. This adds an explicit persistence directive. Set OPENAI_PERSISTENCE=0 to
 // disable it independently of the output fixups.
 const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENCE || "1") !== "0";
+// Auto-continue. Prompting alone does NOT fix the stall: measured over 4 trials per arm on
+// the prompt that stalled, the model called a tool 3/4 times with the persistence
+// directive and 3/4 without — a ~25% stall rate either way, unmoved by wording. When a
+// turn ends with text that merely ANNOUNCES or OFFERS an action and no tool call, the
+// agent loop hands control back and the user has to say "yes, go on". So the proxy
+// continues that turn itself: it feeds the model its own announcement plus a nudge and
+// splices the result into the SAME assistant message, so the client sees one turn that
+// actually contains the tool call. Bounded, logged, and skipped for the classifier.
+const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
+const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
+// Text that promises or proposes an action rather than reporting one. Deliberately narrow:
+// a genuine question the user alone can answer ("which of these three do you want?") should
+// still end the turn, so this matches announcements, offers, and "I need X to proceed".
+const UNFULFILLED_RE = new RegExp([
+  "\\b(i['’]?ll|i will|let me|i['’]?m going to|i am going to|going to)\\b[^.!?]{0,80}\\b(run|query|check|look|search|fetch|pull|list|inspect|read|grep|find|start|do|gather|collect)\\b",
+  "\\b(if you want|shall i|would you like me|let me know|want me to|say the word|i can (run|query|check|pull|list|do) that)\\b",
+  "\\b(i need|need one|need a|need the)\\b[^.!?]{0,60}\\b(detail|value|host|url|path|name|account|project|credential|info|information)\\b",
+  "\\bwhich\\b[^.!?]{0,40}\\b(host|project|repo|repository|account|branch|url)\\b[^.!?]{0,40}\\?",
+  "\\b(starting|i['’]?ve started|kicking off)\\b[^.!?]{0,60}\\b(now|in the background)\\b",
+].join("|"), "i");
+// Overrides the match above. A turn that ends by asking for confirmation of something
+// destructive, or for a decision only the user can make, MUST stay ended — auto-continuing
+// it would answer the question on the user's behalf and then act. Erring toward not
+// continuing is safe: the cost is one "go ahead", which is the behaviour we started from.
+const NEEDS_USER_RE = /\b(confirm|are you sure|permanently|irreversibl|destructive|cannot be undone|can['’]?t be undone|before i (proceed|continue)|your (approval|permission)|need your ok|force[- ]?push|rm -rf|drop (table|database))\b/i;
+// Continue only on an unfulfilled announcement that is not a confirmation request.
+const shouldAutoContinue = (text) => {
+  const t = String(text || "");
+  if (!t.trim()) return false;
+  if (NEEDS_USER_RE.test(t)) return false;
+  return UNFULFILLED_RE.test(t);
+};
+
+const NUDGE = "You ended your turn without calling any tool, but the user's request is not finished — " +
+  "the text above only says what you intend to do. Do it now with the tools you have. If you were " +
+  "missing a detail, discover it yourself first (git remotes and config, dotfiles, the environment, " +
+  "CLAUDE.md and memory files, earlier sessions) and proceed. Do not reply with text alone again unless " +
+  "the task is genuinely complete or you are blocked on something only the user can provide.";
 const DEFAULT_TEMP = FILE.temperature != null ? parseFloat(FILE.temperature) : undefined;
 const PORT = parseInt(process.env.PORT || "8123", 10);
 
@@ -120,7 +158,7 @@ if (!OPENAI_API_KEY) {
 // ---------- helpers ----------
 const rid = (p) => p + crypto.randomBytes(16).toString("hex");
 const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
-const log = (...a) => console.log("[proxy]", ...a);
+const log = (...a) => console.log(`[proxy ${new Date().toISOString().slice(11, 19)}]`, ...a);
 const sanitizeToolName = (n) => String(n || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
 // Flatten an Anthropic tool_result's content to text. Neither OpenAI surface has an
 // error flag on tool output, so is_error is marked inline — without it a failed command
@@ -228,6 +266,10 @@ function buildPersistenceHint() {
     "- Never reply with an offer to act — \"If you want, I can…\", \"Shall I…\", \"Let me know and I'll…\" — when you have the tools to do it. Do it now, then report what you found. Investigation and read-only steps never need permission.",
     "- When the work has several steps, carry out all of them in order, reporting as you go. Do not stop after the first step to ask for confirmation to continue.",
     "- If something fails, try the alternatives available to you before handing the problem back to the user.",
+    // The observed stall: asked for the most recently abandoned Gerrit CLs, the model
+    // replied "which Gerrit host/project should I query?" and ended the turn. That detail
+    // was discoverable from git remotes, dotfiles and the project's own memory files.
+    "- Missing details are something to go and find, not a reason to stop. Before asking the user for a value you could discover yourself — a host, URL, path, account, project or branch name — look for it with the tools you have: git remotes and config, dotfiles and config files in the repo, the environment, CLAUDE.md and memory files, and earlier sessions. Only ask if that search actually fails, and then say what you already tried.",
     "- Do stop and ask when the next action is destructive, irreversible, or sends something outward; when you need a credential or a decision only the user can make; or when the request is genuinely ambiguous in a way that changes what you would build. In those cases state exactly what you need and why.",
   ].join("\n");
 }
@@ -565,6 +607,14 @@ async function callResponses(payload) {
   return res;
 }
 
+function logTurnEnd(surface, resp, toolCount, textLen) {
+  const status = resp?.status || "completed";
+  const reason = resp?.incomplete_details?.reason;
+  const out = resp?.usage?.output_tokens ?? "?";
+  const verdict = toolCount ? `${toolCount} tool call(s)` : (textLen ? "text only — TURN ENDS, agent waits for user" : "EMPTY");
+  log(`  <- ${surface} status=${status}${reason ? "/" + reason : ""} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
+}
+
 function respStopReason(resp, hasTool) {
   if (hasTool) return "tool_use";
   if (resp?.status === "incomplete" && resp?.incomplete_details?.reason === "max_output_tokens") return "max_tokens";
@@ -591,13 +641,14 @@ function fromResponses(resp, reqModel, nameMap) {
 }
 
 // Responses SSE -> Anthropic SSE
-async function streamResponses(res, upstream, reqModel, nameMap) {
+async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
   sse(res, "ping", { type: "ping" });
   const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
+  let toolCount = 0, textLen = 0;   // for the turn-end diagnostic
   const open = (itemId, cb) => {
     let it = items.get(itemId);
     if (!it) { it = { aIndex: nextIndex++, opened: false, closed: false }; items.set(itemId, it); }
@@ -613,27 +664,33 @@ async function streamResponses(res, upstream, reqModel, nameMap) {
     }
   };
 
-  const reader = upstream.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop();
-    for (const line of lines) {
+  let turnText = "";        // this upstream's plain text, for the unfulfilled-intent check
+  // Consume ONE upstream response, emitting into the message already in progress.
+  async function consume(up) {
+    turnText = "";
+    const reader = up.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
       const t = line.trim();
       if (!t.startsWith("data:")) continue;
       let j; try { j = JSON.parse(t.slice(5).trim()); } catch { continue; }
       switch (j.type) {
         case "response.output_item.added":
-          if (j.item?.type === "function_call") { hasTool = true; open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: (nameMap && nameMap.get(j.item.name)) || j.item.name || "", input: {} }); }
+          if (j.item?.type === "function_call") { hasTool = true; toolCount++; open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: (nameMap && nameMap.get(j.item.name)) || j.item.name || "", input: {} }); }
           break;
         case "response.output_text.delta":
           {
             const it = open(j.item_id, { type: "text", text: "" });
             if (!it.mathFix) it.mathFix = makeMathFixer();
+            textLen += String(j.delta ?? "").length;
+            turnText += String(j.delta ?? "");
             const fixed = it.mathFix.push(j.delta);
             if (fixed) sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: fixed } });
           }
@@ -647,10 +704,38 @@ async function streamResponses(res, upstream, reqModel, nameMap) {
         case "response.completed": usage = j.response?.usage; break;
         case "response.incomplete": usage = j.response?.usage; incomplete = true; break;
       }
+      }
     }
+    for (const id of items.keys()) close(id);
   }
-  for (const id of items.keys()) close(id);
-  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn"), stop_sequence: null }, usage: { output_tokens: usage?.output_tokens || 0 } });
+
+  await consume(upstream);
+
+  // Continue the turn in place when the model only SAID it would act.
+  let continued = 0;
+  while (AUTO_CONTINUE && allowContinue && payload && !hasTool && !incomplete &&
+         continued < MAX_CONTINUATIONS && shouldAutoContinue(turnText)) {
+    continued++;
+    log(`  -> auto-continue ${continued}/${MAX_CONTINUATIONS}: announced an action but called no tool; re-prompting`);
+    const next = {
+      ...payload,
+      input: [...payload.input,
+              { role: "assistant", content: [{ type: "output_text", text: turnText }] },
+              { role: "user", content: [{ type: "input_text", text: NUDGE }] }],
+    };
+    let up;
+    try { up = await callResponses(next); } catch (e) { log(`  -> auto-continue fetch failed: ${e.message}`); break; }
+    if (!up.ok) { log(`  -> auto-continue got ${up.status}; keeping the original turn`); break; }
+    payload = next;
+    await consume(up);
+  }
+
+  const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
+  log(`  <- responses stream stop_reason=${stop} out_tokens=${usage?.output_tokens ?? "?"} text=${textLen}ch -> ` +
+      (toolCount ? `${toolCount} tool call(s)` :
+       stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :
+       textLen ? "TEXT ONLY, no tool call — turn ends here and the agent waits for the user" : "EMPTY response"));
+  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: usage?.output_tokens || 0 } });
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
 }
@@ -691,7 +776,8 @@ const server = http.createServer(async (req, res) => {
 
     if (useResp) {
       const { payload, nameMap } = toResponses(body, model);
-      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
+      const hintOn = !isClassifierRequest(body) && (OUTPUT_FIXUPS || PERSISTENCE);
+      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""} hints=${hintOn ? "on" : "off"}`);
       let upstream;
       try { upstream = await callResponses(payload); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
@@ -700,8 +786,17 @@ const server = http.createServer(async (req, res) => {
         log(`OpenAI(responses) ${upstream.status}: ${errTxt.slice(0, 300)}`);
         return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
       }
-      if (payload.stream) { try { await streamResponses(res, upstream, reqModel, nameMap); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
-      return sendJSON(res, 200, fromResponses(await upstream.json(), reqModel, nameMap));
+      if (payload.stream) {
+        const mayContinue = !isClassifierRequest(body) && !!payload.tools?.length;
+        try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue); }
+        catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
+        return;
+      }
+      { const rj = await upstream.json();
+        const msg = fromResponses(rj, reqModel, nameMap);
+        logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
+                   msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
+        return sendJSON(res, 200, msg); }
     }
 
     const { payload, nameMap } = toOpenAI(body, model);
@@ -725,7 +820,8 @@ const server = http.createServer(async (req, res) => {
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
-         buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText };
+         buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
+         shouldAutoContinue };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

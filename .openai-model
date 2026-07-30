@@ -32,3 +32,9 @@ OPENAI_OUTPUT_FIXUPS=1
 # ask "shall I continue?". Auto mode grants permission to run tools but cannot make a
 # model decide to keep going. Set to 0 to disable independently of OPENAI_OUTPUT_FIXUPS.
 OPENAI_PERSISTENCE=1
+# Auto-continue: when a turn ends with text that only ANNOUNCES an action and calls no
+# tool, the proxy re-prompts the model and splices the result into the same assistant
+# message, so the agent keeps going instead of waiting for "yes, continue". Never fires on
+# confirmation requests for destructive actions, or for the safety classifier.
+OPENAI_AUTO_CONTINUE=1
+OPENAI_MAX_CONTINUATIONS=2

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
-        buildPersistenceHint, withFormatHint } =
+        buildPersistenceHint, withFormatHint, shouldAutoContinue } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -293,4 +293,46 @@ test("persistence and output fixups are independent sections", () => {
 
 test("the classifier call gets neither section", () => {
   assert.equal(withFormatHint("BASE", false, [{ name: "Write" }]), "BASE");
+});
+
+// ---------- auto-continue trigger ----------
+
+test("auto-continue fires on announcements the model did not act on", () => {
+  // All observed verbatim from the app.
+  for (const t of [
+    "I'll query Gerrit for your most recently abandoned CLs now and list them newest-first.",
+    "I can pull that for you, but I need to query your Gerrit (SSH/REST) first. If you want, I'll run that now",
+    "I can check that, but I need one detail to proceed: which Gerrit host/project should I query?",
+    "Let me run the tests and report back.",
+    // Captured verbatim from a real stall. The model writes a typographic apostrophe
+    // (U+2019) in "I’ll", which an ASCII-only i'?ll pattern silently misses.
+    "I’ll check your local git/Gerrit metadata for your recently abandoned CLs and report back.",
+    "I’m going to run the query now.",
+    "I'm starting that now in the background.",
+    "Shall I go ahead and list them?",
+  ]) assert.ok(shouldAutoContinue(t), `should continue: ${t.slice(0, 60)}`);
+});
+
+test("auto-continue does NOT fire on a finished turn", () => {
+  for (const t of [
+    "Done — I rendered a red pelican SVG and saved it to /tmp/red_pelican.svg",
+    "The tests pass: 33/33.",
+    "I found 3 abandoned CLs: 4589, 4527 and 4482.",
+    "",
+  ]) assert.ok(!shouldAutoContinue(t), `should stop: ${t.slice(0, 60)}`);
+});
+
+test("auto-continue NEVER fires on a confirmation request for something destructive", () => {
+  // Continuing these would answer the question for the user and then act.
+  for (const t of [
+    "That command would permanently delete the remote branch. Confirm and I will run it.",
+    "This is irreversible — are you sure? I'll proceed once you confirm.",
+    "I'll force-push to master once you give the go-ahead.",
+    "I need your approval before I continue: I'll run rm -rf on that directory.",
+  ]) assert.ok(!shouldAutoContinue(t), `must stay ended: ${t.slice(0, 60)}`);
+});
+
+test("auto-continue leaves a genuine user-only decision alone", () => {
+  assert.ok(!shouldAutoContinue("Which of these two designs do you prefer — the flat one or the nested one?"));
+  assert.ok(!shouldAutoContinue("I could not find a Gerrit remote after checking git config, .gitreview and ~/.ssh/config."));
 });

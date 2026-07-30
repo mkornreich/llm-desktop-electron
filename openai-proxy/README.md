@@ -238,3 +238,56 @@ curl -s http://127.0.0.1:8123/v1/messages -H 'content-type: application/json' \
 
 Endpoints: `POST /v1/messages` · `POST /v1/messages/count_tokens` ·
 `GET /v1/models` · `GET /health`.
+
+## Auto-continue: finishing the turn instead of asking
+
+Observed: *"I'll query Gerrit for your most recently abandoned CLs now and list
+them newest-first."* — then nothing. No workflow was running; the model had ended
+its turn with **text and no tool call**, so the agent loop handed control back and
+sat waiting for the user to say "go on".
+
+**Prompting does not fix this.** Measured on the prompt that stalled, 4 trials per
+arm: the model called a tool 3/4 with the persistence directive and 3/4 without.
+A ~25% stall rate, unmoved by wording.
+
+So the proxy repairs it structurally. When a streamed turn ends with no tool call
+and text that merely announces or offers an action, the proxy re-prompts the model
+with its own announcement plus a nudge, and splices the result into the **same**
+assistant message — the client sees one turn that does contain the tool call.
+Bounded by `OPENAI_MAX_CONTINUATIONS` (default 2), skipped for the classifier and
+for requests with no tools, and disabled with `OPENAI_AUTO_CONTINUE=0`.
+
+| | acted | stalled |
+|---|---|---|
+| auto-continue off | 4/6 | 2/6 |
+| auto-continue on | **6/6** | **0/6** |
+
+**It must not fire on a confirmation request.** `NEEDS_USER_RE` overrides the
+match, so "That command would permanently delete the remote branch. Confirm and I
+will run it." stays ended — continuing it would answer the user's question on
+their behalf and then act. Genuine either/or questions are likewise left alone.
+
+Two bugs worth recording, both found only by testing against real output:
+
+- The trigger initially missed every real stall. The model writes **`I’ll`** with a
+  typographic apostrophe (U+2019); the pattern used ASCII `i'?ll`. The captured
+  string is now a test case.
+- The first version of the safety guard didn't exist, and the trigger matched
+  "Confirm and I **will run** it" — it would have auto-approved a destructive
+  action.
+
+### Turn-end visibility
+
+The proxy log now timestamps every request and states how each turn ended, which is
+what made the stall diagnosable at all:
+
+```
+[proxy 04:20:07] /v1/messages [responses] model=…->gpt-5.3-codex input=1 stream=true tools=3 hints=on
+[proxy 04:20:09]   <- responses stream stop_reason=end_turn out_tokens=64 text=267ch
+                     -> TEXT ONLY, no tool call — turn ends here and the agent waits for the user
+```
+
+`hints=on/off` shows whether the injected sections reached the model, and
+`stop_reason` distinguishes the three failure modes that look identical from the
+outside: the model ending its turn, hitting the output cap mid-turn, and an empty
+response.
