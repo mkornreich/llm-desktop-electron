@@ -76,6 +76,37 @@ if [ -n "${DISABLE_TELEMETRY_VAL:-}" ] && [ "${DISABLE_TELEMETRY_VAL}" != "0" ];
   echo "[run] telemetry DISABLED via .privacy (app EventLogging/Sentry off; datadog/sentry/segment/ga sinkholed)"
 fi
 
+# Session sync (.sync dot file). This build runs on an isolated --user-data-dir, so it has
+# its own claude-code-sessions store and would otherwise show none of Claude Desktop's
+# sessions. Copy them in on every launch, before Electron starts, so the sidebar is current.
+#
+# Additive and one-way: rsync --update keeps anything newer on this side and, without
+# --delete, never removes sessions created in this build. Nothing is written back.
+#
+# The agent's memory/config needs no sync — both apps resolve CLAUDE_CONFIG_DIR to
+# $HOME/.claude and already share it. See .sync for the evidence.
+SYNC_VAL=$(sed -n 's/^SYNC_CLAUDE_SESSIONS=//p' .sync 2>/dev/null | head -1)
+if [ "${SYNC_VAL:-1}" != "0" ]; then
+  SRC="$HOME/Library/Application Support/Claude/claude-code-sessions"
+  DST="$PWD/user-data/claude-code-sessions"
+  if [ -d "$SRC" ]; then
+    # Claude Desktop writing a session file at this instant could be captured mid-write.
+    if pgrep -f "/Claude.app/Contents/MacOS/Claude" >/dev/null 2>&1; then
+      echo "[run] NOTE: Claude Desktop is running — a session it is writing right now may sync incompletely; relaunch to pick up the final version"
+    fi
+    mkdir -p "$DST"
+    before=$(find "$DST" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+    if rsync -a --update "$SRC/" "$DST/" 2>/dev/null; then
+      after=$(find "$DST" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+      echo "[run] synced Claude sessions: ${before} -> ${after} session files"
+    else
+      echo "[run] WARN: session sync failed; launching with the sessions already in user-data"
+    fi
+  else
+    echo "[run] NOTE: no Claude Desktop session store at $SRC — nothing to sync"
+  fi
+fi
+
 exec "$ELECTRON" app \
   --user-data-dir="$PWD/user-data" \
   --enable-logging \

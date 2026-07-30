@@ -21,7 +21,7 @@ Sign in there as you would in the desktop app. Quit from the app menu or with
 |-------|-----------|
 | `app/` | The extracted `app.asar` with the native binaries from `app.asar.unpacked` merged back in at their original relative paths (`@ant/claude-native`, `@ant/claude-swift`, `node-pty`, office365 `msal`). |
 | `node_modules/electron` | Stock **Electron 43.2.0**. The app hard-requires Electron ≥ 34 (`if (electronMajor < 34) throw`); 43 is the line current at this build's date and ships Node 24 (the app needs Node ≥ 22). The native modules are all N-API, so they load across ABI versions. |
-| `user-data/` | An **isolated** profile. This build never touches your real Claude install's data in `~/Library/Application Support/Claude`. |
+| `user-data/` | An **isolated** profile — this build never *writes* to your real Claude install's data in `~/Library/Application Support/Claude`. It does *read* from it: `run.sh` copies Claude Desktop's sessions in on each launch (see [Sessions and memory](#sessions-and-memory)). |
 | `run.sh` | Launcher: `electron app` with the isolated profile and logging on. |
 
 `run.sh` also (re)creates one symlink:
@@ -78,3 +78,60 @@ patches involved.
 ## Reset
 
 Delete `user-data/` to wipe the session and start fresh.
+
+## Sessions and memory
+
+### Memory and config — already shared, nothing to sync
+
+The agent in this build reads the **same** `~/.claude` as Claude Desktop and the
+`claude` CLI, so your memory files, `MEMORY.md` indexes, project `CLAUDE.md`s,
+settings and session transcripts are all already visible to it. This is not
+configured anywhere — it falls out of how the config dir resolves:
+
+```js
+process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude")
+```
+
+Verified rather than assumed, two ways:
+
+- Every child process of this build runs with `HOME=$HOME` and **no**
+  `CLAUDE_CONFIG_DIR` override, so it resolves `$HOME/.claude`.
+- A session created *inside this build* wrote its transcript to
+  `~/.claude/projects/<slug>/<cliSessionId>.jsonl` — the shared location, not
+  anywhere under `user-data/`.
+
+The MCP connectors come along too: a captured request carried all **214** tools,
+Asana/Slack/Notion/calendar servers included (`PROXY_DUMP_TOOLS=1` — see
+`openai-proxy/README.md`).
+
+### Sessions — copied in on every launch
+
+Sessions are the one thing that *isn't* shared, because they live in the profile
+and this build runs on an isolated `--user-data-dir`. So `run.sh` syncs them
+before Electron starts:
+
+```
+~/Library/Application Support/Claude/claude-code-sessions/<user>/<org>/local_*.json
+  ->  user-data/claude-code-sessions/<user>/<org>/
+```
+
+Each `local_<uuid>.json` holds one session's metadata — `sessionId`,
+`cliSessionId`, `cwd`, `title`, `isArchived`, `model`, `effort`,
+`permissionMode`, `enabledMcpTools`. There is **no group field**: the sidebar
+derives grouping from `cwd`, so copying these files brings sessions across with
+their titles *and* their grouping intact.
+
+The copy is `rsync -a --update` with no `--delete`, which makes it one-way and
+additive. Tested by planting two things before a launch and checking both
+survived:
+
+| Planted | After sync |
+|---|---|
+| a session that exists only in this build | kept |
+| a file edited to be *newer* here than the source | edit kept, not overwritten |
+| all 378 Claude Desktop sessions | **0 missing**, 15 build-only sessions retained |
+
+Toggle it in the **`.sync`** dot file (`SYNC_CLAUDE_SESSIONS=0` to launch without
+syncing). If Claude Desktop is running, the launcher warns: a session it happens
+to be writing at that instant can copy incompletely, and relaunching picks up the
+final version.

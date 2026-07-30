@@ -1,0 +1,26 @@
+# Session sync settings for this build (read by run.sh, so it covers run-openai.sh too).
+#
+# SYNC_CLAUDE_SESSIONS=1 -> on every launch, copy Claude Desktop's Claude Code sessions
+# into this build's isolated profile:
+#
+#   ~/Library/Application Support/Claude/claude-code-sessions/<user>/<org>/local_*.json
+#     -> <repo>/user-data/claude-code-sessions/<user>/<org>/
+#
+# Each local_<uuid>.json is one session's metadata — sessionId, cliSessionId, cwd, title,
+# titleSource, isArchived, model, effort, permissionMode, enabledMcpTools, lastActivityAt.
+# There is no group field: the sidebar derives grouping from `cwd`, so copying these files
+# brings the sessions across with their titles AND their grouping intact.
+#
+# The copy is one-way and additive (rsync --update, no --delete): files that are newer in
+# this build are left alone, and sessions created here are never removed. Nothing is
+# written back to Claude Desktop.
+#
+# NOT copied, because it does not need to be: the agent's config and memory are ALREADY
+# shared. Both apps resolve CLAUDE_CONFIG_DIR to $HOME/.claude, so this build reads the
+# same ~/.claude/projects/*/memory/*.md, MEMORY.md, CLAUDE.md, settings and session
+# transcripts. Verified: a session created in this build wrote its transcript to
+# ~/.claude/projects/<slug>/<cliSessionId>.jsonl, and its child processes carry
+# HOME=$HOME with no CLAUDE_CONFIG_DIR override.
+#
+# Set to 0 to launch without syncing.
+SYNC_CLAUDE_SESSIONS=1
