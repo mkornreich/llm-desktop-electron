@@ -135,3 +135,42 @@ Toggle it in the **`.sync`** dot file (`SYNC_CLAUDE_SESSIONS=0` to launch withou
 syncing). If Claude Desktop is running, the launcher warns: a session it happens
 to be writing at that instant can copy incompletely, and relaunching picks up the
 final version.
+
+### Are the migrated sessions grouped correctly?
+
+Grouping has exactly two sources, and neither is extra local state to copy:
+
+- **Server-side.** A group id has the form `sgrp_…` (`/^sgrp_[A-Za-z0-9_-]{1,64}$/`),
+  and in the local bundle it appears *only* in desktop-notification plumbing. The
+  string `sgrp_` occurs **zero** times anywhere in either profile — Local Storage,
+  IndexedDB, Session Storage, the sessions dir. So the web app owns grouping and it
+  follows the account, not the machine.
+- **`cwd` in the session file.** Everything the sidebar can group local sessions by
+  travels inside `local_<uuid>.json`.
+
+Verified by diffing every migrated session against its source on the fields that can
+drive grouping, ordering and labelling — `cwd`, `originCwd`, `title`, `titleSource`,
+`isArchived`, `worktreePath`, `worktreeName`, `branch`, `sourceBranch`, timestamps,
+`model`, `effort`:
+
+```
+migrated sessions checked : 379
+  grouping fields identical: 374
+  missing from build       : 0
+  field drift              : 5   (lastActivityAt / lastFocusedAt only)
+distinct cwd values        : 4   (the repo + 3 worktrees)
+```
+
+The 5 drifted sessions differ **only** in `lastActivityAt`/`lastFocusedAt` — focus
+timestamps, not grouping keys. Two causes, both correct: sessions opened in *this*
+build are newer here and `--update` deliberately keeps them, and sessions Claude
+Desktop touches *after* launch are picked up by the next launch. That is inherent to
+copy-on-open.
+
+One group points at `…/.claude/worktrees/musing-chandrasekhar-f2b1fd`, which no
+longer exists on disk. The real app has the same dangling `cwd`, so both behave the
+same; the sync did not cause it.
+
+`[detectedProjects] done: 0 total projects` in the log is unrelated to session
+grouping — that scan looks for **editor** workspace databases (VS Code, Cursor, Zed)
+and logged `state.vscdb not found`. It feeds the recent-projects feature.
