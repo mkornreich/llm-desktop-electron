@@ -2,6 +2,7 @@
 //   node --test openai-proxy/proxy.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
@@ -388,4 +389,16 @@ test("non-object arguments pass through unharmed", () => {
     const { args } = pruneToolArgs(WORKFLOW_SCHEMA, v);
     assert.deepEqual(args, v);
   }
+});
+
+// ---------- thinking must not starve small-budget calls ----------
+
+test("reasoning is only requested when the token budget can afford it", () => {
+  // Reasoning shares max_output_tokens with the answer. The app's background title call
+  // (max_tokens=64) returned 0 characters four times in a row with reasoning enabled.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /out\.max_output_tokens >= THINKING_MIN_BUDGET/,
+    "the reasoning param must be gated on the requested budget");
+  assert.match(src, /OPENAI_THINKING_MIN_BUDGET/, "the threshold must be configurable");
+  assert.match(src, /retrying without reasoning/, "a starved response must be retried without reasoning");
 });

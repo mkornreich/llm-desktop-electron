@@ -62,6 +62,14 @@ Electron binary doesn't carry (e.g. the VM/"virtualization" features, which the
 app itself reports as unavailable) — will not work here. `--remote-debugging-port`
 is refused by the app's built-in, cryptographically-signed CDP gate.
 
+**Scheduled tasks and wake scheduling do not work**, and the app says so itself:
+`[wake-scheduler] DEV BUILD — daemon registration will fail. The dev Electron bundle
+has no Contents/Library/LaunchDaemons/ plist.` The knock-on is the
+`CCDScheduledTasks_getAllScheduledTasks` handler failing with "Scheduled tasks not
+initialized" (3× per launch). Anything that needs the machine woken on a timer —
+`CronCreate`, `ScheduleWakeup`, scheduled agents — is inert here. Everything
+interactive is unaffected.
+
 ## Run the Claude Code sub-layer on OpenAI (experiment)
 
 ```bash

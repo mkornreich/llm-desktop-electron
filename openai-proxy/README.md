@@ -372,3 +372,25 @@ Truncated arguments are now logged rather than passed off as an empty call:
 ```
 ! Write: arguments look truncated (… chars, no closing brace) — the turn probably hit max_output_tokens
 ```
+
+## Thinking must not eat the answer's budget
+
+Reasoning tokens are drawn from the **same** `max_output_tokens` allowance as the answer,
+so requesting thinking on a small-budget call can consume the whole thing. Found by
+reading the proxy log during a normal session — the app's background title calls
+(`max_tokens=64`, no tools, non-streaming) came back empty four times in a row:
+
+```
+model=claude-sonnet-5->gpt-5.3-codex input=2 stream=false
+  <- status=incomplete/max_output_tokens out_tokens=64 text=0ch -> EMPTY   (×4)
+```
+
+Measured on that call shape: **10** output tokens with no reasoning, 26–64 with it. A
+title gains nothing from thinking, so `reasoning` is now requested only when the budget
+is at least `OPENAI_THINKING_MIN_BUDGET` (default 2000). A starved response above the
+threshold is retried once without reasoning, logged as
+`! empty answer with status=incomplete/max_output_tokens — retrying without reasoning`.
+
+After the fix: budget 64 returns a title in 10 output tokens, and a 16000-budget call
+still shows thinking. This was a regression introduced by the thinking feature itself —
+it only became visible because the turn-end logging reports `status` and `out_tokens`.

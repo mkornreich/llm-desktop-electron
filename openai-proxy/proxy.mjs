@@ -126,6 +126,13 @@ const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENC
 // Completions has no reasoning parameter.
 const SHOW_THINKING = (process.env.OPENAI_SHOW_THINKING || PROJECT.OPENAI_SHOW_THINKING || "1") !== "0";
 const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || PROJECT.OPENAI_REASONING_EFFORT || "medium";
+// Reasoning tokens are drawn from the SAME max_output_tokens budget as the answer, so
+// asking for thinking on a small-budget call can consume the whole allowance and return
+// nothing. Observed in the app: background title calls (max_tokens=64, no tools) came back
+// status=incomplete/max_output_tokens with 0 characters of text, four times in a row. The
+// same call needs ~10 output tokens with no reasoning and ~26-64 with it. Utility calls
+// gain nothing from thinking, so only request it when there is room to spare.
+const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || PROJECT.OPENAI_THINKING_MIN_BUDGET || "2000", 10) || 2000;
 const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
 const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -623,7 +630,9 @@ function toResponses(body, model) {
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
   // Both fields are required for summaries to appear; effort alone or summary alone gives none.
-  if (SHOW_THINKING) out.reasoning = { effort: REASONING_EFFORT, summary: "detailed" };
+  if (SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
+    out.reasoning = { effort: REASONING_EFFORT, summary: "detailed" };
+  }
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
   const nameMap = new Map();
   const schemas = new Map(); // original tool name -> input_schema, for argument pruning
@@ -884,7 +893,19 @@ const server = http.createServer(async (req, res) => {
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
-      { const rj = await upstream.json();
+      { let rj = await upstream.json();
+        // Belt and braces for budgets above the threshold that still get starved.
+        const starved = rj?.status === "incomplete" &&
+          rj?.incomplete_details?.reason === "max_output_tokens" &&
+          !(rj.output || []).some((it) => it.type === "message" && (it.content || []).some((c) => c.text));
+        if (starved && payload.reasoning) {
+          log("  ! empty answer with status=incomplete/max_output_tokens — retrying without reasoning");
+          const { reasoning, ...noThink } = payload;
+          try {
+            const retry = await callResponses(noThink);
+            if (retry.ok) rj = await retry.json();
+          } catch (e) { log(`  ! retry failed: ${e.message}`); }
+        }
         const msg = fromResponses(rj, reqModel, nameMap, schemas);
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
                    msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
