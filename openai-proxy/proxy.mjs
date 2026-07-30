@@ -177,10 +177,13 @@ function buildFormatHint(tools) {
   const r = findRenderTool(tools);
   const bg = findBgTools(tools);
   let picture;
-  if (r) {
-    // Preferred: this draws in the transcript. A written file is only a path, and this
-    // app has no file-sending tool at all, so writing alone shows the user nothing.
-    picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or chart, call \`${r}\` with the SVG/markup so it renders inline in your reply${w ? ` (you may also save a copy with \`${w}\` to a .svg path)` : ""}. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download anything — displaying it is your job, not theirs.`;
+  if (r && w) {
+    // Both, always: the render tool draws in the transcript but is a transient, size-capped
+    // surface, so the file is the durable artifact. Neither substitutes for the other.
+    picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or chart, ALWAYS do both in the same turn: (1) call \`${r}\` with the SVG/markup so it renders inline in your reply, and (2) call \`${w}\` to save the same SVG to a path ending in .svg so it persists as a file. Then state the saved path in one short line. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download anything — displaying and saving it are your job, not theirs.`;
+  } else if (r) {
+    // Draws in the transcript. A written file is only a path, so rendering comes first.
+    picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or chart, call \`${r}\` with the SVG/markup so it renders inline in your reply. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download anything — displaying it is your job, not theirs.`;
   } else if (w && s) {
     // The full path to something the user actually SEES: create the file, then display it.
     picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or SVG, do BOTH of these in the same turn: (1) call \`${w}\` to save it to a path ending in .svg, then (2) call \`${s}\` with that path and display:"render" so it is displayed inline. Step 2 is what the user actually sees — a written file alone only gives them a path to open, which does not satisfy "render". Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download the file — displaying it is your job, not theirs.`;

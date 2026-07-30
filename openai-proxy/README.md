@@ -92,11 +92,18 @@ render. Two fixes, both disabled by `OPENAI_OUTPUT_FIXUPS=0`:
    actually draws in the transcript, and it sits at **index 214 of 214** — precisely
    what the old blind `slice(0, 128)` deleted.
 
-   So the hint prefers, in order: an inline **render** tool (`show_widget`,
-   `Artifact`, `canvas`, …) → **write + send** with `display:"render"` → **write**
-   only → a fenced ` ```svg ` block. It never orders a call to a tool the request
-   doesn't include. With the render tool present, "render a svg picture of a pelican,
-   make it red" now calls `mcp__visualize__show_widget` directly.
+   So the hint resolves, in order: **render + write** (both) → **render** only →
+   **write + send** with `display:"render"` → **write** only → a fenced ` ```svg `
+   block. It never orders a call to a tool the request doesn't include.
+
+   When a render tool *and* a write tool are both present — the normal case in this
+   app — **both are required, not either/or**: `show_widget` draws in the transcript
+   but is a transient, size-capped surface, while the file is the durable artifact,
+   and neither substitutes for the other. Verified over a full agent loop, the
+   pelican prompt now runs
+   `mcp__visualize__show_widget(<svg …>) → Write(/tmp/red_pelican.svg)` and closes
+   with the saved path. The model picks the path; if you want it pinned somewhere
+   specific, say so in the request.
 
 ## Long-running and background work
 

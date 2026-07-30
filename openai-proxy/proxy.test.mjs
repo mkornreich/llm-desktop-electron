@@ -201,12 +201,23 @@ test("findRenderTool finds the app's real inline-render tool", () => {
   assert.equal(findRenderTool([{ name: "Write" }, { name: "Bash" }]), null);
 });
 
-test("a render tool takes priority over writing a file", () => {
+test("render + write: BOTH are required, not either/or", () => {
+  // show_widget draws inline but is transient and size-capped; the file is the durable
+  // artifact. Neither substitutes for the other, so the hint demands both.
   const h = buildFormatHint([{ name: "Write" }, { name: "mcp__visualize__show_widget" }]);
-  assert.match(h, /call `mcp__visualize__show_widget` with the SVG/);
-  assert.match(h, /renders inline/);
-  // Must not fall back to the weaker "just write a file" instruction.
+  assert.match(h, /ALWAYS do both in the same turn/);
+  assert.match(h, /\(1\) call `mcp__visualize__show_widget`/);
+  assert.match(h, /\(2\) call `Write`/);
+  assert.match(h, /ending in \.svg/);
+  assert.match(h, /state the saved path/);
+  // Must not fall back to the weaker write-only instruction.
   assert.ok(!/MUST call the `Write` tool/.test(h));
+});
+
+test("render with no write tool renders only, and demands no file", () => {
+  const h = buildFormatHint([{ name: "mcp__visualize__show_widget" }, { name: "Read" }]);
+  assert.match(h, /call `mcp__visualize__show_widget` with the SVG/);
+  assert.ok(!/ALWAYS do both|\(2\) call/.test(h), "must not demand a write tool that isn't there");
 });
 
 test("background bullet names the retrieval tools that exist", () => {
