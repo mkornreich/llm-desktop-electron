@@ -1,0 +1,16 @@
+# Which model provider backs the app's Claude Code / agent sub-layer.
+# Read by run.sh; override for one launch with  PROVIDER=anthropic ./run.sh
+#
+#   openai     -> route the agent through openai-proxy/proxy.mjs (Anthropic Messages API
+#                 in, OpenAI out). Model and behaviour come from .openai-model.
+#   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude, exactly
+#                 as the shipped app does. The proxy is not started, and the OpenAI-only
+#                 CLAUDE_CODE_* settings from .openai-model are NOT applied — sending an
+#                 OpenAI model id (e.g. gpt-4.1-mini) to Anthropic just errors.
+#
+# Either way the main chat window is the remote claude.ai web app talking to Anthropic;
+# this setting only affects the agent. The bundle patches are env-gated, so in anthropic
+# mode they are inert and no files need reverting.
+#
+# Convenience wrappers: ./run-openai.sh and ./run-anthropic.sh force one mode.
+PROVIDER=openai

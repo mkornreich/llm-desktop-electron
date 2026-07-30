@@ -70,18 +70,35 @@ initialized" (3× per launch). Anything that needs the machine woken on a timer 
 `CronCreate`, `ScheduleWakeup`, scheduled agents — is inert here. Everything
 interactive is unaffected.
 
-## Run the Claude Code sub-layer on OpenAI (experiment)
+## Choose which model backs the agent
 
 ```bash
-./run-openai.sh
+./run-anthropic.sh    # Claude, calling Anthropic directly (stock behaviour)
+./run-openai.sh       # OpenAI, via the local translation proxy
+./run.sh              # whichever the .provider dot file says (default: openai)
 ```
 
-Routes the app's **Claude Code / agent** calls through a local Anthropic→OpenAI
-translation proxy so that sub-layer runs on OpenAI (`gpt-4.1`, key read from
-`~/.dbeaver-ai-complete`). Verified end-to-end with the in-app agent. The main
-chat window is remote claude.ai and is unaffected. See
-[openai-proxy/README.md](openai-proxy/README.md) for scope, limits, and the
-patches involved.
+Both wrappers are one line — the logic lives in `run.sh`, selected by `PROVIDER`
+(`.provider` dot file, or `PROVIDER=anthropic ./run.sh` for a single launch).
+
+| | `anthropic` | `openai` |
+|---|---|---|
+| agent's `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `http://127.0.0.1:8123` |
+| translation proxy | not started | started, health-checked |
+| `.openai-model` `CLAUDE_CODE_*` settings | **not applied** | applied |
+| model | Claude, as shipped | `gpt-5.3-codex` (see `.openai-model`) |
+
+Switching back needs **no un-patching**: every bundle edit is env-gated
+(`PROXY_ANTHROPIC_BASE_URL || <original host>`), so with the variable unset the app
+uses its own Anthropic host. Anthropic mode also actively drops
+`CLAUDE_CODE_BG_CLASSIFIER_MODEL` and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`
+if they are set — they hold OpenAI model ids in `.openai-model`, and sending
+`gpt-4.1-mini` to Anthropic just errors.
+
+Either way this only affects the **agent**. The chat window is the remote claude.ai
+web app talking to Anthropic in both modes. `CLAUDE_CODE_LOCAL_BINARY`, the telemetry
+toggle and the session sync are provider-independent and apply to both. See
+[openai-proxy/README.md](openai-proxy/README.md) for the proxy's scope and limits.
 
 ## Reset
 

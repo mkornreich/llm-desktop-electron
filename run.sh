@@ -38,6 +38,65 @@ if [ ! -x "$HELPERS/disclaimer" ]; then
   chmod +x "$HELPERS/disclaimer"
 fi
 
+# ---------------------------------------------------------------------------------------
+# Provider selection (.provider dot file, or PROVIDER=… for one launch).
+#
+#   openai     -> start the translation proxy and point the agent at it
+#   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
+#
+# Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
+# The bundle patches read PROXY_ANTHROPIC_BASE_URL, so leaving it unset restores the
+# app's own Anthropic host — nothing needs un-patching for anthropic mode.
+PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
+PROVIDER="${PROVIDER:-openai}"
+case "$PROVIDER" in
+  openai|anthropic) ;;
+  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|anthropic)"; exit 1 ;;
+esac
+echo "[run] provider: $PROVIDER"
+
+# The app pins an RC Claude Code build whose download URL is not publicly fetchable, so it
+# reports "binary missing or damaged". Point it at a locally-installed `claude`. This is
+# provider-independent — it is about fetching the binary, not about which model answers.
+if [ -z "${CLAUDE_CODE_LOCAL_BINARY:-}" ]; then
+  CLAUDE_BIN="$(command -v claude || true)"
+  [ -n "$CLAUDE_BIN" ] && export CLAUDE_CODE_LOCAL_BINARY="$CLAUDE_BIN"
+fi
+if [ -n "${CLAUDE_CODE_LOCAL_BINARY:-}" ]; then
+  echo "[run] CLAUDE_CODE_LOCAL_BINARY=${CLAUDE_CODE_LOCAL_BINARY}"
+else
+  echo "[run] WARN: no 'claude' on PATH — the app will try to download its own agent binary"
+fi
+
+if [ "$PROVIDER" = "openai" ]; then
+  PORT="${PORT:-8123}"
+  PROXY_URL="http://127.0.0.1:${PORT}"
+  if ! curl -sf "${PROXY_URL}/health" >/dev/null 2>&1; then
+    echo "[run] starting translation proxy on ${PROXY_URL}"
+    ( cd openai-proxy && PORT="$PORT" nohup node proxy.mjs > proxy.log 2>&1 & disown )
+    for _ in $(seq 1 10); do curl -sf "${PROXY_URL}/health" >/dev/null 2>&1 && break; sleep 1; done
+  fi
+  curl -sf "${PROXY_URL}/health" >/dev/null 2>&1 \
+    && echo "[run] proxy healthy: $(curl -s ${PROXY_URL}/health)" \
+    || { echo "[run] proxy failed to start — see openai-proxy/proxy.log"; exit 1; }
+  export PROXY_ANTHROPIC_BASE_URL="${PROXY_URL}"
+  echo "[run] PROXY_ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
+  # OpenAI-only agent settings (classifier model, gateway model discovery for the picker).
+  while IFS='=' read -r k v; do
+    case "$k" in CLAUDE_CODE_*) export "$k=$v"; echo "[run] $k=$v" ;; esac
+  done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' .openai-model 2>/dev/null)
+else
+  # Leave no trace of OpenAI mode in the environment. Unsetting the base URL is what makes
+  # the env-gated patches fall back to the app's own Anthropic host.
+  unset PROXY_ANTHROPIC_BASE_URL
+  # These carry OpenAI model ids in .openai-model; inherited from a shell they would send
+  # e.g. gpt-4.1-mini to Anthropic and simply error, so drop them in this mode.
+  for v in CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY; do
+    if [ -n "${!v:-}" ]; then echo "[run] unsetting $v (OpenAI-only)"; unset "$v"; fi
+  done
+  echo "[run] agent calls Anthropic directly with Claude (no proxy)"
+fi
+
 # Privacy toggle — read from the .privacy dot file so it applies to BOTH launchers
 # (./run.sh and ./run-openai.sh, which execs this). See .privacy for what each lever
 # does and ANTHROPIC_ENDPOINTS.md for the traffic it suppresses.
