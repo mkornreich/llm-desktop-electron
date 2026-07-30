@@ -1,9 +1,10 @@
 # Notable findings in the bundle
 
-Things worth knowing that are not documented anywhere public, found by reading this
-build. Each entry quotes what it rests on. **Live vs. gated vs. inference is marked** —
-several of these are unreleased plumbing, and it would be wrong to describe them as
-shipping features.
+Things worth knowing, found by reading this build. Each entry quotes what it rests on,
+and **live vs. gated vs. unverified is marked** — some of this is developer-gated or
+unreleased, and describing it as a shipping feature would be wrong. A few items turn out
+to be publicly documented once you know what to search for (Buddy is the clearest case);
+where that is so, it says so and links the source.
 
 ---
 
