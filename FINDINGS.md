@@ -43,22 +43,51 @@ That is prompt-injection defence at exactly the right boundary.
 - Control runs through the macOS Accessibility API — `AXScrollArea`, `AXScrollBar`,
   `AXVerticalScrollBar` — and `ScreenshotForComputerUse`.
 
-## "Buddy" — Bluetooth companion-device pairing *(unreleased plumbing)*
+## "Buddy" — a Bluetooth API for maker hardware *(developer-mode gated, and public)*
 
-Its own IPC namespace (`claude.buddy`), its own window (`buddy.js`, 68 KB), a
-`BuddyBleTransport` service, a `BuddyRemoteFeed`, and this method surface:
+Not a secret, and not unreleased: it is documented in-app and has a published reference
+implementation at **[github.com/anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)**
+(public, C++ firmware, ~2.5k stars). It *is* gated — "The BLE API is only available when
+the desktop app is in developer mode. It's intended for makers and developers and isn't an
+officially supported product feature."
+
+What it does, from the app's own maker guide:
+
+> "Claude for macOS, Windows, and Linux can connect Claude Cowork and Claude Code to maker
+> devices over BLE, so developers can build hardware that displays permission prompts,
+> recent messages, and other interactions."
+
+The wire protocol:
+
+> "Advertise a name starting with `Claude` over the **Nordic UART Service**. Everything on
+> the wire is UTF-8 JSON — one object per line."
+
+That is a *standard* BLE service — `6e400001-b5a3-f393-e0a9-e50e24dcca9e`, with `6e400002`
+and `6e400003` as TX/RX, found in `mainView.js`. Which is why searching for a bespoke
+service UUID turned up nothing.
+
+- **Heartbeat** snapshot whenever something changes, plus a keepalive every 10 s.
+- **Per-turn events** carrying the raw SDK content array — text blocks, tool calls — with
+  anything serializing above 4 KB dropped.
+- **The device can talk back**: "When `prompt` is present, your device can return a
+  response" — hardware can answer Claude's permission requests.
+- The window reports battery percentage, current draw in mA and **heap size in KB**, so the
+  target is a microcontroller.
+- Pairing is a 6-digit passkey shown on the device's screen. Unencrypted connections are
+  allowed but warned about: "other devices close by can easily listen in."
+- Drag-and-drop a folder to upload data to the device — the `install` / `progress` /
+  `pickFolder` methods.
+
+The reference device is **a desk pet that "lives off permission approvals and interaction
+with Claude"**, shipped with firmware, build instructions and a character-pack guide.
+
+IPC surface (`claude.buddy` namespace, own window `buddy.js`, `BuddyBleTransport`,
+`BuddyRemoteFeed`):
 
 ```
 scanDevices  cancelScan  pairDevice  pairingPrompt  submitPin  pickDevice
 forgetDevice  deviceStatus  setName  rx  tx  install  progress  preview  reportState
 ```
-
-`submitPin` is PIN pairing, `rx`/`tx` is a raw data channel, and **`install` +
-`progress`** means provisioning something *onto* the device.
-
-**Not determined:** what the hardware is. The pairing and install plumbing is complete;
-no device identity, BLE service UUID or product name appears in the bundle. Anything
-beyond "it pairs with and installs onto a Bluetooth device" would be speculation.
 
 ## "GrandPrix" — remote device control *(org-gated)*
 

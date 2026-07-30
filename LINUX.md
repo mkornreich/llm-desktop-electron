@@ -37,9 +37,14 @@ The two `maybe`/try-catch loaders are what make this viable: absent native modul
 rather than crash. One exception throws — `openMjpegStream: claude-native encodeFrameJpeg
 unavailable` — but that is computer-use frame streaming, already lost with claude-swift.
 
-**There is no official Linux Claude Desktop build to harvest binaries from.** `claude-native`
-would have to be built from source, which isn't published — so the plan omits it rather than
-pretending it can be sourced.
+**No official Linux Claude Desktop build was available to harvest binaries from** when this
+was written, so the plan omits `claude-native` rather than pretending it can be sourced.
+
+Worth re-checking before starting, though: the app's own Buddy maker guide says *"Claude for
+macOS, **Windows, and Linux** can connect Claude Cowork and Claude Code to maker devices over
+BLE"*. Anthropic's documentation therefore already refers to a Linux desktop app. If one
+ships, its `app.asar.unpacked` would supply Linux-native `claude-native` and `node-pty`
+directly and collapse Phase 1 to almost nothing.
 
 ## 3. The subtle one: the `disclaimer` wrapper
 
