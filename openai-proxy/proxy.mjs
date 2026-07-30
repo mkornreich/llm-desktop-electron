@@ -85,6 +85,16 @@ const ESSENTIAL_TOOL_RE = new RegExp(
   "artifact|.*widget.*|.*visuali[sz]e.*|.*diagram.*|.*mermaid.*|.*chart.*|canvas)",
   "i");
 const isEssentialTool = (n) => ESSENTIAL_TOOL_RE.test(String(n || ""));
+// PROXY_DUMP_TOOLS=1 writes the exact tool list a request carried to tools-dump.txt.
+// The agent's real tool set is otherwise invisible from outside the app.
+const DUMP_TOOLS = process.env.PROXY_DUMP_TOOLS === "1";
+function dumpTools(tools) {
+  if (!DUMP_TOOLS || !Array.isArray(tools)) return;
+  try {
+    fs.writeFileSync(fileURLToPath(new URL("./tools-dump.txt", import.meta.url)),
+      `${tools.length} tools\n` + tools.map((t) => t.name).join("\n") + "\n");
+  } catch { /* diagnostic only */ }
+}
 // Output shaping. The app's chat surface is the REMOTE claude.ai web app — there is no
 // math or markdown renderer in the local bundle to patch — so the only lever is what
 // the model emits. GPT models default to \( \) / \[ \] for math, which that renderer
@@ -128,17 +138,33 @@ function selectTools(tools, limit) {
 const WRITE_TOOL_RE = /^(write|write_file|create_file|fs_write|edit_file|str_replace(_based)?_editor)$/i;
 const findWriteTool = (tools) =>
   (Array.isArray(tools) ? tools.find((t) => WRITE_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
+// Writing a .svg to disk does NOT display it — that only yields a path the user has to
+// open. The harness surfaces a file inline when it is SENT with display:"render", so the
+// hint has to name that tool too or the model stops at "here is the file".
+const SEND_FILE_TOOL_RE = /^(senduserfile|send_user_file|send_file)$/i;
+const findSendFileTool = (tools) =>
+  (Array.isArray(tools) ? tools.find((t) => SEND_FILE_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
 
 // Tell the model the things it cannot infer about this client's renderer.
 function buildFormatHint(tools) {
   const w = findWriteTool(tools);
+  const s = findSendFileTool(tools);
+  let picture;
+  if (w && s) {
+    // The full path to something the user actually SEES: create the file, then display it.
+    picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or SVG, do BOTH of these in the same turn: (1) call \`${w}\` to save it to a path ending in .svg, then (2) call \`${s}\` with that path and display:"render" so it is displayed inline. Step 2 is what the user actually sees — a written file alone only gives them a path to open, which does not satisfy "render". Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download the file — displaying it is your job, not theirs.`;
+  } else if (s) {
+    picture = `- Pictures, diagrams and SVG: produce the .svg file and then call \`${s}\` with display:"render" so it is displayed inline. Do NOT tell the user to open or download it.`;
+  } else if (w) {
+    picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or SVG, you MUST call the \`${w}\` tool to save it to a path ending in .svg, and then reference that path. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to save, copy, or open it themselves — creating the file is your job, not theirs.`;
+  } else {
+    picture = "- Pictures, diagrams and SVG: you have no file tool in this turn, so return the SVG inside a ```svg fenced code block. Do NOT instruct the user to save, copy, or open a file.";
+  }
   return [
     "",
     "## Output formatting for this client",
     "- Math: use $...$ for inline math and $$...$$ for display math. Do NOT use \\( \\) or \\[ \\] — this client renders those literally.",
-    w
-      ? `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or SVG, you MUST call the \`${w}\` tool to save it to a path ending in .svg, and then reference that path. This client renders .svg files as images. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to save, copy, or open it themselves — creating the file is your job, not theirs.`
-      : "- Pictures, diagrams and SVG: you have no file-writing tool in this turn, so return the SVG inside a ```svg fenced code block. Do NOT instruct the user to save, copy, or open a file.",
+    picture,
     "- Carry out requests with the tools available to you instead of describing what the user should do.",
   ].join("\n");
 }
@@ -586,6 +612,7 @@ const server = http.createServer(async (req, res) => {
     const reqModel = body.model || OPENAI_MODEL;
     const model = pickModel(body);                       // main model, fast classifier model, or passthrough
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
+    dumpTools(body.tools);
 
     if (useResp) {
       const { payload, nameMap } = toResponses(body, model);
@@ -622,7 +649,7 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint, findWriteTool };
+export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint, findWriteTool, findSendFileTool };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

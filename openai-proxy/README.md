@@ -72,6 +72,23 @@ render. Two fixes, both disabled by `OPENAI_OUTPUT_FIXUPS=0`:
    tools (including `Write`) available. With the imperative, tool-named form it
    calls `Write(pelican.svg)` and stops telling the user to do its job.
 
+   **Writing the file is only half of it.** With the write-only hint the model
+   produced the file and replied *"I created a red pelican SVG file here:
+   red-pelican.svg — you can open/download that file directly"* — still a path to
+   open, not a picture. A file is *displayed* when it is **sent** with
+   `display:"render"`, so when the request also carries a file-sending tool
+   (`SendUserFile`) the hint demands both steps in the same turn: write the `.svg`,
+   then send it with `display:"render"`. Verified over a full agent loop (feeding
+   each tool result back): the sequence is now
+   `Write(/tmp/red_pelican.svg) → SendUserFile(files=[…], display="render")`.
+
+   The hint adapts to what each request actually carries — write+send, send only,
+   write only, or neither — so it never orders a call to a tool that isn't there.
+   To see the exact tool list a request carried, start the proxy with
+   `PROXY_DUMP_TOOLS=1`; it writes `openai-proxy/tools-dump.txt`. The agent's real
+   tool set is otherwise invisible from outside the app — the `claude` CLI exposes
+   27 tools, the desktop app 214.
+
 Verified end-to-end against the live API: the model returned
 `$$ x=\frac{-b\pm\sqrt{b^2-4ac}}{2a} $$` and inline `$e^{i\pi}+1=0$` with no `\(`
 or `\[`, while a `python` code block kept a literal `\(not math\)` untouched. A

@@ -4,7 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.PROXY_NO_LISTEN = "1";
-const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool } =
+const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
+        findSendFileTool } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -153,9 +154,38 @@ test("hint ORDERS the model to call the write tool by name when one exists", () 
   assert.match(h, /do NOT tell the user to save, copy, or open it themselves/i);
 });
 
-test("hint falls back to a fenced svg block when no write tool is available", () => {
+test("hint falls back to a fenced svg block when no file tool is available", () => {
   const h = buildFormatHint([{ name: "Read" }, { name: "Bash" }]);
   assert.match(h, /```svg/);
   assert.ok(!/MUST call/.test(h), "must not order a tool call that isn't available");
   assert.match(h, /Do NOT instruct the user to save/i);
+});
+
+test("findSendFileTool recognises the file-display tool", () => {
+  assert.equal(findSendFileTool([{ name: "Write" }, { name: "SendUserFile" }]), "SendUserFile");
+  assert.equal(findSendFileTool([{ name: "send_user_file" }]), "send_user_file");
+  assert.equal(findSendFileTool([{ name: "Write" }, { name: "Bash" }]), null);
+  assert.equal(findSendFileTool(null), null);
+});
+
+test("with write AND send tools, the hint demands both steps", () => {
+  // Writing the file only yields a path; the harness displays a file when it is SENT
+  // with display:"render". Missing step 2 is why "render a pelican" produced a link.
+  const h = buildFormatHint([{ name: "Write" }, { name: "SendUserFile" }, { name: "Bash" }]);
+  assert.match(h, /\(1\) call `Write`/);
+  assert.match(h, /\(2\) call `SendUserFile`/);
+  assert.match(h, /display:"render"/);
+  assert.match(h, /do NOT tell the user to open, save or download/i);
+});
+
+test("with only a send tool, the hint still asks for display:render", () => {
+  const h = buildFormatHint([{ name: "SendUserFile" }, { name: "Read" }]);
+  assert.match(h, /`SendUserFile`/);
+  assert.match(h, /display:"render"/);
+});
+
+test("write-only hint does not reference a send tool that isn't there", () => {
+  const h = buildFormatHint([{ name: "Write" }, { name: "Read" }]);
+  assert.match(h, /MUST call the `Write` tool/);
+  assert.ok(!/SendUserFile|display:"render"/.test(h), "must not name an unavailable tool");
 });

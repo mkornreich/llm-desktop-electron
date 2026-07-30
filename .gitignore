@@ -13,3 +13,4 @@ user-data/
 
 # macOS
 .DS_Store
+openai-proxy/tools-dump.txt
