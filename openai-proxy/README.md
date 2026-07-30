@@ -311,9 +311,31 @@ Controlled by `OPENAI_SHOW_THINKING` (default on) and `OPENAI_REASONING_EFFORT`
 (default `medium`). Responses path only — Chat Completions has no reasoning parameter,
 so the chat models in the picker show no thinking.
 
-**What you get is summaries, not chain-of-thought.** OpenAI does not expose raw
-reasoning tokens, so these are terse — often a single bold section header per step
-("**Proving minimal crossings seven**", 35 characters) rather than the running
-commentary Claude shows. Higher effort yields more of them. The thinking text is
-deliberately excluded from the auto-continue check, which looks only at the model's
-spoken text, so thinking can never trigger or suppress a continuation.
+**What you get is summaries, not chain-of-thought — and raising effort does not
+change that.** OpenAI never exposes raw reasoning tokens: *"While reasoning tokens are
+not visible via the API, they still occupy space in the model's context window and are
+billed as output tokens."* Probing the API confirms there is no switch for it —
+`reasoning.summary` accepts only `concise`, `detailed`, `auto` (`'raw'` → 400 listing
+the enum), and the sole reasoning-related `include` value is
+`reasoning.encrypted_content`, which returns a Fernet-style ciphertext
+(`gAAAAA…`, ~1.2 KB, 38% printable when base64-decoded) that only OpenAI can decrypt.
+
+Measured on one hard prompt — effort buys *hidden* reasoning, not visible summary:
+
+| effort | hidden reasoning tokens (billed, unreadable) | visible summary |
+|---|---|---|
+| low | 85 | 36 chars |
+| medium | 98 | 34 chars |
+| high | 207 | 44 chars |
+
+So `OPENAI_REASONING_EFFORT` is a quality/cost knob, **not** a "more thinking shown"
+knob: expect roughly one bold header per step regardless
+("**Proving minimal crossings seven**"). Asking the model to narrate its working in the
+answer instead does not help on `gpt-5.3-codex` — it ignored an explicit "write a
+'## Working' section" instruction *and* returned a 0-char summary for that request.
+For genuine chain-of-thought you need a model whose reasoning is in the output you
+receive, i.e. an open-weights reasoning model you run yourself.
+
+The thinking text is deliberately excluded from the auto-continue check, which looks
+only at the model's spoken text, so thinking can never trigger or suppress a
+continuation.
