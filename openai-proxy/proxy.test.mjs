@@ -7,7 +7,7 @@ import fs from "node:fs";
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
-        buildPersistenceHint, withFormatHint, shouldAutoContinue, pruneToolArgs } =
+        buildPersistenceHint, withFormatHint, shouldAutoContinue, workDoneThisTurn, pruneToolArgs } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -303,6 +303,7 @@ test("auto-continue fires on announcements the model did not act on", () => {
   for (const t of [
     "I'll query Gerrit for your most recently abandoned CLs now and list them newest-first.",
     "I can pull that for you, but I need to query your Gerrit (SSH/REST) first. If you want, I'll run that now",
+    "If you want, I can query Gerrit and list them.",
     "I can check that, but I need one detail to proceed: which Gerrit host/project should I query?",
     "Let me run the tests and report back.",
     // Captured verbatim from a real stall. The model writes a typographic apostrophe
@@ -401,4 +402,50 @@ test("reasoning is only requested when the token budget can afford it", () => {
     "the reasoning param must be gated on the requested budget");
   assert.match(src, /OPENAI_THINKING_MIN_BUDGET/, "the threshold must be configurable");
   assert.match(src, /retrying without reasoning/, "a starved response must be retried without reasoning");
+});
+
+// ---------- finished work + optional offer must NOT be continued ----------
+
+test("a completion report with a suggested follow-up ends the turn", () => {
+  // The model answered the question; the trailing "if you want" is extra work the user
+  // never asked for. Continuing it would invent tasks.
+  for (const t of [
+    "Done — tests pass 44/44. If you want, I can also add coverage for the error path.",
+    "I've committed the fix. Let me know if you'd like me to open a PR.",
+    "Fixed the regex and verified it. Want me to also run the full suite?",
+    "Here are the 3 abandoned CLs: 4589, 4527, 4482. Shall I fetch their diffs too?",
+    "All set. I can additionally wire this into CI if that's useful.",
+    "Rendered the muffin and saved it to muffin.svg. If you want, I can make a blueberry variant.",
+  ]) assert.ok(!shouldAutoContinue(t), `must stop: ${t.slice(0, 62)}`);
+});
+
+test("an offer BEFORE doing the work still continues", () => {
+  // Same grammatical form, opposite meaning: nothing has been done yet.
+  for (const t of [
+    "If you want, I can query Gerrit and list them.",
+    "Shall I go ahead and list your abandoned CLs?",
+  ]) assert.ok(shouldAutoContinue(t), `must continue: ${t.slice(0, 62)}`);
+});
+
+test("a promise of further work continues even after reporting progress", () => {
+  // "done X, now I'll do Y" still owes Y.
+  assert.ok(shouldAutoContinue("I've fixed the parser. Now I'll run the test suite."));
+  assert.ok(shouldAutoContinue("Added the flag. Let me check the other call sites."));
+});
+
+test("tools already used this turn suppresses a bare offer", () => {
+  // workDone=true: the request was likely served, so an offer is follow-up.
+  assert.ok(!shouldAutoContinue("Want me to also update the docs?", true));
+  // ...but an explicit promise of more work still continues.
+  assert.ok(shouldAutoContinue("Now I'll run the tests.", true));
+});
+
+test("workDoneThisTurn detects tool activity since the last real user message", () => {
+  const userMsg = { role: "user", content: [{ type: "input_text", text: "do the thing" }] };
+  assert.equal(workDoneThisTurn([userMsg]), false);
+  assert.equal(workDoneThisTurn([userMsg, { type: "function_call", name: "Bash" },
+                                 { type: "function_call_output", output: "ok" }]), true);
+  // A NEW user message after the tools means a fresh turn with no work done yet.
+  assert.equal(workDoneThisTurn([userMsg, { type: "function_call", name: "Bash" }, userMsg]), false);
+  assert.equal(workDoneThisTurn(null), false);
 });

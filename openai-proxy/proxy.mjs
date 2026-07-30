@@ -138,25 +138,60 @@ const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJE
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
 // a genuine question the user alone can answer ("which of these three do you want?") should
 // still end the turn, so this matches announcements, offers, and "I need X to proceed".
-const UNFULFILLED_RE = new RegExp([
+// Three distinct shapes, because they need opposite treatment.
+// 1. INTENT — the model says it is about to act, and then doesn't. Always continue.
+const INTENT_RE = new RegExp([
   "\\b(i['’]?ll|i will|let me|i['’]?m going to|i am going to|going to)\\b[^.!?]{0,80}\\b(run|query|check|look|search|fetch|pull|list|inspect|read|grep|find|start|do|gather|collect)\\b",
-  "\\b(if you want|shall i|would you like me|let me know|want me to|say the word|i can (run|query|check|pull|list|do) that)\\b",
-  "\\b(i need|need one|need a|need the)\\b[^.!?]{0,60}\\b(detail|value|host|url|path|name|account|project|credential|info|information)\\b",
-  "\\bwhich\\b[^.!?]{0,40}\\b(host|project|repo|repository|account|branch|url)\\b[^.!?]{0,40}\\?",
   "\\b(starting|i['’]?ve started|kicking off)\\b[^.!?]{0,60}\\b(now|in the background)\\b",
 ].join("|"), "i");
-// Overrides the match above. A turn that ends by asking for confirmation of something
-// destructive, or for a decision only the user can make, MUST stay ended — auto-continuing
-// it would answer the question on the user's behalf and then act. Erring toward not
-// continuing is safe: the cost is one "go ahead", which is the behaviour we started from.
+// 2. OFFER — "if you want, I can …". Ambiguous alone: it means "shall I do what you asked?"
+//    BEFORE the work, and "shall I do something extra?" AFTER it. Only the first continues.
+const OFFER_RE = new RegExp([
+  "\\b(if you want|shall i|would you like me|let me know|want me to|say the word|i can (also|additionally))\\b",
+  "\\bi can (run|query|check|pull|list|do) that\\b",
+].join("|"), "i");
+// 3. MISSING DETAIL — asking for a value it could have discovered itself.
+const MISSING_RE = new RegExp([
+  "\\b(i need|need one|need a|need the)\\b[^.!?]{0,60}\\b(detail|value|host|url|path|name|account|project|credential|info|information)\\b",
+  "\\bwhich\\b[^.!?]{0,40}\\b(host|project|repo|repository|account|branch|url)\\b[^.!?]{0,40}\\?",
+].join("|"), "i");
+// Completion signals. When the model reports finished work, a trailing offer is a suggested
+// follow-up the user never asked for — continuing it would invent new work.
+const DONE_RE = new RegExp([
+  "\\b(done|all set|finished|complete[d]?)\\b",
+  "\\bi['’]?ve\\b|\\bi have (fixed|added|created|updated|committed|removed|written|run)\\b",
+  "\\b(fixed|added|created|updated|committed|removed|wrote|ran|verified|renamed|deleted|rendered|saved)\\b",
+  "\\b(here['’]?s|here is|here are|results?:)\\b",
+  "\\b(tests? pass|passing|no changes needed|nothing to do|already (correct|done))\\b",
+].join("|"), "i");
+// Overrides everything: a turn that ends asking to confirm something destructive MUST stay
+// ended. Continuing it would answer the user's question for them and then act.
 const NEEDS_USER_RE = /\b(confirm|are you sure|permanently|irreversibl|destructive|cannot be undone|can['’]?t be undone|before i (proceed|continue)|your (approval|permission)|need your ok|force[- ]?push|rm -rf|drop (table|database))\b/i;
-// Continue only on an unfulfilled announcement that is not a confirmation request.
-const shouldAutoContinue = (text) => {
+
+// Continue only when the model still owes the user work on the CURRENT request.
+// workDone = tools already ran in this turn, so the request has probably been served.
+const shouldAutoContinue = (text, workDone = false) => {
   const t = String(text || "");
   if (!t.trim()) return false;
   if (NEEDS_USER_RE.test(t)) return false;
-  return UNFULFILLED_RE.test(t);
+  if (INTENT_RE.test(t)) return true;            // promised to act, then didn't
+  // Reported finished work, or already used tools this turn, and promised nothing further:
+  // anything it offers now is optional follow-up the user did not ask for. Stop here.
+  if (DONE_RE.test(t) || workDone) return false;
+  return OFFER_RE.test(t) || MISSING_RE.test(t);
 };
+
+// Did this turn already run tools? Walk back to the last real user message (an input_text
+// item, not a tool result) and look for function calls after it.
+function workDoneThisTurn(input) {
+  if (!Array.isArray(input)) return false;
+  for (let i = input.length - 1; i >= 0; i--) {
+    const it = input[i];
+    if (it?.type === "function_call" || it?.type === "function_call_output") return true;
+    if (it?.role === "user" && Array.isArray(it.content) && it.content.some((c) => c?.type === "input_text")) return false;
+  }
+  return false;
+}
 
 const NUDGE = "You ended your turn without calling any tool, but the user's request is not finished — " +
   "the text above only says what you intend to do. Do it now with the tools you have. If you were " +
@@ -306,6 +341,7 @@ function buildPersistenceHint() {
     "",
     "## Working autonomously",
     "- Keep working until the user's request is fully resolved, and only then end your turn. Do not end a turn to ask whether you may take a step you are already able to take.",
+    "- Once the request IS fully answered, stop. You may briefly suggest an optional next step, but do not carry it out unless the user asks — finishing is also part of doing the job well.",
     "- Never reply with an offer to act — \"If you want, I can…\", \"Shall I…\", \"Let me know and I'll…\" — when you have the tools to do it. Do it now, then report what you found. Investigation and read-only steps never need permission.",
     "- When the work has several steps, carry out all of them in order, reporting as you go. Do not stop after the first step to ask for confirmation to continue.",
     "- If something fails, try the alternatives available to you before handing the problem back to the user.",
@@ -814,7 +850,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   // Continue the turn in place when the model only SAID it would act.
   let continued = 0;
   while (AUTO_CONTINUE && allowContinue && payload && !hasTool && !incomplete &&
-         continued < MAX_CONTINUATIONS && shouldAutoContinue(turnText)) {
+         continued < MAX_CONTINUATIONS && shouldAutoContinue(turnText, workDoneThisTurn(payload.input))) {
     continued++;
     log(`  -> auto-continue ${continued}/${MAX_CONTINUATIONS}: announced an action but called no tool; re-prompting`);
     const next = {
@@ -934,7 +970,7 @@ const server = http.createServer(async (req, res) => {
 // this module without binding the port.
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
-         shouldAutoContinue, pruneToolArgs };
+         shouldAutoContinue, workDoneThisTurn, pruneToolArgs };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

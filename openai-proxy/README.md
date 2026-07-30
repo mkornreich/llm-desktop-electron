@@ -267,6 +267,29 @@ match, so "That command would permanently delete the remote branch. Confirm and 
 will run it." stays ended — continuing it would answer the user's question on
 their behalf and then act. Genuine either/or questions are likewise left alone.
 
+**Nor on a suggested follow-up.** "If you want, I can …" means two opposite things
+depending on when it appears: *"shall I do what you asked?"* **before** the work, and
+*"shall I do something extra?"* **after** it. Only the first should continue; continuing
+the second invents tasks the user never asked for. Three patterns are therefore matched
+separately — `INTENT_RE` (promised to act and didn't), `OFFER_RE` (ambiguous), and
+`MISSING_RE` (asking for a discoverable detail) — and resolved against `DONE_RE`
+(completion signals) plus `workDoneThisTurn()`, which walks the input back to the last
+real user message and checks whether any tool calls happened since:
+
+| turn ends with | continues? |
+|---|---|
+| "I'll query Gerrit now." | yes — promised, didn't act |
+| "If you want, I can query Gerrit and list them." | yes — nothing done yet |
+| "Done — tests pass 44/44. If you want, I can also add coverage." | **no** — finished, offer is extra |
+| "I've committed the fix. Let me know if you'd like a PR." | **no** |
+| "I've fixed the parser. Now I'll run the test suite." | yes — still owes the suite |
+| bare offer, tools already ran this turn | **no** |
+
+Verified live: given a tool result and asked how many tests exist, the model answered
+"There are **49 tests**" and made **0** further tool calls. The persistence hint carries
+the matching instruction — finish the request, then stop; suggesting an optional next step
+is fine, carrying it out unasked is not.
+
 Two bugs worth recording, both found only by testing against real output:
 
 - The trigger initially missed every real stall. The model writes **`I’ll`** with a
