@@ -4,16 +4,39 @@ This turns `~/Downloads/app.asar` (the **Claude Desktop** app, `@ant/desktop`
 v1.24012.9 by Anthropic PBC — an Electron Forge + Vite build) into a runnable
 Electron app using a stock Electron runtime.
 
-## Run it
+> **Private by necessity.** `app/` is Anthropic's unpacked proprietary bundle
+> (~40 MB of their JS, native binaries and resources). Keep this repository
+> private — publishing it would be redistributing their software.
+
+## Setup
+
+`node_modules/` is not committed, so a fresh clone needs the Electron runtime
+installed once:
 
 ```bash
-cd ~/Downloads/claude-desktop-electron
+git clone git@github.com:mkornreich/llm-desktop-electron.git
+cd llm-desktop-electron
+npm install            # pulls Electron 43.x — ~200 MB, one time
 ./run.sh
 ```
 
-A window opens and loads the Claude login screen (served from `claude.ai`).
-Sign in there as you would in the desktop app. Quit from the app menu or with
-`Cmd+Q`.
+Everything else self-heals on launch: `run.sh` recreates the `app.asar` symlink and
+the `disclaimer` shim each time, so an `npm install` that wipes `node_modules` costs
+nothing. Requires macOS (see [LINUX.md](LINUX.md)), Node ≥ 22 for the proxy, and — for
+OpenAI mode — an API key in `~/.dbeaver-ai-complete` (never in this repo).
+
+A window opens and loads the Claude login screen from `claude.ai`. Sign in as you
+would in the desktop app. Quit with `Cmd+Q`.
+
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How the app is actually put together: which UI is local vs. remote, the IPC bridge the remote page uses to drive your machine, and which layers can be modified |
+| [ANTHROPIC_ENDPOINTS.md](ANTHROPIC_ENDPOINTS.md) | Every Anthropic endpoint the app calls, with payloads and responses, and what each is for |
+| [FINDINGS.md](FINDINGS.md) | Notable and unreleased features found in the bundle — companion-hardware pairing, remote device control, permission modes, the extension registry |
+| [LINUX.md](LINUX.md) | A phased plan for running this build on Linux, with the native-module and folded-conditional blockers |
+| [openai-proxy/README.md](openai-proxy/README.md) | The Anthropic↔OpenAI proxy: scope, the twelve bundle patches, output shaping, auto-continue, and its 49 tests |
 
 ## How it was assembled
 
@@ -22,7 +45,20 @@ Sign in there as you would in the desktop app. Quit from the app menu or with
 | `app/` | The extracted `app.asar` with the native binaries from `app.asar.unpacked` merged back in at their original relative paths (`@ant/claude-native`, `@ant/claude-swift`, `node-pty`, office365 `msal`). |
 | `node_modules/electron` | Stock **Electron 43.2.0**. The app hard-requires Electron ≥ 34 (`if (electronMajor < 34) throw`); 43 is the line current at this build's date and ships Node 24 (the app needs Node ≥ 22). The native modules are all N-API, so they load across ABI versions. |
 | `user-data/` | An **isolated** profile — this build never *writes* to your real Claude install's data in `~/Library/Application Support/Claude`. It does *read* from it: `run.sh` copies Claude Desktop's sessions in on each launch (see [Sessions and memory](#sessions-and-memory)). |
-| `run.sh` | Launcher: `electron app` with the isolated profile and logging on. |
+| `run.sh` | The one launcher. Self-heals the layout, selects the model provider, applies the telemetry toggle, syncs sessions, then execs Electron. `run-openai.sh` and `run-anthropic.sh` are one-line wrappers over it. |
+| `openai-proxy/` | The Anthropic↔OpenAI translation proxy and its test suite. Only used in OpenAI mode. |
+
+### Configuration — four dot files
+
+All read by `run.sh` at launch; each can be overridden per-launch by an env var of
+the same name. None contains a secret.
+
+| File | Setting | Default | Effect |
+|---|---|---|---|
+| [`.provider`](.provider) | `PROVIDER` | `openai` | `anthropic` = the agent calls Anthropic with Claude; `openai` = via the proxy |
+| [`.openai-model`](.openai-model) | `OPENAI_MODEL` and friends | `gpt-5.3-codex` | Model, classifier model, output shaping, auto-continue, thinking |
+| [`.privacy`](.privacy) | `DISABLE_TELEMETRY` | `1` | Kills first-party telemetry, Sentry, Datadog and the proxied analytics hosts |
+| [`.sync`](.sync) | `SYNC_CLAUDE_SESSIONS` | `1` | Copies Claude Desktop's sessions into this build on every launch |
 
 `run.sh` also (re)creates one symlink:
 `node_modules/electron/dist/Electron.app/Contents/Resources/app.asar → app/`.
