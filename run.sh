@@ -61,7 +61,18 @@ if [ -n "${DISABLE_TELEMETRY_VAL:-}" ] && [ "${DISABLE_TELEMETRY_VAL}" != "0" ];
   #    Datadog intake appears as both "browser-intake-us5-datadoghq.com" and
   #    "logs.browser-intake-us5-datadoghq.com", and "*.datadoghq.com" (literal dot)
   #    or "browser-intake-*" (start-anchored) each miss one form — a verified leak.
-  EXTRA+=(--host-resolver-rules="MAP *datadoghq.com ^NOTFOUND,MAP *datadoghq.eu ^NOTFOUND,MAP *ddog-gov.com ^NOTFOUND,MAP *sentry.io ^NOTFOUND,MAP *segment.com ^NOTFOUND,MAP *segment.io ^NOTFOUND,MAP *google-analytics.com ^NOTFOUND,MAP *googletagmanager.com ^NOTFOUND")
+  #    Three of these are FIRST-PARTY-PROXIED analytics on anthropic.com subdomains,
+  #    which is what defeats a vendor-domain blocklist: the web app loads Segment from
+  #    a-cdn.anthropic.com (not cdn.segment.com) and posts events to a-api.anthropic.com
+  #    (/v1/b batch, /v1/m), so "*segment.com" never matches. s-cdn.anthropic.com serves
+  #    a tracker (/s.js) plus /images/<n>.gif pixel beacons. Verified with --log-net-log.
+  #    These MUST be exact hostnames — a "*anthropic.com" pattern would also kill
+  #    api.anthropic.com (model inference) and assets-proxy.anthropic.com (the web app's
+  #    own JS), breaking the app.
+  #    Deliberately NOT blocked: a.claude.ai/cdn-cgi/challenge-platform (Cloudflare bot
+  #    management, i.e. security infrastructure — blocking it risks challenges/lockout)
+  #    and api.github.com (the app's functional GitHub integration).
+  EXTRA+=(--host-resolver-rules="MAP *datadoghq.com ^NOTFOUND,MAP *datadoghq.eu ^NOTFOUND,MAP *ddog-gov.com ^NOTFOUND,MAP *sentry.io ^NOTFOUND,MAP *segment.com ^NOTFOUND,MAP *segment.io ^NOTFOUND,MAP *google-analytics.com ^NOTFOUND,MAP *googletagmanager.com ^NOTFOUND,MAP s-cdn.anthropic.com ^NOTFOUND,MAP a-cdn.anthropic.com ^NOTFOUND,MAP a-api.anthropic.com ^NOTFOUND")
   echo "[run] telemetry DISABLED via .privacy (app EventLogging/Sentry off; datadog/sentry/segment/ga sinkholed)"
 fi
 

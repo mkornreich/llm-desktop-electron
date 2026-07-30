@@ -23,8 +23,31 @@
 #     from assets-proxy.anthropic.com and consult none of the above, so run.sh
 #     DNS-sinkholes their dedicated hosts via Chromium --host-resolver-rules.
 #
-# Verified with --log-net-log: desktop [EventLogging] flushes 0 (was ~56/90s), app logs
-# "Sentry disabled (disableEssentialTelemetry)", and 0 bytes sent to datadog (66 attempts
-# blocked), sentry (6 blocked), segment/GA/GTM and event_logging (no traffic at all) —
-# while claude.ai app APIs still send normally and the app stays logged in.
+#     A vendor-domain blocklist alone is NOT enough here, because some of this analytics
+#     is FIRST-PARTY PROXIED onto anthropic.com subdomains (found by auditing real
+#     traffic, not the bundle — none of it is called from local code):
+#       s-cdn.anthropic.com  /s.js + /images/<n>.gif?<session,user,…>  tracker + pixels
+#       a-cdn.anthropic.com  /v1/projects/<writeKey>/settings, Amplitude plugin bundles
+#                            — this is Segment's analytics.js, so "*segment.com" MISSES it
+#       a-api.anthropic.com  /v1/b (Segment batch), /v1/m                event ingest
+#     These are sinkholed by EXACT hostname (a "*anthropic.com" pattern would also kill
+#     api.anthropic.com inference and assets-proxy.anthropic.com app code) AND added to
+#     the lever-2 canceller, because DNS blocking does not stop a CACHED script: the
+#     analytics bundles were verified being served from HTTP_CACHE_READ_DATA with zero
+#     network events, whereas webRequest cancellation runs before the cache lookup.
+#
+# NOT blocked, deliberately: a.claude.ai/cdn-cgi/challenge-platform (Cloudflare bot
+# management — security infrastructure; blocking risks challenges/lockout) and
+# api.github.com (the app's functional GitHub integration). Claims that this app calls
+# Intercom, DoubleClick/Google Ads or the Meta Pixel did NOT reproduce: zero requests to
+# any of them across full 90s runs. Any such cookies in the profile came from browsing
+# claude.ai web pages, not from desktop traffic.
+#
+# Verified with --log-net-log over 90s runs: [EventLogging] flushes 0 (was 56), app logs
+# "Sentry disabled (disableEssentialTelemetry)", isolated-segment.html is
+# ERR_BLOCKED_BY_CLIENT, datadog 68 attempts -> ERR_NAME_NOT_RESOLVED / 0 bytes, and
+# s-cdn/a-cdn/a-api/sentry/event_logging at 0 requests and 0 bytes — while
+# api.anthropic.com (1.6MB), assets-proxy (5.4MB), claude.ai app APIs (722KB) and the
+# GitHub integration all still work and the app stays logged in. Control-tested at
+# DISABLE_TELEMETRY=0: telemetry returns.
 DISABLE_TELEMETRY=1

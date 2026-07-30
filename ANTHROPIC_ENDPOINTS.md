@@ -120,7 +120,15 @@ Built-in connectors catalog: M365 (remote + local), Web search (Brave), Box (non
 - `api.anthropic.com` — the "nonessential telemetry" host permitted through the Cowork VM egress allowlist (config, not a request from this code).
 - `a.claude.ai/isolated-segment.html` — Datadog/Segment analytics iframe (observed at runtime; loaded by the **web renderer**, not the bundle).
 
+**First-party-proxied analytics (renderer; found by auditing live traffic — *not* callable from the bundle, so a code-only audit misses them):**
+
+- `GET s-cdn.anthropic.com/s.js` then `GET s-cdn.anthropic.com/images/<n>.gif?…` — tracker script plus **GIF pixel beacons**, query string carrying session/user identifiers.
+- `GET a-cdn.anthropic.com/v1/projects/<writeKey>/settings` + `/next-integrations/actions/amplitude-plugins/*.js` — this is **Segment's `analytics.js`** served from an Anthropic host, so a `*segment.com` blocklist never matches it. Pulls in an Amplitude plugin.
+- `POST a-api.anthropic.com/v1/b` (Segment **batch**), `/v1/m` — the actual event egress.
+
 **Third-party sinks (NOT Anthropic):** Sentry (`o1158394.ingest.us.sentry.io`), Datadog (`browser-intake-*-datadoghq.com`).
+
+**Not telemetry (do not block):** `a.claude.ai/cdn-cgi/challenge-platform/…` is Cloudflare bot management — security infrastructure, and blocking it risks challenges or lockout. `api.github.com` is the functional GitHub integration. Intercom, DoubleClick/Google Ads and the Meta Pixel were **not** observed: zero requests across full 90s desktop runs.
 
 **Used for:** usage analytics, crash/error reporting, optional enterprise OTLP.
 
@@ -133,10 +141,19 @@ Built-in connectors catalog: M365 (remote + local), Web search (Brave), Box (non
 > remote web app's own Datadog/Sentry, which run in the renderer and consult neither.
 > Verified with `--log-net-log`: `[EventLogging]` flushes drop 56→0 per 90s, the app
 > logs `Sentry disabled (disableEssentialTelemetry)`, `isolated-segment.html` is
-> `ERR_BLOCKED_BY_CLIENT`, and 76 Datadog/Sentry attempts resolve to
-> `ERR_NAME_NOT_RESOLVED` with **0 bytes sent** — while the app stays logged in and
-> still loads its org/feature config. Set the flag to `0` to restore stock behavior
-> (control-tested: telemetry returns).
+> `ERR_BLOCKED_BY_CLIENT`, Datadog attempts resolve to `ERR_NAME_NOT_RESOLVED` with
+> **0 bytes sent**, and the first-party-proxied analytics hosts above sit at **0
+> requests / 0 bytes** — while `api.anthropic.com` (1.6 MB), `assets-proxy` (5.4 MB),
+> the `claude.ai` app APIs (722 KB) and the GitHub integration all still work and the
+> app stays logged in. Set the flag to `0` to restore stock behavior (control-tested:
+> telemetry returns).
+>
+> Two traps worth knowing if you extend this. **Exact hostnames** are required for the
+> `*.anthropic.com` analytics hosts — a `*anthropic.com` pattern would also sinkhole
+> `api.anthropic.com` (inference) and `assets-proxy.anthropic.com` (the web app's own
+> JS). And **DNS blocking does not stop cached code**: the Segment/Amplitude bundles
+> were observed loading from `HTTP_CACHE_READ_DATA` with zero network events, which is
+> why those hosts are in the webRequest canceller too — it runs before the cache lookup.
 
 ---
 
