@@ -180,6 +180,33 @@ function toolResultText(blk) {
   return blk.is_error ? `[tool error] ${body}` : body;
 }
 
+// ---- tool-argument pruning ----
+// The model sometimes invents a parameter that belongs to a DIFFERENT tool: it called
+// Workflow with run_in_background (which Agent and Bash have, Workflow does not) and the
+// harness rejected the whole call with InputValidationError. The proxy declared each
+// tool's schema, so it can drop arguments that schema does not allow instead of letting a
+// good call fail. Anything dropped would have been rejected downstream anyway.
+function pruneToolArgs(schema, args) {
+  if (!schema || typeof args !== "object" || args === null || Array.isArray(args)) return { args, dropped: [] };
+  const props = schema.properties;
+  // Only prune when the schema actually enumerates its properties and does not opt into
+  // extras. A schema with additionalProperties:true accepts anything by design.
+  if (!props || typeof props !== "object" || schema.additionalProperties === true) return { args, dropped: [] };
+  const allowed = new Set(Object.keys(props));
+  const out = {}, dropped = [];
+  for (const k of Object.keys(args)) (allowed.has(k) ? (out[k] = args[k]) : dropped.push(k));
+  // Never strip a required key even if the schema is malformed — surface it and let the
+  // harness complain, rather than silently sending an incomplete call.
+  for (const r of schema.required || []) if (r in args && !(r in out)) { out[r] = args[r]; }
+  return { args: out, dropped };
+}
+// Prune by tool name, logging what was removed so it is never silent.
+function pruneByName(schemas, name, args) {
+  const { args: pruned, dropped } = pruneToolArgs(schemas?.get?.(name), args);
+  if (dropped.length) log(`  ! ${name}: dropped ${dropped.length} argument(s) not in its schema: ${dropped.join(", ")}`);
+  return pruned;
+}
+
 // ---- tool selection ----
 // Keep essential tools first, then fill the remaining slots in the agent's original
 // order. Returns what was dropped so it can be logged: a silently truncated tool list
@@ -414,12 +441,14 @@ function toOpenAI(body, model) {
   if (body.top_p != null) out.top_p = body.top_p;
   if (body.stop_sequences?.length) out.stop = body.stop_sequences;
   const nameMap = new Map(); // sanitized -> original, to translate tool_calls back
+  const schemas = new Map(); // original tool name -> input_schema, for argument pruning
   if (body.tools?.length) {
     const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
     if (dropped.length) log(`chat cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}: ${dropped.slice(0, 12).join(", ")}${dropped.length > 12 ? ", …" : ""}`);
     out.tools = tools.map((t) => {
       const name = sanitizeToolName(t.name);
       if (name !== t.name) nameMap.set(name, t.name);
+      schemas.set(t.name, t.input_schema);
       return { type: "function", function: { name, description: t.description, parameters: t.input_schema } };
     });
   }
@@ -430,17 +459,20 @@ function toOpenAI(body, model) {
     else if (tc.type === "tool") out.tool_choice = { type: "function", function: { name: sanitizeToolName(tc.name) } };
   }
   if (out.stream) out.stream_options = { include_usage: true };
-  return { payload: out, nameMap };
+  return { payload: out, nameMap, schemas };
 }
 
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
-function toAnthropic(oai, reqModel, nameMap) {
+function toAnthropic(oai, reqModel, nameMap, schemas) {
   const choice = oai.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
   if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
-    content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name, input: safeParse(tc.function?.arguments || "{}") });
+  {
+    const nm = (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name;
+    content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: nm, input: pruneByName(schemas, nm, safeParse(tc.function?.arguments || "{}")) });
+  }
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel,
     content,
@@ -485,7 +517,7 @@ async function callOpenAI(payload) {
 // ---------- SSE streaming: OpenAI -> Anthropic ----------
 function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); }
 
-async function streamAnthropic(res, upstream, reqModel, nameMap) {
+async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -538,10 +570,12 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
           toolBlocks.set(tc.index, tb);
         }
         if (!tb.started && (tc.id || tc.function?.name)) {
-          sse(res, "content_block_start", { type: "content_block_start", index: tb.aIndex, content_block: { type: "tool_use", id: tc.id || rid("toolu_"), name: (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name || "", input: {} } });
+          tb.toolName = (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name || "";
+          sse(res, "content_block_start", { type: "content_block_start", index: tb.aIndex, content_block: { type: "tool_use", id: tc.id || rid("toolu_"), name: tb.toolName, input: {} } });
           tb.started = true;
         }
-        if (tc.function?.arguments) sse(res, "content_block_delta", { type: "content_block_delta", index: tb.aIndex, delta: { type: "input_json_delta", partial_json: tc.function.arguments } });
+        // Buffer, then prune once complete (see pruneToolArgs).
+        if (tc.function?.arguments) tb.argBuf = (tb.argBuf || "") + tc.function.arguments;
       }
     }
   }
@@ -550,7 +584,12 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
     if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: tail } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: textIndex });
   }
-  for (const tb of toolBlocks.values()) if (tb.started) sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
+  for (const tb of toolBlocks.values()) {
+    if (!tb.started) continue;
+    const pruned = pruneByName(schemas, tb.toolName, safeParse(tb.argBuf || "{}"));
+    sse(res, "content_block_delta", { type: "content_block_delta", index: tb.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
+  }
   sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: { output_tokens: usage?.completion_tokens || 0 } });
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
@@ -587,6 +626,7 @@ function toResponses(body, model) {
   if (SHOW_THINKING) out.reasoning = { effort: REASONING_EFFORT, summary: "detailed" };
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
   const nameMap = new Map();
+  const schemas = new Map(); // original tool name -> input_schema, for argument pruning
   if (body.tools?.length) {
     // No cap on this surface (verified up to 512), so the agent keeps every tool.
     const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_RESPONSES);
@@ -594,6 +634,7 @@ function toResponses(body, model) {
     out.tools = tools.map((t) => { // Responses tools are flat: {type,name,description,parameters}
       const name = sanitizeToolName(t.name);
       if (name !== t.name) nameMap.set(name, t.name);
+      schemas.set(t.name, t.input_schema);
       return { type: "function", name, description: t.description, parameters: t.input_schema };
     });
   }
@@ -604,7 +645,7 @@ function toResponses(body, model) {
     else if (tc.type === "tool") out.tool_choice = { type: "function", name: sanitizeToolName(tc.name) };
   }
   // temperature intentionally omitted — codex/reasoning models only accept the default.
-  return { payload: out, nameMap };
+  return { payload: out, nameMap, schemas };
 }
 
 async function callResponses(payload) {
@@ -633,7 +674,7 @@ function respStopReason(resp, hasTool) {
 }
 
 // Responses (non-streaming) -> Anthropic message
-function fromResponses(resp, reqModel, nameMap) {
+function fromResponses(resp, reqModel, nameMap, schemas) {
   const content = [];
   let hasTool = false;
   for (const item of resp.output || []) {
@@ -641,7 +682,10 @@ function fromResponses(resp, reqModel, nameMap) {
       for (const c of item.content || []) if (c.type === "output_text" && c.text) content.push({ type: "text", text: fixMath(c.text) });
     } else if (item.type === "function_call") {
       hasTool = true;
-      content.push({ type: "tool_use", id: item.call_id || item.id, name: (nameMap && nameMap.get(item.name)) || item.name, input: safeParse(item.arguments || "{}") });
+      {
+        const nm = (nameMap && nameMap.get(item.name)) || item.name;
+        content.push({ type: "tool_use", id: item.call_id || item.id, name: nm, input: pruneByName(schemas, nm, safeParse(item.arguments || "{}")) });
+      }
     } // reasoning items are dropped
   }
   return {
@@ -652,7 +696,7 @@ function fromResponses(resp, reqModel, nameMap) {
 }
 
 // Responses SSE -> Anthropic SSE
-async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false) {
+async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -694,7 +738,12 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
       let j; try { j = JSON.parse(t.slice(5).trim()); } catch { continue; }
       switch (j.type) {
         case "response.output_item.added":
-          if (j.item?.type === "function_call") { hasTool = true; toolCount++; open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: (nameMap && nameMap.get(j.item.name)) || j.item.name || "", input: {} }); }
+          if (j.item?.type === "function_call") {
+            hasTool = true; toolCount++;
+            const nm = (nameMap && nameMap.get(j.item.name)) || j.item.name || "";
+            const it = open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: nm, input: {} });
+            it.toolName = nm; it.argBuf = "";   // buffered so the args can be pruned before the client sees them
+          }
           break;
         // Reasoning summary -> Anthropic thinking block. Deliberately NOT added to
         // turnText: thinking is not a tool call and must not affect the auto-continue
@@ -723,10 +772,25 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
           }
           break;
         case "response.function_call_arguments.delta":
-          { const it = items.get(j.item_id); if (it) sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: j.delta } }); }
+          // Accumulate rather than forward: pruning needs the whole JSON object. Tool
+          // arguments are small, and the client assembles them before executing anyway.
+          { const it = items.get(j.item_id); if (it) it.argBuf = (it.argBuf || "") + (j.delta || ""); }
           break;
         case "response.output_item.done":
-          if (j.item?.id) close(j.item.id);
+          if (j.item?.id) {
+            const it = items.get(j.item.id);
+            if (it && it.argBuf !== undefined) {
+              // A truncated turn can cut a tool call's arguments in half. Say so — an empty
+              // or partial argument object otherwise looks like the model's own choice.
+              if (it.argBuf && !it.argBuf.trim().endsWith("}")) {
+                log(`  ! ${it.toolName}: arguments look truncated (${it.argBuf.length} chars, no closing brace) — the turn probably hit max_output_tokens`);
+              }
+              const pruned = pruneByName(schemas, it.toolName, safeParse(it.argBuf || "{}"));
+              sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
+              it.argBuf = undefined;
+            }
+            close(j.item.id);
+          }
           break;
         case "response.completed": usage = j.response?.usage; break;
         case "response.incomplete": usage = j.response?.usage; incomplete = true; break;
@@ -803,7 +867,7 @@ const server = http.createServer(async (req, res) => {
     dumpTools(body.tools);
 
     if (useResp) {
-      const { payload, nameMap } = toResponses(body, model);
+      const { payload, nameMap, schemas } = toResponses(body, model);
       const hintOn = !isClassifierRequest(body) && (OUTPUT_FIXUPS || PERSISTENCE);
       log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""} hints=${hintOn ? "on" : "off"}`);
       let upstream;
@@ -816,18 +880,18 @@ const server = http.createServer(async (req, res) => {
       }
       if (payload.stream) {
         const mayContinue = !isClassifierRequest(body) && !!payload.tools?.length;
-        try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue); }
+        try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue, schemas); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
       { const rj = await upstream.json();
-        const msg = fromResponses(rj, reqModel, nameMap);
+        const msg = fromResponses(rj, reqModel, nameMap, schemas);
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
                    msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
         return sendJSON(res, 200, msg); }
     }
 
-    const { payload, nameMap } = toOpenAI(body, model);
+    const { payload, nameMap, schemas } = toOpenAI(body, model);
     log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
     let upstream;
     try { upstream = await callOpenAI(payload); }
@@ -837,9 +901,9 @@ const server = http.createServer(async (req, res) => {
       log(`OpenAI ${upstream.status}: ${errTxt.slice(0, 300)}`);
       return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
     }
-    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, nameMap); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, nameMap, schemas); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
-    return sendJSON(res, 200, toAnthropic(oai, reqModel, nameMap));
+    return sendJSON(res, 200, toAnthropic(oai, reqModel, nameMap, schemas));
   }
 
   anthropicError(res, 404, "not_found_error", `no route for ${req.method} ${url}`);
@@ -849,7 +913,7 @@ const server = http.createServer(async (req, res) => {
 // this module without binding the port.
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
-         shouldAutoContinue };
+         shouldAutoContinue, pruneToolArgs };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

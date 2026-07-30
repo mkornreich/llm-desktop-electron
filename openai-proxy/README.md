@@ -339,3 +339,36 @@ receive, i.e. an open-weights reasoning model you run yourself.
 The thinking text is deliberately excluded from the auto-continue check, which looks
 only at the model's spoken text, so thinking can never trigger or suppress a
 continuation.
+
+## Pruning invented tool arguments
+
+Observed: `Workflow` called with `run_in_background` → `InputValidationError: An
+unexpected parameter 'run_in_background' was provided`. That parameter is real, but it
+belongs to `Agent` and `Bash`; `Workflow` has no such field. The model conflated two
+schemas and the harness rejected the whole call.
+
+The proxy declared every tool's schema, so it now prunes arguments that schema does not
+allow before the client sees them — anything dropped would have been rejected downstream
+anyway. It prunes only when the schema actually enumerates `properties` and does not set
+`additionalProperties: true`, never strips a key named in `required` (a malformed schema
+should surface, not be silently patched), and passes non-object arguments through
+untouched. Every drop is logged:
+
+```
+! Workflow: dropped 1 argument(s) not in its schema: run_in_background
+```
+
+This required buffering streamed tool arguments: pruning needs the whole JSON object, so
+`input_json_delta` fragments are accumulated and emitted once, complete, at
+`output_item.done`. Tool arguments are small and the client assembles them before
+executing, so nothing is lost.
+
+**A side effect worth knowing.** Requiring both `show_widget` *and* `Write` makes the
+model emit the same SVG twice, roughly doubling output tokens. With a 3000-token budget
+the muffin request truncated mid-way and `Write` arrived with **no arguments**; at 16000
+both completed (`show_widget` with 2910 chars of SVG, `Write(blueberry_muffin.svg)`).
+Truncated arguments are now logged rather than passed off as an empty call:
+
+```
+! Write: arguments look truncated (… chars, no closing brace) — the turn probably hit max_output_tokens
+```

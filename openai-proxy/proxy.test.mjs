@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
-        buildPersistenceHint, withFormatHint, shouldAutoContinue } =
+        buildPersistenceHint, withFormatHint, shouldAutoContinue, pruneToolArgs } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -335,4 +335,57 @@ test("auto-continue NEVER fires on a confirmation request for something destruct
 test("auto-continue leaves a genuine user-only decision alone", () => {
   assert.ok(!shouldAutoContinue("Which of these two designs do you prefer — the flat one or the nested one?"));
   assert.ok(!shouldAutoContinue("I could not find a Gerrit remote after checking git config, .gitreview and ~/.ssh/config."));
+});
+
+// ---------- tool-argument pruning ----------
+
+const WORKFLOW_SCHEMA = {
+  type: "object",
+  properties: { script: { type: "string" }, scriptPath: { type: "string" }, name: { type: "string" },
+                args: {}, resumeFromRunId: { type: "string" }, title: {}, description: {} },
+};
+
+test("drops an argument that belongs to a different tool", () => {
+  // The real failure: Workflow called with run_in_background, which Agent/Bash have and
+  // Workflow does not, rejected as InputValidationError.
+  const { args, dropped } = pruneToolArgs(WORKFLOW_SCHEMA, { script: "export const meta = {}", run_in_background: true });
+  assert.deepEqual(Object.keys(args), ["script"]);
+  assert.deepEqual(dropped, ["run_in_background"]);
+});
+
+test("leaves a valid call completely untouched", () => {
+  const call = { script: "x", name: "find-flaky", args: [1, 2] };
+  const { args, dropped } = pruneToolArgs(WORKFLOW_SCHEMA, call);
+  assert.deepEqual(args, call);
+  assert.deepEqual(dropped, []);
+});
+
+test("does not prune when the schema opts into extra properties", () => {
+  const schema = { type: "object", properties: { a: {} }, additionalProperties: true };
+  const { args, dropped } = pruneToolArgs(schema, { a: 1, b: 2 });
+  assert.deepEqual(args, { a: 1, b: 2 });
+  assert.deepEqual(dropped, []);
+});
+
+test("does not prune when the schema enumerates nothing", () => {
+  for (const schema of [undefined, null, {}, { type: "object" }]) {
+    const { args, dropped } = pruneToolArgs(schema, { anything: 1 });
+    assert.deepEqual(args, { anything: 1 });
+    assert.deepEqual(dropped, []);
+  }
+});
+
+test("a required key is never stripped, even if properties omit it", () => {
+  // Malformed schema: required names a key that properties doesn't list. Surfacing it and
+  // letting the harness complain beats silently sending an incomplete call.
+  const schema = { type: "object", properties: { a: {} }, required: ["b"] };
+  const { args } = pruneToolArgs(schema, { a: 1, b: 2 });
+  assert.deepEqual(args, { a: 1, b: 2 });
+});
+
+test("non-object arguments pass through unharmed", () => {
+  for (const v of ["str", 5, null, [1, 2]]) {
+    const { args } = pruneToolArgs(WORKFLOW_SCHEMA, v);
+    assert.deepEqual(args, v);
+  }
 });
