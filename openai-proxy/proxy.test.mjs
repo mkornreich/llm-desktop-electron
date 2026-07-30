@@ -4,7 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.PROXY_NO_LISTEN = "1";
-const { makeMathFixer, fixMath, selectTools, isEssentialTool, FORMAT_HINT } = await import("./proxy.mjs");
+const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool } =
+  await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
 
@@ -131,7 +132,30 @@ test("isEssentialTool matches renderers and core tools, not arbitrary vendor too
 
 // ---------- format hint ----------
 
-test("format hint states the two renderer rules", () => {
-  assert.match(FORMAT_HINT, /\$\$\.\.\.\$\$/);
-  assert.match(FORMAT_HINT, /\.svg/);
+test("format hint always states the math rule", () => {
+  for (const tools of [null, [], [{ name: "Write" }]])
+    assert.match(buildFormatHint(tools), /\$\$\.\.\.\$\$/);
+});
+
+test("findWriteTool recognises the common file-writing tool names", () => {
+  assert.equal(findWriteTool([{ name: "Read" }, { name: "Write" }]), "Write");
+  assert.equal(findWriteTool([{ name: "create_file" }]), "create_file");
+  assert.equal(findWriteTool([{ name: "str_replace_based_edit_tool" }]), null);
+  assert.equal(findWriteTool([{ name: "Read" }, { name: "Bash" }]), null);
+  assert.equal(findWriteTool(null), null);
+});
+
+test("hint ORDERS the model to call the write tool by name when one exists", () => {
+  const h = buildFormatHint([{ name: "Read" }, { name: "Write" }]);
+  assert.match(h, /MUST call the `Write` tool/);
+  assert.match(h, /\.svg/);
+  // The failure mode being fixed: telling the user to save the file themselves.
+  assert.match(h, /do NOT tell the user to save, copy, or open it themselves/i);
+});
+
+test("hint falls back to a fenced svg block when no write tool is available", () => {
+  const h = buildFormatHint([{ name: "Read" }, { name: "Bash" }]);
+  assert.match(h, /```svg/);
+  assert.ok(!/MUST call/.test(h), "must not order a tool call that isn't available");
+  assert.match(h, /Do NOT instruct the user to save/i);
 });

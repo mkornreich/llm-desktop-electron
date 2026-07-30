@@ -122,18 +122,31 @@ function selectTools(tools, limit) {
 }
 
 // ---- output shaping ----
-// Tell the model the two things it cannot infer about this client's renderer.
-const FORMAT_HINT = [
-  "",
-  "## Output formatting for this client",
-  "- Math: use $...$ for inline math and $$...$$ for display math. Do NOT use \\( \\) or \\[ \\] — this client renders those literally.",
-  "- SVG and diagrams: write the SVG to a file with a .svg extension and reference that path. This client renders .svg files as images; raw <svg> markup pasted into a reply does not render.",
-  "- Prefer calling the tools available to you over describing what you would do.",
-].join("\n");
+// Names a request's file-writing tool, so the hint can order the model to CALL it by
+// name. A generic "write it to a .svg file" reads as advice, and the model answers with
+// raw markup plus "save this as pelican.svg" — narrating the action instead of doing it.
+const WRITE_TOOL_RE = /^(write|write_file|create_file|fs_write|edit_file|str_replace(_based)?_editor)$/i;
+const findWriteTool = (tools) =>
+  (Array.isArray(tools) ? tools.find((t) => WRITE_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
+
+// Tell the model the things it cannot infer about this client's renderer.
+function buildFormatHint(tools) {
+  const w = findWriteTool(tools);
+  return [
+    "",
+    "## Output formatting for this client",
+    "- Math: use $...$ for inline math and $$...$$ for display math. Do NOT use \\( \\) or \\[ \\] — this client renders those literally.",
+    w
+      ? `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or SVG, you MUST call the \`${w}\` tool to save it to a path ending in .svg, and then reference that path. This client renders .svg files as images. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to save, copy, or open it themselves — creating the file is your job, not theirs.`
+      : "- Pictures, diagrams and SVG: you have no file-writing tool in this turn, so return the SVG inside a ```svg fenced code block. Do NOT instruct the user to save, copy, or open a file.",
+    "- Carry out requests with the tools available to you instead of describing what the user should do.",
+  ].join("\n");
+}
 
 // enable=false for the safety-classifier call: it is a separate LLM with its own
 // expected output shape, and appending presentation rules to its prompt is off-task.
-const withFormatHint = (sys, enable = true) => (OUTPUT_FIXUPS && enable ? `${sys || ""}\n${FORMAT_HINT}` : sys);
+const withFormatHint = (sys, enable = true, tools = null) =>
+  (OUTPUT_FIXUPS && enable ? `${sys || ""}\n${buildFormatHint(tools)}` : sys);
 
 // Rewrite TeX delimiters the renderer doesn't understand into the ones it does.
 // Stateful and streaming-safe: text arrives in arbitrary chunks, so a delimiter or a
@@ -219,7 +232,7 @@ function toOpenAI(body, model) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
       : body.system;
-    if (sys) messages.push({ role: "system", content: withFormatHint(sys, !isClassifierRequest(body)) });
+    if (sys) messages.push({ role: "system", content: withFormatHint(sys, !isClassifierRequest(body), body.tools) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -418,7 +431,7 @@ function toResponses(body, model) {
     }
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
-  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body));
+  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
   const nameMap = new Map();
   if (body.tools?.length) {
     // No cap on this surface (verified up to 512), so the agent keeps every tool.
@@ -609,7 +622,7 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, FORMAT_HINT };
+export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint, findWriteTool };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

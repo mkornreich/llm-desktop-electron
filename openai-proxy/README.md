@@ -55,12 +55,22 @@ render. Two fixes, both disabled by `OPENAI_OUTPUT_FIXUPS=0`:
    runs on streamed deltas as well as whole responses, and is **fence-aware**: it
    never rewrites inside a ` ``` ` block, so code samples (including LaTeX shown
    *as* code) stay verbatim.
-2. **A short format note is appended to the system prompt** telling the model to
-   use `$`/`$$`, and to write SVG to a **`.svg` file** rather than pasting raw
-   `<svg>` markup — the app maps `IMAGE_EXT_TO_MIME ".svg" → "image/svg+xml"` and
-   renders `.svg` files as images, while inline markup in a reply has no
-   renderer. The note is **suppressed for the safety-classifier call**, which has
-   its own expected output shape.
+2. **A short format note is appended to the system prompt**, built per request from
+   the tools that request actually carries. It tells the model to use `$`/`$$`, and
+   — when the request includes a file-writing tool — that it **MUST call that tool
+   by name** to save the image to a `.svg` path. The app maps
+   `IMAGE_EXT_TO_MIME ".svg" → "image/svg+xml"` and renders `.svg` files as images,
+   while inline markup in a reply has no renderer. If no write tool is present, the
+   note asks for a fenced ` ```svg ` block instead — never ordering a tool call that
+   isn't available. The note is **suppressed for the safety-classifier call**, which
+   has its own expected output shape.
+
+   Naming the tool is what makes this work. A generic *"write the SVG to a .svg
+   file"* reads as advice, and `gpt-5.3-codex` answered "render a svg picture of a
+   pelican" with raw markup plus *"Save this as `pelican.svg` and open it in a
+   browser"* — narrating the action instead of performing it, even with all 214
+   tools (including `Write`) available. With the imperative, tool-named form it
+   calls `Write(pelican.svg)` and stops telling the user to do its job.
 
 Verified end-to-end against the live API: the model returned
 `$$ x=\frac{-b\pm\sqrt{b^2-4ac}}{2a} $$` and inline `$e^{i\pi}+1=0$` with no `\(`
