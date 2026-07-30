@@ -28,3 +28,7 @@ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 # rewrites \(..\)/\[..\] math into $..$/$$..$$ and tells the model to write SVG to
 # .svg files. Set to 0 to send the model's output through untouched.
 OPENAI_OUTPUT_FIXUPS=1
+# Agentic persistence: tells the model to finish the task rather than ending its turn to
+# ask "shall I continue?". Auto mode grants permission to run tools but cannot make a
+# model decide to keep going. Set to 0 to disable independently of OPENAI_OUTPUT_FIXUPS.
+OPENAI_PERSISTENCE=1

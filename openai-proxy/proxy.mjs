@@ -102,6 +102,13 @@ function dumpTools(tools) {
 // IMAGE_EXT_TO_MIME ".svg" -> "image/svg+xml"), while inline <svg> markup in chat text
 // does not. Set OPENAI_OUTPUT_FIXUPS=0 to disable both.
 const OUTPUT_FIXUPS = (process.env.OPENAI_OUTPUT_FIXUPS || PROJECT.OPENAI_OUTPUT_FIXUPS || "1") !== "0";
+// Agentic persistence. Claude Code's auto mode grants PERMISSION to run tools; it cannot
+// make a model decide to keep going. Claude is trained to run a task to completion, while
+// GPT models routinely end the turn to check in ("If you want, I'll run that now") — which
+// in an agent loop reads as the task stalling and forces the user to say "yes, continue"
+// every step. This adds an explicit persistence directive. Set OPENAI_PERSISTENCE=0 to
+// disable it independently of the output fixups.
+const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENCE || "1") !== "0";
 const DEFAULT_TEMP = FILE.temperature != null ? parseFloat(FILE.temperature) : undefined;
 const PORT = parseInt(process.env.PORT || "8123", 10);
 
@@ -210,10 +217,30 @@ function buildFormatHint(tools) {
   ].join("\n");
 }
 
+// Run the task to completion instead of stopping to ask whether to continue. The carve-out
+// matters as much as the directive: this must not talk the model out of pausing for things
+// that genuinely need a human — destructive or outward-facing actions, real ambiguity.
+function buildPersistenceHint() {
+  return [
+    "",
+    "## Working autonomously",
+    "- Keep working until the user's request is fully resolved, and only then end your turn. Do not end a turn to ask whether you may take a step you are already able to take.",
+    "- Never reply with an offer to act — \"If you want, I can…\", \"Shall I…\", \"Let me know and I'll…\" — when you have the tools to do it. Do it now, then report what you found. Investigation and read-only steps never need permission.",
+    "- When the work has several steps, carry out all of them in order, reporting as you go. Do not stop after the first step to ask for confirmation to continue.",
+    "- If something fails, try the alternatives available to you before handing the problem back to the user.",
+    "- Do stop and ask when the next action is destructive, irreversible, or sends something outward; when you need a credential or a decision only the user can make; or when the request is genuinely ambiguous in a way that changes what you would build. In those cases state exactly what you need and why.",
+  ].join("\n");
+}
+
 // enable=false for the safety-classifier call: it is a separate LLM with its own
-// expected output shape, and appending presentation rules to its prompt is off-task.
-const withFormatHint = (sys, enable = true, tools = null) =>
-  (OUTPUT_FIXUPS && enable ? `${sys || ""}\n${buildFormatHint(tools)}` : sys);
+// expected output shape, and appending these rules to its prompt is off-task.
+const withFormatHint = (sys, enable = true, tools = null) => {
+  if (!enable) return sys;
+  const parts = [];
+  if (OUTPUT_FIXUPS) parts.push(buildFormatHint(tools));
+  if (PERSISTENCE) parts.push(buildPersistenceHint());
+  return parts.length ? `${sys || ""}\n${parts.join("\n")}` : sys;
+};
 
 // Rewrite TeX delimiters the renderer doesn't understand into the ones it does.
 // Stateful and streaming-safe: text arrives in arbitrary chunks, so a delimiter or a
@@ -698,7 +725,7 @@ const server = http.createServer(async (req, res) => {
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
-         findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText };
+         buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

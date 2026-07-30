@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
-        findSendFileTool, findRenderTool, findBgTools, toolResultText } =
+        findSendFileTool, findRenderTool, findBgTools, toolResultText,
+        buildPersistenceHint, withFormatHint } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -259,4 +260,37 @@ test("empty and null tool_result content do not throw", () => {
   assert.equal(toolResultText({ content: null }), "");
   assert.equal(toolResultText({}), "");
   assert.equal(toolResultText({ content: [] }), "");
+});
+
+// ---------- agentic persistence ----------
+
+test("persistence hint forbids offering instead of acting", () => {
+  const h = buildPersistenceHint();
+  // The exact shape observed: "If you want, I'll run that now and return a clean list".
+  assert.match(h, /Never reply with an offer to act/i);
+  assert.match(h, /If you want, I can/);
+  assert.match(h, /Shall I/);
+  assert.match(h, /Investigation and read-only steps never need permission/i);
+  assert.match(h, /carry out all of them in order/i);
+});
+
+test("persistence hint keeps the carve-out for actions that need a human", () => {
+  // This must not talk the model out of pausing where pausing is correct.
+  const h = buildPersistenceHint();
+  assert.match(h, /destructive, irreversible, or sends something outward/i);
+  assert.match(h, /credential or a decision only the user can make/i);
+  assert.match(h, /genuinely ambiguous/i);
+});
+
+test("persistence and output fixups are independent sections", () => {
+  // Both default on, so a request's system prompt carries both, and neither depends on
+  // the other being enabled.
+  const sys = withFormatHint("BASE", true, [{ name: "Write" }, { name: "TaskOutput" }]);
+  assert.match(sys, /^BASE/);
+  assert.match(sys, /## Output formatting for this client/);
+  assert.match(sys, /## Working autonomously/);
+});
+
+test("the classifier call gets neither section", () => {
+  assert.equal(withFormatHint("BASE", false, [{ name: "Write" }]), "BASE");
 });
