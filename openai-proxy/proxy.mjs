@@ -117,6 +117,15 @@ const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENC
 // continues that turn itself: it feeds the model its own announcement plus a nudge and
 // splices the result into the SAME assistant message, so the client sees one turn that
 // actually contains the tool call. Bounded, logged, and skipped for the classifier.
+// Show the model's thinking. The Responses API emits reasoning SUMMARIES (section
+// headers and short rationales, not raw chain-of-thought) — but only when `summary` AND an
+// explicit `effort` are both set. Probed: {summary:"detailed"} alone yields nothing, while
+// effort low/medium/high with summary:"detailed" all produce
+// response.reasoning_summary_text.delta events. These are mapped to Anthropic `thinking`
+// content blocks, which the client renders as thinking. Responses path only — Chat
+// Completions has no reasoning parameter.
+const SHOW_THINKING = (process.env.OPENAI_SHOW_THINKING || PROJECT.OPENAI_SHOW_THINKING || "1") !== "0";
+const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || PROJECT.OPENAI_REASONING_EFFORT || "medium";
 const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
 const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -574,6 +583,8 @@ function toResponses(body, model) {
     }
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
+  // Both fields are required for summaries to appear; effort alone or summary alone gives none.
+  if (SHOW_THINKING) out.reasoning = { effort: REASONING_EFFORT, summary: "detailed" };
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
   const nameMap = new Map();
   if (body.tools?.length) {
@@ -648,7 +659,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   sse(res, "ping", { type: "ping" });
   const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
-  let toolCount = 0, textLen = 0;   // for the turn-end diagnostic
+  let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic
   const open = (itemId, cb) => {
     let it = items.get(itemId);
     if (!it) { it = { aIndex: nextIndex++, opened: false, closed: false }; items.set(itemId, it); }
@@ -684,6 +695,22 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
       switch (j.type) {
         case "response.output_item.added":
           if (j.item?.type === "function_call") { hasTool = true; toolCount++; open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: (nameMap && nameMap.get(j.item.name)) || j.item.name || "", input: {} }); }
+          break;
+        // Reasoning summary -> Anthropic thinking block. Deliberately NOT added to
+        // turnText: thinking is not a tool call and must not affect the auto-continue
+        // decision, which looks only at the model's spoken text.
+        case "response.reasoning_summary_part.added":
+          if (SHOW_THINKING && j.item_id) open(j.item_id, { type: "thinking", thinking: "" });
+          break;
+        case "response.reasoning_summary_text.delta":
+          if (SHOW_THINKING && j.delta) {
+            const it = open(j.item_id, { type: "thinking", thinking: "" });
+            thinkLen += String(j.delta).length;
+            sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "thinking_delta", thinking: j.delta } });
+          }
+          break;
+        case "response.reasoning_summary_part.done":
+          if (j.item_id) close(j.item_id);
           break;
         case "response.output_text.delta":
           {
@@ -731,7 +758,8 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   }
 
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
-  log(`  <- responses stream stop_reason=${stop} out_tokens=${usage?.output_tokens ?? "?"} text=${textLen}ch -> ` +
+  log(`  <- responses stream stop_reason=${stop} out_tokens=${usage?.output_tokens ?? "?"} text=${textLen}ch` +
+      (thinkLen ? ` thinking=${thinkLen}ch` : "") + ` -> ` +
       (toolCount ? `${toolCount} tool call(s)` :
        stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :
        textLen ? "TEXT ONLY, no tool call — turn ends here and the agent waits for the user" : "EMPTY response"));

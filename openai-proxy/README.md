@@ -291,3 +291,29 @@ what made the stall diagnosable at all:
 `stop_reason` distinguishes the three failure modes that look identical from the
 outside: the model ending its turn, hitting the output cap mid-turn, and an empty
 response.
+
+## Showing the model's thinking
+
+The Responses API can emit **reasoning summaries**, which the proxy maps to Anthropic
+`thinking` content blocks so the client renders them as thinking:
+
+```
+content blocks : thinking, text
+thinking block : "**Proving minimal crossings seven**"
+```
+
+The trigger is non-obvious. `{summary:"detailed"}` **alone produces nothing** — an
+explicit `effort` must be sent alongside it. With that, low, medium and high all emit
+`response.reasoning_summary_text.delta`. (An earlier probe here concluded no reasoning
+stream existed; it had used `summary:"auto"` with no `effort`, which is silent.)
+
+Controlled by `OPENAI_SHOW_THINKING` (default on) and `OPENAI_REASONING_EFFORT`
+(default `medium`). Responses path only — Chat Completions has no reasoning parameter,
+so the chat models in the picker show no thinking.
+
+**What you get is summaries, not chain-of-thought.** OpenAI does not expose raw
+reasoning tokens, so these are terse — often a single bold section header per step
+("**Proving minimal crossings seven**", 35 characters) rather than the running
+commentary Claude shows. Higher effort yields more of them. The thinking text is
+deliberately excluded from the auto-continue check, which looks only at the model's
+spoken text, so thinking can never trigger or suppress a continuation.

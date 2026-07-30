@@ -38,3 +38,9 @@ OPENAI_PERSISTENCE=1
 # confirmation requests for destructive actions, or for the safety classifier.
 OPENAI_AUTO_CONTINUE=1
 OPENAI_MAX_CONTINUATIONS=2
+# Show the model's thinking. The Responses API only emits reasoning SUMMARIES, and only
+# when BOTH summary and an explicit effort are sent — these become Anthropic `thinking`
+# blocks. Raise effort for longer/deeper summaries (low|medium|high); it also affects
+# latency and cost. OPENAI_SHOW_THINKING=0 turns it off.
+OPENAI_SHOW_THINKING=1
+OPENAI_REASONING_EFFORT=medium
