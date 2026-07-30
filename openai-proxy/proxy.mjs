@@ -206,6 +206,41 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// ---------- usage accounting ----------
+// OpenAI has no token quota to report and this project key cannot read the org usage API
+// (403, missing scope api.usage.read), so the only way to answer "how many tokens have I
+// used" for this app is to count them here. Persisted, because the proxy restarts on every
+// app launch. GET /usage returns the totals.
+const USAGE_FILE = fileURLToPath(new URL("./usage.json", import.meta.url));
+let usageState = { since: null, byModel: {} };
+try { usageState = JSON.parse(fs.readFileSync(USAGE_FILE, "utf8")); } catch { /* first run */ }
+if (!usageState.byModel) usageState = { since: null, byModel: {} };
+let usageDirty = false, usageTimer = null;
+function recordUsage(model, inTok, outTok, reasoningTok = 0) {
+  if (!model) return;
+  if (!usageState.since) usageState.since = new Date().toISOString();
+  const m = (usageState.byModel[model] ||= { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 });
+  m.requests += 1;
+  m.input_tokens += inTok || 0;
+  m.output_tokens += outTok || 0;
+  m.reasoning_tokens += reasoningTok || 0;
+  usageDirty = true;
+  // Debounced: a busy agent turn would otherwise rewrite this file dozens of times.
+  if (!usageTimer) usageTimer = setTimeout(() => {
+    usageTimer = null;
+    if (!usageDirty) return;
+    usageDirty = false;
+    try { fs.writeFileSync(USAGE_FILE, JSON.stringify(usageState, null, 2)); } catch { /* non-fatal */ }
+  }, 3000);
+}
+function usageSummary() {
+  const totals = { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+  for (const m of Object.values(usageState.byModel)) for (const k of Object.keys(totals)) totals[k] += m[k] || 0;
+  return { since: usageState.since, total: { ...totals, tokens: totals.input_tokens + totals.output_tokens },
+           by_model: usageState.byModel,
+           note: "Counted by this proxy only. OpenAI has no token allowance to report; the account limit is per-minute (see x-ratelimit-* headers) plus dollar billing. This key cannot read the org usage API." };
+}
+
 // ---------- helpers ----------
 const rid = (p) => p + crypto.randomBytes(16).toString("hex");
 const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
@@ -633,6 +668,7 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null)
     sse(res, "content_block_delta", { type: "content_block_delta", index: tb.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
   }
+  recordUsage(reqModel, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens);
   sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: { output_tokens: usage?.completion_tokens || 0 } });
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
@@ -866,6 +902,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     await consume(up);
   }
 
+  recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
   log(`  <- responses stream stop_reason=${stop} out_tokens=${usage?.output_tokens ?? "?"} text=${textLen}ch` +
       (thinkLen ? ` thinking=${thinkLen}ch` : "") + ` -> ` +
@@ -888,6 +925,8 @@ const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
   if (req.method === "GET" && (url === "/" || url === "/health"))
     return sendJSON(res, 200, { ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL, api: OPENAI_API, classifier_model: OPENAI_CLASSIFIER_MODEL || null });
+
+  if (req.method === "GET" && url === "/usage") return sendJSON(res, 200, usageSummary());
 
   if (req.method === "POST" && url === "/v1/messages/count_tokens") {
     const body = safeParse(await readBody(req));
@@ -942,6 +981,7 @@ const server = http.createServer(async (req, res) => {
             if (retry.ok) rj = await retry.json();
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
         }
+        recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens);
         const msg = fromResponses(rj, reqModel, nameMap, schemas);
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
                    msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
@@ -960,6 +1000,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, nameMap, schemas); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
+    recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
+                oai?.usage?.completion_tokens_details?.reasoning_tokens);
     return sendJSON(res, 200, toAnthropic(oai, reqModel, nameMap, schemas));
   }
 

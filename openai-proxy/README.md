@@ -417,3 +417,45 @@ threshold is retried once without reasoning, logged as
 After the fix: budget 64 returns a title in 10 output tokens, and a 16000-budget call
 still shows thinking. This was a regression introduced by the thinking feature itself —
 it only became visible because the turn-end logging reports `status` and `out_tokens`.
+
+## Token limits and usage
+
+There is **no token allowance** on an OpenAI key, so "how many tokens do I have left" has
+no answer — billing is in dollars and the enforced ceiling is per-minute. What the key
+does report, in the response headers of any call:
+
+```
+x-ratelimit-limit-tokens        40000000     (40M tokens/minute)
+x-ratelimit-limit-requests      15000        (15k requests/minute)
+x-ratelimit-remaining-tokens    40000000
+x-ratelimit-reset-tokens        0s
+openai-organization             invoice-butler
+```
+
+Cumulative spend is **not** readable with this key. It is a project key (`sk-proj-…`), and
+every usage or billing endpoint refuses it:
+
+| endpoint | result |
+|---|---|
+| `/v1/organization/usage/completions` | 403 — missing scope `api.usage.read` |
+| `/v1/organization/costs` | 403 — missing scope `api.usage.read` |
+| `/v1/organization/projects` | 403 — missing scope `api.management.read` |
+| `/dashboard/billing/usage` | 403 — browser session key only |
+| `/dashboard/billing/credit_grants` | 403 — browser session key only |
+
+For org-wide totals you need either an **admin key** (`sk-admin-…`) with `api.usage.read`,
+or the dashboard at platform.openai.com/usage.
+
+So the proxy counts its own traffic instead, which is the number that actually matters for
+this app. `GET /usage`:
+
+```json
+{ "since": "2026-07-30T05:01:02Z",
+  "total": { "requests": 3, "input_tokens": 26, "output_tokens": 22, "reasoning_tokens": 0, "tokens": 48 },
+  "by_model": { "gpt-5.3-codex": { "requests": 2, … }, "gpt-5.4": { "requests": 1, … } } }
+```
+
+Counted on all four paths (chat and Responses, streaming and not) and persisted to
+`openai-proxy/usage.json` (gitignored), since the proxy restarts on every app launch.
+`reasoning_tokens` is tracked separately — those are billed as output but never shown,
+which is what made the small-budget starvation above possible.
