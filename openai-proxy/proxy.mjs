@@ -62,10 +62,36 @@ const DEFAULT_MAX_TOKENS = parseInt(FILE.maxTokens || "1024", 10) || 1024;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
 // 64k; clamp so agents that request Claude-sized budgets don't 400.
 const MAX_OUTPUT_TOKENS = parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS || "32768", 10) || 32768;
-// OpenAI chat/completions caps the tools array at 128 (all models) and requires
-// function names to match ^[a-zA-Z0-9_-]{1,64}$. Claude Code + desktop MCP can
-// send 200+ tools with names the API rejects, so we cap and sanitize.
-const MAX_TOOLS = parseInt(process.env.OPENAI_MAX_TOOLS || "128", 10) || 128;
+// Tool-array caps are PER API SURFACE, not global — probed directly against the API:
+//   Chat Completions: hard cap 128 (129 -> 400 "array too long").
+//   Responses:        no cap observed (128/129/214/256/512 all accepted).
+// The desktop agent sends ~214 tools, so on the Responses path we now send ALL of
+// them and the model never loses a tool it needs. Only the chat path must clamp.
+// Names must still match ^[a-zA-Z0-9_-]{1,64}$, so they are always sanitized.
+const MAX_TOOLS_CHAT = parseInt(process.env.OPENAI_MAX_TOOLS || "128", 10) || 128;
+const MAX_TOOLS_RESPONSES = parseInt(process.env.OPENAI_MAX_TOOLS_RESPONSES || "0", 10) || Infinity;
+// When the chat path MUST drop tools, drop the least essential ones rather than
+// whichever happened to be last in the array. These are the tools an agent needs to
+// actually finish work (read/write/run/search/plan) plus the ones that make output
+// render (artifacts/widgets/diagrams) — losing those is what makes a model narrate a
+// task instead of doing it, or dump raw markup instead of a rendered artifact.
+const ESSENTIAL_TOOL_RE = new RegExp(
+  "^(read|write|edit|multiedit|notebookedit|create_file|str_replace|" +
+  "bash|bashoutput|killbash|killshell|run_command|shell|" +
+  "glob|grep|ls|list_dir|search|find|" +
+  "task|todowrite|exitplanmode|enterplanmode|plan|" +
+  "webfetch|websearch|fetch|" +
+  "skill|toolsearch|senduserfile|sendmessage|" +
+  "artifact|.*widget.*|.*visuali[sz]e.*|.*diagram.*|.*mermaid.*|.*chart.*|canvas)",
+  "i");
+const isEssentialTool = (n) => ESSENTIAL_TOOL_RE.test(String(n || ""));
+// Output shaping. The app's chat surface is the REMOTE claude.ai web app — there is no
+// math or markdown renderer in the local bundle to patch — so the only lever is what
+// the model emits. GPT models default to \( \) / \[ \] for math, which that renderer
+// shows literally; it wants $ / $$. And .svg FILES render as images (the bundle maps
+// IMAGE_EXT_TO_MIME ".svg" -> "image/svg+xml"), while inline <svg> markup in chat text
+// does not. Set OPENAI_OUTPUT_FIXUPS=0 to disable both.
+const OUTPUT_FIXUPS = (process.env.OPENAI_OUTPUT_FIXUPS || PROJECT.OPENAI_OUTPUT_FIXUPS || "1") !== "0";
 const DEFAULT_TEMP = FILE.temperature != null ? parseFloat(FILE.temperature) : undefined;
 const PORT = parseInt(process.env.PORT || "8123", 10);
 
@@ -79,6 +105,86 @@ const rid = (p) => p + crypto.randomBytes(16).toString("hex");
 const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 const log = (...a) => console.log("[proxy]", ...a);
 const sanitizeToolName = (n) => String(n || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
+
+// ---- tool selection ----
+// Keep essential tools first, then fill the remaining slots in the agent's original
+// order. Returns what was dropped so it can be logged: a silently truncated tool list
+// looks exactly like a model that "chose" not to use a tool.
+function selectTools(tools, limit) {
+  if (!Array.isArray(tools)) return { tools: [], dropped: [] };
+  if (tools.length <= limit) return { tools, dropped: [] };
+  const keep = [], rest = [];
+  for (const t of tools) (isEssentialTool(t.name) ? keep : rest).push(t);
+  const out = keep.slice(0, limit);
+  for (const t of rest) { if (out.length >= limit) break; out.push(t); }
+  const kept = new Set(out);
+  return { tools: out, dropped: tools.filter((t) => !kept.has(t)).map((t) => t.name) };
+}
+
+// ---- output shaping ----
+// Tell the model the two things it cannot infer about this client's renderer.
+const FORMAT_HINT = [
+  "",
+  "## Output formatting for this client",
+  "- Math: use $...$ for inline math and $$...$$ for display math. Do NOT use \\( \\) or \\[ \\] — this client renders those literally.",
+  "- SVG and diagrams: write the SVG to a file with a .svg extension and reference that path. This client renders .svg files as images; raw <svg> markup pasted into a reply does not render.",
+  "- Prefer calling the tools available to you over describing what you would do.",
+].join("\n");
+
+// enable=false for the safety-classifier call: it is a separate LLM with its own
+// expected output shape, and appending presentation rules to its prompt is off-task.
+const withFormatHint = (sys, enable = true) => (OUTPUT_FIXUPS && enable ? `${sys || ""}\n${FORMAT_HINT}` : sys);
+
+// Rewrite TeX delimiters the renderer doesn't understand into the ones it does.
+// Stateful and streaming-safe: text arrives in arbitrary chunks, so a delimiter or a
+// ``` fence can straddle a chunk boundary. Never rewrites inside a fenced code block,
+// which would corrupt code samples (and LaTeX shown *as* code).
+function makeMathFixer() {
+  let carry = "";        // trailing bytes that might start a fence/delimiter
+  let inFence = false;
+  // Replacer FUNCTIONS, not strings: "$$" in a replacement string means a literal
+  // single "$", which would silently turn display math into inline math.
+  const rewrite = (s) => s
+    .replace(/\\[[\]]/g, () => "$$")
+    .replace(/\\[()]/g, () => "$");
+  function process(text, final) {
+    let s = carry + text;
+    carry = "";
+    let out = "";
+    for (;;) {
+      const i = s.indexOf("```");
+      if (i !== -1) {
+        // Consume complete fences FIRST. Holding a tail back before this would split a
+        // chunk that ends in exactly ``` (keeping 2 backticks, emitting 1), so the fence
+        // would never be recognised and the in/out-of-code state would invert.
+        const seg = s.slice(0, i);
+        out += (inFence ? seg : rewrite(seg)) + "```";
+        inFence = !inFence;
+        s = s.slice(i + 3);
+        continue;
+      }
+      // No complete fence remains. Hold back a tail that could still grow into one, or
+      // into a \x delimiter, so it is never rewritten or emitted half-formed.
+      if (!final) {
+        const m = s.match(/(`{1,2}|\\)$/);
+        if (m) { carry = m[0]; s = s.slice(0, -m[0].length); }
+      }
+      out += inFence ? s : rewrite(s);
+      break;
+    }
+    return out;
+  }
+  return {
+    push: (text) => (OUTPUT_FIXUPS ? process(String(text ?? ""), false) : String(text ?? "")),
+    flush: () => (OUTPUT_FIXUPS && carry ? process("", true) : ""),
+  };
+}
+// One-shot form for non-streaming responses.
+function fixMath(text) {
+  if (!OUTPUT_FIXUPS || !text) return text;
+  const f = makeMathFixer();
+  return f.push(text) + f.flush();
+}
 
 // ---- per-request model routing ----
 const OPENAI_MODEL_RE = /^(gpt-|o[1-9]|chatgpt|ft:)/i;
@@ -113,7 +219,7 @@ function toOpenAI(body, model) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
       : body.system;
-    if (sys) messages.push({ role: "system", content: sys });
+    if (sys) messages.push({ role: "system", content: withFormatHint(sys, !isClassifierRequest(body)) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -151,8 +257,8 @@ function toOpenAI(body, model) {
   if (body.stop_sequences?.length) out.stop = body.stop_sequences;
   const nameMap = new Map(); // sanitized -> original, to translate tool_calls back
   if (body.tools?.length) {
-    let tools = body.tools;
-    if (tools.length > MAX_TOOLS) { log(`clamping tools ${tools.length}->${MAX_TOOLS} (OpenAI cap)`); tools = tools.slice(0, MAX_TOOLS); }
+    const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
+    if (dropped.length) log(`chat cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}: ${dropped.slice(0, 12).join(", ")}${dropped.length > 12 ? ", …" : ""}`);
     out.tools = tools.map((t) => {
       const name = sanitizeToolName(t.name);
       if (name !== t.name) nameMap.set(name, t.name);
@@ -174,7 +280,7 @@ function toAnthropic(oai, reqModel, nameMap) {
   const choice = oai.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
-  if (msg.content) content.push({ type: "text", text: msg.content });
+  if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
     content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name, input: safeParse(tc.function?.arguments || "{}") });
   return {
@@ -227,6 +333,7 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
   sse(res, "ping", { type: "ping" });
 
+  const mathFix = makeMathFixer(); // rewrites TeX delimiters across chunk boundaries
   let textOpen = false;          // is the text content block (index 0) open?
   const toolBlocks = new Map();  // openai tool index -> {aIndex, started}
   let nextIndex = 1;             // anthropic content-block index counter (0 reserved for text)
@@ -254,7 +361,11 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
       if (!ch) continue;
       if (ch.finish_reason) finish = ch.finish_reason;
       const d = ch.delta || {};
-      if (d.content) { ensureText(); sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: d.content } }); }
+      if (d.content) {
+        ensureText();
+        const fixed = mathFix.push(d.content);
+        if (fixed) sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: fixed } });
+      }
       for (const tc of d.tool_calls || []) {
         let tb = toolBlocks.get(tc.index);
         if (!tb) {
@@ -269,7 +380,11 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
       }
     }
   }
-  if (textOpen) sse(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+  if (textOpen) {
+    const tail = mathFix.flush(); // emit any held-back partial delimiter
+    if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: tail } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+  }
   for (const tb of toolBlocks.values()) if (tb.started) sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
   sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: { output_tokens: usage?.completion_tokens || 0 } });
   sse(res, "message_stop", { type: "message_stop" });
@@ -303,11 +418,12 @@ function toResponses(body, model) {
     }
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
-  if (body.system) out.instructions = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system;
+  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body));
   const nameMap = new Map();
   if (body.tools?.length) {
-    let tools = body.tools;
-    if (tools.length > MAX_TOOLS) { log(`clamping tools ${tools.length}->${MAX_TOOLS} (OpenAI cap)`); tools = tools.slice(0, MAX_TOOLS); }
+    // No cap on this surface (verified up to 512), so the agent keeps every tool.
+    const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_RESPONSES);
+    if (dropped.length) log(`responses cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}`);
     out.tools = tools.map((t) => { // Responses tools are flat: {type,name,description,parameters}
       const name = sanitizeToolName(t.name);
       if (name !== t.name) nameMap.set(name, t.name);
@@ -347,7 +463,7 @@ function fromResponses(resp, reqModel, nameMap) {
   let hasTool = false;
   for (const item of resp.output || []) {
     if (item.type === "message") {
-      for (const c of item.content || []) if (c.type === "output_text" && c.text) content.push({ type: "text", text: c.text });
+      for (const c of item.content || []) if (c.type === "output_text" && c.text) content.push({ type: "text", text: fixMath(c.text) });
     } else if (item.type === "function_call") {
       hasTool = true;
       content.push({ type: "tool_use", id: item.call_id || item.id, name: (nameMap && nameMap.get(item.name)) || item.name, input: safeParse(item.arguments || "{}") });
@@ -374,7 +490,14 @@ async function streamResponses(res, upstream, reqModel, nameMap) {
     if (!it.opened) { sse(res, "content_block_start", { type: "content_block_start", index: it.aIndex, content_block: cb }); it.opened = true; }
     return it;
   };
-  const close = (itemId) => { const it = items.get(itemId); if (it && it.opened && !it.closed) { sse(res, "content_block_stop", { type: "content_block_stop", index: it.aIndex }); it.closed = true; } };
+  const close = (itemId) => {
+    const it = items.get(itemId);
+    if (it && it.opened && !it.closed) {
+      if (it.mathFix) { const tail = it.mathFix.flush(); if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: tail } }); }
+      sse(res, "content_block_stop", { type: "content_block_stop", index: it.aIndex });
+      it.closed = true;
+    }
+  };
 
   const reader = upstream.body.getReader();
   const dec = new TextDecoder();
@@ -394,7 +517,12 @@ async function streamResponses(res, upstream, reqModel, nameMap) {
           if (j.item?.type === "function_call") { hasTool = true; open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: (nameMap && nameMap.get(j.item.name)) || j.item.name || "", input: {} }); }
           break;
         case "response.output_text.delta":
-          { const it = open(j.item_id, { type: "text", text: "" }); sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: j.delta } }); }
+          {
+            const it = open(j.item_id, { type: "text", text: "" });
+            if (!it.mathFix) it.mathFix = makeMathFixer();
+            const fixed = it.mathFix.push(j.delta);
+            if (fixed) sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: fixed } });
+          }
           break;
         case "response.function_call_arguments.delta":
           { const it = items.get(j.item_id); if (it) sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: j.delta } }); }
@@ -479,6 +607,10 @@ const server = http.createServer(async (req, res) => {
   anthropicError(res, 404, "not_found_error", `no route for ${req.method} ${url}`);
 });
 
-server.listen(PORT, "127.0.0.1", () => {
+// Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
+// this module without binding the port.
+export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, FORMAT_HINT };
+
+if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
 });

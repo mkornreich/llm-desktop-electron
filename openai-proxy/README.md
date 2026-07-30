@@ -28,11 +28,60 @@ child's env are the ground truth; both say OpenAI.
 
 - **Only the Claude Code / agent sub-layer** is affected. The main chat window is
   remote claude.ai and still talks to Anthropic — unproxyable.
-- **OpenAI caps the tools array at 128**; the desktop agent sends ~227, so ~99
-  tools are hidden from the model. Fine for most tasks, but a very tool-heavy
-  request could reference a dropped tool. Not fixable by changing models.
+- **Tool caps are per API surface, and the default path now has none.** Probed
+  directly: Chat Completions hard-caps `tools` at 128 (129 → 400 *array too
+  long*), but the **Responses API accepted 128/129/214/256/512**. Since the
+  project model (`gpt-5.3-codex`) runs on Responses, all ~214 tools are sent and
+  nothing is hidden from the model. On the chat path the 128 cap is real, so the
+  proxy keeps **essential** tools (read/write/edit/run/search/plan/web, plus
+  artifact/widget/diagram/chart renderers) and fills the rest in the agent's own
+  order — instead of the old blind `slice(0, 128)`, which dropped whatever sat
+  past index 128. Dropped names are logged; a silently truncated tool list is
+  indistinguishable from a model that just declined to use a tool.
+  *(An earlier version of this file called the 128 cap "not fixable by changing
+  models" — that was wrong: it is fixable by changing API surface.)*
 - Translation covers text (streaming + non-streaming) and tool calls. Images are
   dropped (`[image omitted by proxy]`); `/v1/messages/count_tokens` is estimated.
+
+## Output shaping: math and SVG
+
+The chat surface is the **remote claude.ai web app** — there is no math or
+markdown renderer in the local bundle to patch (`katex`/`mathjax`/`react-markdown`
+all appear zero times; the only `latex` hits are MIME tables). So the only lever
+is what the model emits, and GPT models default to formats this client won't
+render. Two fixes, both disabled by `OPENAI_OUTPUT_FIXUPS=0`:
+
+1. **Math delimiters are rewritten** — `\(…\)` → `$…$`, `\[…\]` → `$$…$$`. This
+   runs on streamed deltas as well as whole responses, and is **fence-aware**: it
+   never rewrites inside a ` ``` ` block, so code samples (including LaTeX shown
+   *as* code) stay verbatim.
+2. **A short format note is appended to the system prompt** telling the model to
+   use `$`/`$$`, and to write SVG to a **`.svg` file** rather than pasting raw
+   `<svg>` markup — the app maps `IMAGE_EXT_TO_MIME ".svg" → "image/svg+xml"` and
+   renders `.svg` files as images, while inline markup in a reply has no
+   renderer. The note is **suppressed for the safety-classifier call**, which has
+   its own expected output shape.
+
+Verified end-to-end against the live API: the model returned
+`$$ x=\frac{-b\pm\sqrt{b^2-4ac}}{2a} $$` and inline `$e^{i\pi}+1=0$` with no `\(`
+or `\[`, while a `python` code block kept a literal `\(not math\)` untouched. A
+214-tool request with the needed tool at **index 213** was called successfully on
+both paths.
+
+### Tests
+
+```bash
+node --test openai-proxy/proxy.test.mjs
+```
+
+13 tests covering the tool selector and the delimiter rewriter. The streaming
+tests are the ones that matter: they assert streamed output equals one-shot output
+for **every chunk size and every single split point**, because a delimiter or a
+fence can straddle any chunk boundary. That property caught two real bugs — a
+chunk ending in exactly ` ``` ` had its fence marker split (inverting the
+in-code/out-of-code state, so math inside code got rewritten and math outside
+didn't), and `"$$"` as a `replace()` *replacement string* is an escape for a
+single `$`, which silently turned display math into inline math.
 
 ## Config
 
