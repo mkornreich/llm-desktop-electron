@@ -115,6 +115,16 @@ const rid = (p) => p + crypto.randomBytes(16).toString("hex");
 const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 const log = (...a) => console.log("[proxy]", ...a);
 const sanitizeToolName = (n) => String(n || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
+// Flatten an Anthropic tool_result's content to text. Neither OpenAI surface has an
+// error flag on tool output, so is_error is marked inline — without it a failed command
+// is indistinguishable from a successful one and the model reports success.
+function toolResultText(blk) {
+  const c = blk.content;
+  const body = typeof c === "string" ? c
+    : Array.isArray(c) ? c.map((p) => (p?.type === "text" ? p.text : p?.text ?? `[${p?.type || "content"} omitted by proxy]`)).join("\n")
+    : c == null ? "" : JSON.stringify(c);
+  return blk.is_error ? `[tool error] ${body}` : body;
+}
 
 // ---- tool selection ----
 // Keep essential tools first, then fill the remaining slots in the agent's original
@@ -145,12 +155,33 @@ const SEND_FILE_TOOL_RE = /^(senduserfile|send_user_file|send_file)$/i;
 const findSendFileTool = (tools) =>
   (Array.isArray(tools) ? tools.find((t) => SEND_FILE_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
 
+// The tool that actually paints something into the transcript. In this app that is
+// mcp__visualize__show_widget ("Show visual content — SVG graphics, diagrams, charts …
+// renders inline alongside your text response") — and it is the LAST of the 214 tools,
+// so the old blind slice(0,128) dropped it outright.
+const RENDER_TOOL_RE = /(show_widget|visuali[sz]e|artifact|canvas|render_(svg|chart|diagram))/i;
+const findRenderTool = (tools) =>
+  (Array.isArray(tools) ? tools.find((t) => RENDER_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
+
+// Tools for inspecting work that runs asynchronously. Without knowing these exist, the
+// model answers "I can't show output from a background task" — which is wrong, it just
+// has to go and fetch it.
+const BG_TOOL_RE = /^(taskoutput|tasklist|taskget|bashoutput)$/i;
+const findBgTools = (tools) =>
+  (Array.isArray(tools) ? tools : []).map((t) => String(t?.name || "")).filter((n) => BG_TOOL_RE.test(n));
+
 // Tell the model the things it cannot infer about this client's renderer.
 function buildFormatHint(tools) {
   const w = findWriteTool(tools);
   const s = findSendFileTool(tools);
+  const r = findRenderTool(tools);
+  const bg = findBgTools(tools);
   let picture;
-  if (w && s) {
+  if (r) {
+    // Preferred: this draws in the transcript. A written file is only a path, and this
+    // app has no file-sending tool at all, so writing alone shows the user nothing.
+    picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or chart, call \`${r}\` with the SVG/markup so it renders inline in your reply${w ? ` (you may also save a copy with \`${w}\` to a .svg path)` : ""}. Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download anything — displaying it is your job, not theirs.`;
+  } else if (w && s) {
     // The full path to something the user actually SEES: create the file, then display it.
     picture = `- Pictures, diagrams and SVG: when asked to draw, render, show or produce an image, diagram or SVG, do BOTH of these in the same turn: (1) call \`${w}\` to save it to a path ending in .svg, then (2) call \`${s}\` with that path and display:"render" so it is displayed inline. Step 2 is what the user actually sees — a written file alone only gives them a path to open, which does not satisfy "render". Do NOT paste raw <svg> markup as the deliverable, and do NOT tell the user to open, save or download the file — displaying it is your job, not theirs.`;
   } else if (s) {
@@ -160,11 +191,18 @@ function buildFormatHint(tools) {
   } else {
     picture = "- Pictures, diagrams and SVG: you have no file tool in this turn, so return the SVG inside a ```svg fenced code block. Do NOT instruct the user to save, copy, or open a file.";
   }
+  // Async tools hand back a run summary, not each internal step's stdout. That is a real
+  // constraint, but "I can't show you the output" is the wrong conclusion: the output is
+  // retrievable, and an unannounced background task looks like a hang.
+  const background = bg.length
+    ? `- Long-running and background work: state clearly when you start something in the background and what it is doing, so the session never looks stalled. Asynchronous tools (Agent/Workflow/background shell) return a run summary rather than each step's raw output — when the user wants the actual output, fetch it with ${bg.map((n) => `\`${n}\``).join(" / ")} and paste the relevant part into your reply, or run the steps directly in the foreground instead. Never tell the user that output is unavailable or that you cannot show it: retrieve it, or say plainly which foreground command you will run to produce it.`
+    : "- Long-running work: state clearly when you start something that will take a while, and report progress as you go, so the session never looks stalled. If output for a step is not available to you, say which command you will run in the foreground to produce it rather than saying it cannot be shown.";
   return [
     "",
     "## Output formatting for this client",
     "- Math: use $...$ for inline math and $$...$$ for display math. Do NOT use \\( \\) or \\[ \\] — this client renders those literally.",
     picture,
+    background,
     "- Carry out requests with the tools available to you instead of describing what the user should do.",
   ].join("\n");
 }
@@ -270,7 +308,7 @@ function toOpenAI(body, model) {
       else if (blk.type === "tool_use")
         toolCalls.push({ id: blk.id, type: "function", function: { name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) } });
       else if (blk.type === "tool_result")
-        toolResults.push({ tool_call_id: blk.tool_use_id, content: typeof blk.content === "string" ? blk.content : Array.isArray(blk.content) ? blk.content.map((c) => c.text || "").join("\n") : JSON.stringify(blk.content) });
+        toolResults.push({ tool_call_id: blk.tool_use_id, content: toolResultText(blk) });
       else if (blk.type === "image") text.push("[image omitted by proxy]");
     }
     if (m.role === "assistant") {
@@ -373,12 +411,19 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
   sse(res, "ping", { type: "ping" });
 
   const mathFix = makeMathFixer(); // rewrites TeX delimiters across chunk boundaries
-  let textOpen = false;          // is the text content block (index 0) open?
+  let textIndex = null;          // anthropic index of the text block, once opened
   const toolBlocks = new Map();  // openai tool index -> {aIndex, started}
-  let nextIndex = 1;             // anthropic content-block index counter (0 reserved for text)
+  let nextIndex = 0;             // content-block index counter; text is NOT pre-reserved,
+                                 // otherwise a tool-only turn leaves a hole at index 0
   let finish = null, usage = null;
 
-  const ensureText = () => { if (!textOpen) { sse(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }); textOpen = true; } };
+  const ensureText = () => {
+    if (textIndex === null) {
+      textIndex = nextIndex++;
+      sse(res, "content_block_start", { type: "content_block_start", index: textIndex, content_block: { type: "text", text: "" } });
+    }
+    return textIndex;
+  };
 
   const reader = upstream.body.getReader();
   const dec = new TextDecoder();
@@ -403,7 +448,7 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
       if (d.content) {
         ensureText();
         const fixed = mathFix.push(d.content);
-        if (fixed) sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: fixed } });
+        if (fixed) sse(res, "content_block_delta", { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: fixed } });
       }
       for (const tc of d.tool_calls || []) {
         let tb = toolBlocks.get(tc.index);
@@ -419,10 +464,10 @@ async function streamAnthropic(res, upstream, reqModel, nameMap) {
       }
     }
   }
-  if (textOpen) {
+  if (textIndex !== null) {
     const tail = mathFix.flush(); // emit any held-back partial delimiter
-    if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: tail } });
-    sse(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+    if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: tail } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: textIndex });
   }
   for (const tb of toolBlocks.values()) if (tb.started) sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
   sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: { output_tokens: usage?.completion_tokens || 0 } });
@@ -445,7 +490,7 @@ function toResponses(body, model) {
     for (const blk of content) {
       if (blk.type === "text") text.push(blk.text);
       else if (blk.type === "tool_use") toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
-      else if (blk.type === "tool_result") toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id, output: typeof blk.content === "string" ? blk.content : Array.isArray(blk.content) ? blk.content.map((c) => c.text || "").join("\n") : JSON.stringify(blk.content) });
+      else if (blk.type === "tool_result") toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id, output: toolResultText(blk) });
       else if (blk.type === "image") text.push("[image omitted by proxy]");
     }
     if (m.role === "assistant") {
@@ -649,7 +694,8 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint, findWriteTool, findSendFileTool };
+export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
+         findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

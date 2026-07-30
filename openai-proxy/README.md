@@ -82,12 +82,50 @@ render. Two fixes, both disabled by `OPENAI_OUTPUT_FIXUPS=0`:
    each tool result back): the sequence is now
    `Write(/tmp/red_pelican.svg) → SendUserFile(files=[…], display="render")`.
 
-   The hint adapts to what each request actually carries — write+send, send only,
-   write only, or neither — so it never orders a call to a tool that isn't there.
-   To see the exact tool list a request carried, start the proxy with
-   `PROXY_DUMP_TOOLS=1`; it writes `openai-proxy/tools-dump.txt`. The agent's real
-   tool set is otherwise invisible from outside the app — the `claude` CLI exposes
-   27 tools, the desktop app 214.
+   **What this app actually uses.** `PROXY_DUMP_TOOLS=1` writes the exact tool list a
+   request carried to `openai-proxy/tools-dump.txt`; the agent's real tool set is
+   otherwise invisible from outside the app (the `claude` CLI exposes 27 tools, the
+   desktop app 214). That dump showed the earlier reasoning was wrong on two counts:
+   this app has **no `SendUserFile` at all**, and it *does* have
+   **`mcp__visualize__show_widget`** — "Show visual content — SVG graphics, diagrams,
+   charts … renders inline alongside your text response." That is the mechanism that
+   actually draws in the transcript, and it sits at **index 214 of 214** — precisely
+   what the old blind `slice(0, 128)` deleted.
+
+   So the hint prefers, in order: an inline **render** tool (`show_widget`,
+   `Artifact`, `canvas`, …) → **write + send** with `display:"render"` → **write**
+   only → a fenced ` ```svg ` block. It never orders a call to a tool the request
+   doesn't include. With the render tool present, "render a svg picture of a pelican,
+   make it red" now calls `mcp__visualize__show_widget` directly.
+
+## Long-running and background work
+
+The agent reported: *"I can't comply with 'show every command output' while using
+Workflow, because Workflow runs asynchronously and returns a run/task result rather
+than raw shell output for each internal step."* The premise is true — async tools
+return a summary — but the conclusion isn't: the output is retrievable, and an
+unannounced background task just looks like a hang.
+
+The hint now tells the model to say when it starts background work, and to fetch
+output with whichever retrieval tools the request carries (`TaskOutput`, `TaskList`,
+`TaskGet`, `BashOutput`), or else name the foreground command it will run instead —
+never to claim output is unavailable. Same prompt as above now answers: *"I'll run a
+Workflow-based audit with multiple subagents and then fetch and paste the actual
+outputs so you can see every command result. I'm starting that now in the
+background."*
+
+Two fidelity bugs were fixed alongside, both of which corrupt what the session can
+show:
+
+- **`is_error` was dropped.** Neither OpenAI surface has an error flag on tool
+  output, and the proxy wasn't encoding Anthropic's, so a **failed** command reached
+  the model looking exactly like a successful one — it would then report success. It
+  is now marked `[tool error] …`. Non-text result parts are labelled rather than
+  flattened to empty strings.
+- **The chat path left a hole at content-block index 0.** Index 0 was reserved for
+  text, so a tool-calls-only turn emitted blocks starting at index 1 and the
+  assembled message had an empty slot. The text block's index is now allocated
+  lazily. (The default Responses path was unaffected.)
 
 Verified end-to-end against the live API: the model returned
 `$$ x=\frac{-b\pm\sqrt{b^2-4ac}}{2a} $$` and inline `$e^{i\pi}+1=0$` with no `\(`

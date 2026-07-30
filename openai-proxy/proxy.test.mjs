@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
-        findSendFileTool } =
+        findSendFileTool, findRenderTool, findBgTools, toolResultText } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -188,4 +188,64 @@ test("write-only hint does not reference a send tool that isn't there", () => {
   const h = buildFormatHint([{ name: "Write" }, { name: "Read" }]);
   assert.match(h, /MUST call the `Write` tool/);
   assert.ok(!/SendUserFile|display:"render"/.test(h), "must not name an unavailable tool");
+});
+
+// ---------- inline rendering + background visibility ----------
+
+test("findRenderTool finds the app's real inline-render tool", () => {
+  // The app exposes no SendUserFile; mcp__visualize__show_widget is what draws inline,
+  // and it is the LAST of its 214 tools — the exact thing blind truncation dropped.
+  assert.equal(findRenderTool([{ name: "Write" }, { name: "mcp__visualize__show_widget" }]),
+    "mcp__visualize__show_widget");
+  assert.equal(findRenderTool([{ name: "Artifact" }]), "Artifact");
+  assert.equal(findRenderTool([{ name: "Write" }, { name: "Bash" }]), null);
+});
+
+test("a render tool takes priority over writing a file", () => {
+  const h = buildFormatHint([{ name: "Write" }, { name: "mcp__visualize__show_widget" }]);
+  assert.match(h, /call `mcp__visualize__show_widget` with the SVG/);
+  assert.match(h, /renders inline/);
+  // Must not fall back to the weaker "just write a file" instruction.
+  assert.ok(!/MUST call the `Write` tool/.test(h));
+});
+
+test("background bullet names the retrieval tools that exist", () => {
+  const h = buildFormatHint([{ name: "Workflow" }, { name: "TaskOutput" }, { name: "TaskList" }]);
+  assert.match(h, /`TaskOutput`/);
+  assert.match(h, /`TaskList`/);
+  assert.match(h, /state clearly when you start something in the background/i);
+  // The refusal this replaces: "I can't show output from an async tool."
+  assert.match(h, /Never tell the user that output is unavailable/i);
+});
+
+test("background bullet still demands progress when no retrieval tool exists", () => {
+  const h = buildFormatHint([{ name: "Bash" }]);
+  assert.match(h, /never looks stalled/i);
+  assert.ok(!/`TaskOutput`/.test(h), "must not name a tool that isn't available");
+});
+
+// ---------- tool_result fidelity ----------
+
+test("tool_result text passes through unchanged for success", () => {
+  assert.equal(toolResultText({ content: "total 24\ndrwxr-xr-x" }), "total 24\ndrwxr-xr-x");
+  assert.equal(toolResultText({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }), "a\nb");
+});
+
+test("is_error is marked so a failure cannot look like success", () => {
+  // OpenAI has no error flag on tool output; dropping is_error made the model report
+  // that a failed command had succeeded.
+  assert.equal(toolResultText({ content: "No such file", is_error: true }), "[tool error] No such file");
+  assert.match(toolResultText({ content: [{ type: "text", text: "boom" }], is_error: true }), /^\[tool error\] boom$/);
+});
+
+test("non-text tool_result parts are labelled, not silently emptied", () => {
+  const out = toolResultText({ content: [{ type: "text", text: "chart:" }, { type: "image", source: {} }] });
+  assert.match(out, /chart:/);
+  assert.match(out, /\[image omitted by proxy\]/);
+});
+
+test("empty and null tool_result content do not throw", () => {
+  assert.equal(toolResultText({ content: null }), "");
+  assert.equal(toolResultText({}), "");
+  assert.equal(toolResultText({ content: [] }), "");
 });
