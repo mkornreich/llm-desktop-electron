@@ -177,6 +177,40 @@ toggle and the session sync are provider-independent and apply to both. See
 
 Delete `user-data/` to wipe the session and start fresh.
 
+## Startup noise that is NOT a problem
+
+Three alarming lines appear on **every** launch, including healthy ones. Do not
+debug them:
+
+```
+[error] Failed to handle pending folder: Error: Timed out waiting for mainView to become ready
+ERROR:network_service_instance_impl.cc:721] Network service crashed or was terminated, restarting service.
+CONSOLE "getInitialLocale failed ... did not pass origin validation"
+```
+
+* The **mainView timeout** and the **network service** line fire together about
+  two minutes in, then the app carries on and logs in normally. They are
+  startup races in the shell, not failures.
+* The `getInitialLocale` rejection is real origin validation working as
+  designed: Electron loads the app through the `Resources/app.asar` symlink, so
+  the shell renderer's `file://` URL is not the one the validator expects. The
+  call has a `.catch`, and the locale falls back.
+* `net::ERR_FAILED` on the bootstrap fetch is *downstream* of the network
+  service restart, not a connectivity problem. Check the host with
+  `curl -sI https://claude.ai/` before suspecting DNS or the telemetry
+  sinkhole.
+
+To decide whether a boot actually succeeded, grep for these two instead — both
+must be present:
+
+```bash
+grep -c "isLoggedOut: false" boot.log; grep -c "my-access] loaded" boot.log
+```
+
+Beware near-miss patterns: the log prints `isLoggedOut: false,` inside a
+pretty-printed object, so `isLoggedOut: (true|false)$` and similar anchored
+regexes match nothing and make a working build look dead.
+
 ## Sessions and memory
 
 ### Memory and config — already shared, nothing to sync
