@@ -266,8 +266,18 @@ Two corrections this produced, both recorded because the reasoning was wrong twi
   `dframe-group-scopes` and `cg-` ids there. Wrong: that is a cache of the server store.
 
 The network capture is what settled it, because it shows the authoritative source rather than a
-copy of it. `SYNC_CLAUDE_UI_STATE` still exists for replacing this build's UI state deliberately,
-but it now defaults to **0** — it cannot help grouping and it does overwrite composer drafts.
+copy of it. `SYNC_CLAUDE_UI_STATE` still exists for replacing this build's UI state deliberately, but it now
+defaults to **0** — it cannot help grouping and it does overwrite composer drafts.
+
+**Two hazards around `Local Storage`, both hit while investigating this:**
+
+- **It holds auth state.** Deleting it produced `401`s and `Bootstrap API fetch failed` until a
+  known-good copy was restored. An earlier note here claimed login was unaffected because
+  authentication lives in Cookies — that was wrong.
+- **Never restore a LevelDB backup from a profile that was not closed cleanly.** A backup taken
+  after the app was killed with `pkill` left startup hanging in window setup, with renderers
+  reporting *"Terminating current process after 15 seconds with no connection"*. The copy had
+  captured a torn write. Recovery is to copy in a good `Local Storage`, not to delete it.
 
 ### Are the migrated sessions grouped correctly?
 

@@ -47,5 +47,13 @@ SYNC_CLAUDE_SESSIONS=1
 # because copying an open LevelDB can capture a torn write, and the result is verified to
 # contain the grouping keys before being kept.
 #
-# Cookies are NOT copied, so this does not affect being logged in.
+# WARNING, learned the hard way: replacing or deleting Local Storage DOES break login. An
+# earlier version of this comment claimed it did not, on the reasoning that authentication lives
+# in Cookies. Deleting Local Storage produced 401s and a failed bootstrap until the directory was
+# restored, so the desktop keeps auth state there too.
+#
+# Also: never restore a LevelDB backup taken from a profile that was not closed cleanly. A backup
+# copied after the app was killed with pkill left the app hanging in window setup — renderers
+# reporting "Terminating current process after 15 seconds with no connection" — because the copy
+# captured a torn write. The recovery is to copy a known-good Local Storage in, not to delete it.
 SYNC_CLAUDE_UI_STATE=0
