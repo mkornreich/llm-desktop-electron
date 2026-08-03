@@ -94,7 +94,14 @@ if [ "$PROVIDER" = "openai" ]; then
   PROXY_URL="http://127.0.0.1:${PORT}"
   if ! curl -sf "${PROXY_URL}/health" >/dev/null 2>&1; then
     echo "[run] starting translation proxy on ${PROXY_URL}"
-    ( cd openai-proxy && PORT="$PORT" nohup node proxy.mjs > proxy.log 2>&1 & disown )
+    # APPEND, and rotate at 8MB. This used to be `> proxy.log`, which truncated the log on
+    # every launch — so by the time a bug was reported the evidence for it was already gone.
+    # That is exactly what happened with the auto-mode classifier failure in issue #6.
+    # `if`, not `&&`: a false test as the last command of an && list returns non-zero, which
+    # under `set -e` would kill the subshell before the proxy ever started.
+    ( cd openai-proxy || exit 1
+      if [ -f proxy.log ] && [ "$(wc -c < proxy.log)" -gt 8388608 ]; then mv -f proxy.log proxy.log.1; fi
+      PORT="$PORT" nohup node proxy.mjs >> proxy.log 2>&1 & disown )
     for _ in $(seq 1 10); do curl -sf "${PROXY_URL}/health" >/dev/null 2>&1 && break; sleep 1; done
   fi
   curl -sf "${PROXY_URL}/health" >/dev/null 2>&1 \

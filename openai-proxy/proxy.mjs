@@ -49,6 +49,16 @@ const USE_RESPONSES = OPENAI_API === "responses";
 // Claude Code makes before each risky action). The main coding model can be slow
 // for these latency-sensitive checks, so route them to a small fast model here.
 const OPENAI_CLASSIFIER_MODEL = process.env.OPENAI_CLASSIFIER_MODEL || PROJECT.OPENAI_CLASSIFIER_MODEL || "";
+// The auto-mode SAFETY verdict is a security decision, so by default it keeps the main
+// model — see pickModel for the measurement that settled this. Set a model name here only if
+// you accept a weaker verdict in exchange for latency.
+const OPENAI_CLASSIFIER_SAFETY_MODEL = process.env.OPENAI_CLASSIFIER_SAFETY_MODEL ||
+  PROJECT.OPENAI_CLASSIFIER_SAFETY_MODEL || "";
+// A classifier call is a verdict, so it carries no tools. This is the ceiling above which a
+// prompt that LOOKS like a classifier is treated as a normal agent turn instead — see
+// isClassifierRequest. 0 would be defensible; a few allows for a call that passes one or two.
+const CLASSIFIER_MAX_TOOLS = parseInt(process.env.OPENAI_CLASSIFIER_MAX_TOOLS ||
+  PROJECT.OPENAI_CLASSIFIER_MAX_TOOLS || "4", 10) || 0;
 // Models advertised on GET /v1/models — what the app's gateway model-discovery
 // (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) lists in the picker. Selecting one
 // makes the agent request that id, which the proxy passes straight through.
@@ -703,15 +713,99 @@ function fixMath(text) {
 
 // ---- per-request model routing ----
 const OPENAI_MODEL_RE = /^(gpt-|o[1-9]|chatgpt|ft:)/i;
-// The auto-mode safety classifier's request carries this distinctive system prompt.
-function isClassifierRequest(body) {
-  const s = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join(" ") : (body.system || "");
-  return /risk levels for actions that the Claude Code agent|broader safety framework|command_injection_detected/i.test(s);
+
+// Claude Code makes several LLM calls that are NOT agent turns: classifiers with a rigid
+// output contract. Treating one like an agent turn breaks it, so they are detected here and
+// then given the fast model, no injected hints, and no out-of-band reasoning.
+//
+// There are two families, and only the first used to be recognised:
+//
+//   1. Bash command-prefix detection: "<policy_spec># Claude Code Code Bash command prefix
+//      detection". Answers with a command prefix, or `command_injection_detected`.
+//
+//   2. The AUTO-MODE SAFETY CLASSIFIER — the call behind "auto mode cannot determine the
+//      safety of Bash". Two stages: stage 1 answers "<severity>N</severity> ONLY", stage 2
+//      answers "<block>yes</block><category>…</category><reason>…</reason>" or
+//      "<block>no</block>", under the instruction "Your ENTIRE response MUST begin with
+//      <block>. Do NOT output any analysis, reasoning, or commentary before <block>."
+//
+// Missing family 2 is what caused issue #6. Its calls went to the slow main model with the
+// agent format/persistence hints appended to a prompt that forbids preamble, and with
+// hidden reasoning eating the output budget. The CLI retries a few times, then fails
+// CLOSED: it denies the action and prints "<model> is temporarily unavailable".
+// Needles per family, verified against all 14 real classifier prompts recovered from the
+// CLI's own error dumps in /private/tmp/claude-501/auto-mode-classifier-errors.
+const PREFIX_RE = new RegExp([
+  "risk levels for actions that the Claude Code agent",
+  "broader safety framework",
+  "command_injection_detected",
+].join("|"), "i");
+const SAFETY_RE = new RegExp([
+  "security monitor for autonomous AI coding agents",    // the real stage-2 opener
+  "ENTIRE response MUST begin with <block>",
+  "<block>(?:yes|no)</block>",
+  "Err on the side of blocking",
+  "<severity>N</severity>",
+  "Review the classification process",
+].join("|"), "i");
+const CLASSIFIER_RE = new RegExp(`${PREFIX_RE.source}|${SAFETY_RE.source}`, "i");
+
+// The contract lines sit at the END of a long prompt and a real transcript runs to
+// megabytes, so sniff the head AND the tail instead of scanning everything.
+const SNIFF = 4000;
+const ends = (s) => (s.length <= SNIFF * 2 ? s : `${s.slice(0, SNIFF)}\n${s.slice(-SNIFF)}`);
+function classifierPrompt(body) {
+  const sys = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : (body.system || "");
+  const msgs = body.messages || [];
+  const last = msgs[msgs.length - 1];
+  let tail = "";
+  if (last && last.role === "user") {
+    const c = last.content;
+    tail = typeof c === "string" ? c
+      : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text || "").join("\n") : "";
+  }
+  return `${ends(String(sys))}\n${ends(tail)}`;
 }
-function pickModel(body) {
+let vetoLogged = false;
+// Returns "prefix" | "safety" | null. The distinction matters for MODEL choice: see pickModel.
+function classifierFamily(body) {
+  const text = classifierPrompt(body);
+  const family = SAFETY_RE.test(text) ? "safety" : PREFIX_RE.test(text) ? "prefix" : null;
+  if (!family) return null;
+  // Corroboration, because the needles are just text. A verdict-only call carries no tool
+  // list; an agent turn carries the whole toolbox (213 of them here). Without this check a
+  // session that merely QUOTES the contract — debugging this very issue, say — would have
+  // its own turns misrouted and its hints stripped.
+  const n = body.tools?.length ?? 0;
+  if (n > CLASSIFIER_MAX_TOOLS) {
+    if (!vetoLogged) {
+      vetoLogged = true;
+      log(`  ! a prompt matched the ${family} classifier contract but carries ${n} tools — treating it as a normal agent turn (logged once)`);
+    }
+    return null;
+  }
+  return family;
+}
+const isClassifierRequest = (body) => classifierFamily(body) !== null;
+
+function pickModel(body, family = classifierFamily(body)) {
   const req = String(body.model || "");
-  if (OPENAI_MODEL_RE.test(req)) return req;                              // agent already asked for an OpenAI model (e.g. via CLAUDE_CODE_BG_CLASSIFIER_MODEL)
-  if (OPENAI_CLASSIFIER_MODEL && isClassifierRequest(body)) return OPENAI_CLASSIFIER_MODEL; // fast model for the safety classifier
+  if (OPENAI_MODEL_RE.test(req)) return req;   // agent already asked for an OpenAI model (e.g. via CLAUDE_CODE_BG_CLASSIFIER_MODEL)
+  // Only PREFIX detection goes to the small model. The auto-mode SAFETY verdict keeps the
+  // main model, measured by replaying six real classifier requests recovered from the CLI's
+  // own error dumps through both models:
+  //   - 3 of the 5 <block>-stage requests disagreed, and every disagreement went one way:
+  //     gpt-5.3-codex blocked (Production Reads / Production Deploy), gpt-4.1-mini allowed.
+  //   - on a 6th, gpt-4.1-mini emitted no verdict at all — it echoed the action back as
+  //     {"tool":"Bash","input":"git -C …"} — which is unparseable, so the CLI would retry and
+  //     could end up reporting the model unavailable. The small model can CAUSE issue #6.
+  //   - gpt-5.3-codex answered every request in the expected shape, including the stage-1
+  //     <severity>N</severity> form, in ~2s. Latency was never the problem, so there is
+  //     nothing to buy by trading judgment away.
+  // The classifier's own prompt says to err on the side of blocking, so a more permissive
+  // model is the wrong direction. OPENAI_CLASSIFIER_SAFETY_MODEL overrides this deliberately.
+  if (family === "prefix" && OPENAI_CLASSIFIER_MODEL) return OPENAI_CLASSIFIER_MODEL;
+  if (family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL) return OPENAI_CLASSIFIER_SAFETY_MODEL;
   return OPENAI_MODEL;
 }
 const apiForModel = (model) => (/codex/i.test(model) ? "responses" : "chat");
@@ -728,13 +822,13 @@ function mapFinish(reason, hasTools) {
 }
 
 // ---------- request translation: Anthropic -> OpenAI ----------
-function toOpenAI(body, model) {
+function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
   const messages = [];
   if (body.system) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
       : body.system;
-    if (sys) messages.push({ role: "system", content: withFormatHint(sys, !isClassifierRequest(body), body.tools) });
+    if (sys) messages.push({ role: "system", content: withFormatHint(sys, !isCls, body.tools) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -945,7 +1039,7 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null)
 
 // ================= OpenAI Responses API path (for codex / responses-only models) =================
 // Anthropic Messages -> Responses request
-function toResponses(body, model) {
+function toResponses(body, model, isCls = isClassifierRequest(body)) {
   const input = [];
   for (const m of body.messages || []) {
     const content = m.content;
@@ -971,11 +1065,18 @@ function toResponses(body, model) {
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
   // Both fields are required for summaries to appear; effort alone or summary alone gives none.
-  if (SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
+  //
+  // Never for a classifier call. Two independent reasons: its prompt asks for reasoning IN
+  // BAND, inside <thinking> tags that the CLI parses itself, so out-of-band reasoning is not
+  // just useless but a contract violation — the answer must START with the verdict tag. And
+  // hidden reasoning is charged to the same output budget, which is how a verdict comes back
+  // empty and the CLI concludes the model is unavailable.
+  if (!isCls && SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
     out.reasoning = { effort: effortFor(model), summary: "detailed" };
   }
-  if (VERBOSITY) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
-  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
+  // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding.
+  if (VERBOSITY && !isCls) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
+  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isCls, body.tools);
   const nameMap = new Map();
   const schemas = new Map(); // original tool name -> input_schema, for argument pruning
   if (body.tools?.length) {
@@ -1311,14 +1412,18 @@ const server = http.createServer(async (req, res) => {
     const raw = await readBody(req);
     const body = safeParse(raw);
     const reqModel = body.model || OPENAI_MODEL;
-    const model = pickModel(body);                       // main model, fast classifier model, or passthrough
+    // Decided once per request: it drives the model choice, hint injection, reasoning and
+    // whether the turn may be continued, and it logs when it vetoes a match.
+    const family = classifierFamily(body);               // "prefix" | "safety" | null
+    const isCls = family !== null;
+    const model = pickModel(body, family);               // main model, fast classifier model, or passthrough
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
     dumpTools(body.tools);
 
     if (useResp) {
-      const { payload, nameMap, schemas } = toResponses(body, model);
-      const hintOn = !isClassifierRequest(body) && (OUTPUT_FIXUPS || PERSISTENCE);
-      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""} hints=${hintOn ? "on" : "off"}`);
+      const { payload, nameMap, schemas } = toResponses(body, model, isCls);
+      const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
+      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""} hints=${hintOn ? "on" : "off"}${isCls ? ` classifier=${family} reasoning=off` : ""}`);
       let upstream;
       try { upstream = await callResponses(payload); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
@@ -1328,7 +1433,7 @@ const server = http.createServer(async (req, res) => {
         return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
       }
       if (payload.stream) {
-        const mayContinue = !isClassifierRequest(body) && !!payload.tools?.length;
+        const mayContinue = !isCls && !!payload.tools?.length;
         try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue, schemas); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
@@ -1353,8 +1458,8 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, msg); }
     }
 
-    const { payload, nameMap, schemas } = toOpenAI(body, model);
-    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}`);
+    const { payload, nameMap, schemas } = toOpenAI(body, model, isCls);
+    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${isCls ? ` classifier=${family}` : ""}`);
     let upstream;
     try { upstream = await callOpenAI(payload); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
@@ -1380,7 +1485,9 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice,
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
-         compactResponsesInputSummarised, summariseDropped };
+         compactResponsesInputSummarised, summariseDropped,
+         isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
+         toResponses, toOpenAI, pickModel };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

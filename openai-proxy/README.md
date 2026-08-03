@@ -174,15 +174,36 @@ single `$`, which silently turned display math into inline math.
   `gpt-4.1-mini`, `gpt-4o`). Selecting one makes the agent request that id, which the
   proxy passes straight through — a functional OpenAI chooser for the code/agent
   surface. (The remote claude.ai chat picker is separate and unaffected.)
-- **Safety classifier → fast model:** Claude Code's auto-mode runs a separate,
-  latency-sensitive classifier LLM call before each risky action; on the slow
-  codex model it intermittently timed out and fail-closed ("`claude-opus-4-8
-  temporarily unavailable`"). The proxy detects that request by its system prompt
-  (*"risk levels for actions…"*) and routes it to **`OPENAI_CLASSIFIER_MODEL`**
-  (default here `gpt-4.1-mini`, Chat Completions) instead of the main model. The
-  main agent still uses `OPENAI_MODEL`. Per-request routing: requests naming an
-  OpenAI model directly are passed through; classifier requests → classifier
-  model; everything else → main model.
+- **Classifier calls are not agent turns.** Claude Code makes two kinds, both with a
+  rigid output contract, and each is handled differently (issue #6):
+
+  | family | prompt marker | output contract | model |
+  |---|---|---|---|
+  | `prefix` | `<policy_spec># Claude Code Code Bash command prefix detection` | a command prefix, or `command_injection_detected` | `OPENAI_CLASSIFIER_MODEL` (`gpt-4.1-mini`) |
+  | `safety` | `You are a security monitor for autonomous AI coding agents` | stage 1 `<severity>N</severity>`; stage 2 `<block>yes\|no</block>` | the **main** model, unless `OPENAI_CLASSIFIER_SAFETY_MODEL` is set |
+
+  For either family the proxy suppresses the format/persistence hints, requests **no
+  out-of-band reasoning** (the prompt asks for reasoning in-band inside `<thinking>`
+  tags, and hidden reasoning is charged to the same output budget), skips the
+  verbosity knob, and never continues the turn. The log line shows
+  `classifier=prefix` or `classifier=safety reasoning=off`.
+
+  Only `prefix` is downgraded to a small model. The `safety` verdict is a security
+  decision and keeps the main model: replaying six real classifier requests recovered
+  from the CLI's own error dumps, 3 of the 5 `<block>`-stage verdicts disagreed and
+  **every disagreement went one way** — `gpt-5.3-codex` blocked, `gpt-4.1-mini`
+  allowed — and on a sixth `gpt-4.1-mini` emitted no verdict at all, echoing the
+  action back as `{"tool":"Bash","input":"git -C …"}`. Both models answered in about
+  2s, so downgrading buys nothing. The classifier's own prompt says to err on the
+  side of blocking.
+
+  Detection is corroborated by tool count (`OPENAI_CLASSIFIER_MAX_TOOLS`, default 4):
+  a verdict call carries no tools, an agent turn carries the whole toolbox, so a
+  session that merely *quotes* the contract — like one debugging this — is not
+  misrouted. A vetoed match is logged once.
+
+  Per-request routing: requests naming an OpenAI model directly are passed through;
+  `prefix` → classifier model; `safety` → main model; everything else → main model.
 - The proxy auto-uses `max_completion_tokens` for `gpt-5*`/`o*` models and drops
   `temperature` if a model rejects it.
 - Other env overrides: `OPENAI_BASE_URL`, `PORT`, `OPENAI_MAX_OUTPUT_TOKENS`
