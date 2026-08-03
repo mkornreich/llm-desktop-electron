@@ -55,3 +55,9 @@ OPENAI_REASONING_EFFORT=max
 # turns came back with zero characters of prose, so the UI showed a bare tool chip. Blank to
 # omit the parameter entirely.
 OPENAI_VERBOSITY=high
+# Compaction (github issue #4). When the context window fills, old tool output is compacted.
+# With OPENAI_COMPACT_SUMMARY=1 a cheap model condenses what is being dropped into a digest
+# instead of discarding it — one extra call, and it falls back to plain truncation on any
+# failure, so it can only add value. OPENAI_COMPACT_MODEL defaults to the classifier model.
+OPENAI_COMPACT_SUMMARY=1
+OPENAI_COMPACT_MODEL=gpt-4.1-mini

@@ -10,7 +10,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         buildPersistenceHint, withFormatHint, shouldAutoContinue, continueReason,
         workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
-        COMPACT_STEPS, TRIMMED } =
+        COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -692,6 +692,86 @@ test("issue #4: both call paths retry on the context error", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.equal((src.match(/CONTEXT_ERROR_RE\.test/g) || []).length >= 4, true,
     "both paths must test the error and re-test after each retry");
-  assert.match(src, /compactResponsesInput\(body\.input, keep\)/);
+  // the Responses path goes through the summarising wrapper; chat uses the plain one
+  assert.match(src, /await compactResponsesInputSummarised\(body\.input, keep\)/);
   assert.match(src, /compactChatMessages\(body\.messages, keep\)/);
+});
+
+// ---------- summarising compaction ----------
+
+test("compaction summarises the dropped region instead of discarding it", async () => {
+  const input = conversation(20);
+  const seen = [];
+  const stub = async (pieces) => { seen.push(...pieces); return "- read 20 files under src/\n- no errors found"; };
+  const r = await compactResponsesInputSummarised(input, 6, stub);
+  assert.ok(r.summarised, "must report that it summarised");
+  assert.ok(seen.length > 0, "the summariser must receive the dropped content");
+  // the digest lands in the OLDEST trimmed slot, and names how many results it covers
+  const withDigest = r.input.filter((i) => typeof i.output === "string" && i.output.includes("Digest of what they contained"));
+  assert.equal(withDigest.length, 1, "exactly one slot carries the digest");
+  assert.match(withDigest[0].output, /read 20 files under src\//);
+  assert.match(withDigest[0].output, /earlier tool result\(s\) were compacted/);
+});
+
+test("the summariser is told which tool produced each result", async () => {
+  const input = conversation(8);
+  let labels = [];
+  await compactResponsesInputSummarised(input, 2, async (pieces) => { labels = pieces.map((p) => p.label); return "x"; });
+  // labels carry the tool name and its arguments so the digest can reference real paths
+  assert.ok(labels.length > 0);
+  for (const l of labels) assert.match(l, /^Read \{"file_path"/);
+});
+
+test("summarisation failure falls back to plain truncation, never worse", async () => {
+  const input = conversation(20);
+  for (const bad of [async () => null, async () => "", async () => { throw new Error("boom"); }]) {
+    const r = await compactResponsesInputSummarised(input, 6, async (p) => {
+      try { return await bad(p); } catch { return null; }
+    });
+    assert.ok(r.trimmed > 0, "still compacts");
+    assert.ok(!r.summarised, "must not claim to have summarised");
+    // structure is still intact
+    const calls = r.input.filter((i) => i.type === "function_call").map((i) => i.call_id).sort();
+    const outs = r.input.filter((i) => i.type === "function_call_output").map((i) => i.call_id).sort();
+    assert.deepEqual(calls, outs, "pairing must survive the fallback");
+  }
+});
+
+test("summarising still preserves pairing and item count at every step", async () => {
+  const input = conversation(15);
+  for (const keep of COMPACT_STEPS) {
+    const r = await compactResponsesInputSummarised(input, keep, async () => "digest");
+    assert.equal(r.input.length, input.length, `item count changed at keep=${keep}`);
+    const calls = r.input.filter((i) => i.type === "function_call").map((i) => i.call_id).sort();
+    const outs = r.input.filter((i) => i.type === "function_call_output").map((i) => i.call_id).sort();
+    assert.deepEqual(calls, outs, `pairing broken at keep=${keep}`);
+    assert.deepEqual(r.input[0], input[0], "opening task preserved");
+  }
+});
+
+test("nothing to compact means no summariser call at all", async () => {
+  let called = false;
+  const input = [{ role: "user", content: [{ type: "input_text", text: "hi" }] }];
+  const r = await compactResponsesInputSummarised(input, 6, async () => { called = true; return "x"; });
+  assert.equal(called, false, "must not spend a model call when there is nothing to drop");
+  assert.equal(r.trimmed, 0);
+});
+
+test("the summariser input is capped so the digest call cannot itself overflow", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /SUMMARY_PER_ITEM/);
+  assert.match(src, /SUMMARY_TOTAL/);
+  assert.match(src, /Math\.floor\(SUMMARY_TOTAL \/ pieces\.length\)/,
+    "the budget must be split evenly so late results are not starved");
+  assert.match(src, /AbortSignal\.timeout/, "the digest call must not hang the request");
+});
+
+test("every dropped result gets a share of the summariser budget", async () => {
+  // Regression for the observed miss: with a greedy budget, a marker in result 31 of 36 never
+  // reached the summariser. Each piece must arrive with content.
+  const input = conversation(36);
+  let pieces = [];
+  await compactResponsesInputSummarised(input, 2, async (p) => { pieces = p; return "d"; });
+  assert.ok(pieces.length >= 30, `expected most results dropped, got ${pieces.length}`);
+  for (const p of pieces) assert.ok(p.text.length > 0, "every piece must carry content");
 });

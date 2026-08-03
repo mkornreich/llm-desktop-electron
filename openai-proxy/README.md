@@ -588,9 +588,41 @@ HTTP 200 on the retry with input down to 79,867 tokens, and the answer was still
 output rather than removing items — the file paths lived in the `function_call` arguments,
 which are never touched.
 
+### It summarises rather than discards
+
+Dropped tool output is not replaced with a placeholder — a cheap model (`OPENAI_COMPACT_MODEL`,
+default `gpt-4.1-mini`) condenses it into a factual digest that keeps what a coding agent still
+needs: file paths, symbol names, key values, errors, counts and conclusions. The digest is
+written into the **oldest trimmed slot**, so no items are added or removed and `call_id`
+pairing stays untouched. Disable with `OPENAI_COMPACT_SUMMARY=0`.
+
+Measured with three marker comments planted inside results 7, 19 and 31 of 40, then asking a
+question answerable only from the *content* of the compacted region:
+
+| | recalled |
+|---|---|
+| plain truncation | 0 / 3 — the content is gone |
+| summarised, greedy budget | **2 / 3** |
+| summarised, even budget | **3 / 3** |
+
+All three came back with exact paths and exact comment text — `src/file7.ts — // TODO: fix the
+race in scheduler.ts` and so on — out of 374k tokens of tool output compressed into a 634-char
+digest.
+
+The two-of-three result is worth recording, because it was a real bug. The summariser budget
+was spent first-come-first-served, so 36 results at 4,000 characters each blew the 120k total
+and the last items were fed **nothing** — the marker in result 31 never reached the summariser
+at all. The budget is now split evenly (`SUMMARY_TOTAL / pieces.length`, floor 400), which is
+what took it to 3/3. There is a regression test asserting every dropped result arrives with
+content.
+
+Summarising **can only add value**: any failure — non-2xx, empty digest, thrown error, or the
+60s timeout — falls back to plain truncation, and no model call is made when there is nothing
+to drop.
+
 **Honest limits.** This is reactive, so the first over-limit request costs one wasted
-round-trip. And it *truncates* old tool output rather than summarising it, so information is
-genuinely lost — unlike Claude Code's native compaction, which summarises. Recent turns, every
-user message and the opening task are always preserved intact.
+round-trip, plus one more for the digest. The digest is lossy by construction — it is a summary,
+not the original text — so a question needing verbatim detail from a compacted result may still
+miss. Recent turns, every user message and the opening task are always preserved intact.
 
 [issue #4]: https://github.com/mkornreich/llm-desktop-electron/issues/4

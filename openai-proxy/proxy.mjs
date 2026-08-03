@@ -162,6 +162,12 @@ const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || P
 // (b) a turn can come back genuinely empty — no text AND no tool call — which must never be
 //     forwarded as a blank turn. See emptyTurnNotice().
 const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "high";
+// Compaction can either discard old tool output or SUMMARISE it. Summarising costs one extra
+// model call but keeps the substance, which is what Claude Code's native compaction does.
+// Falls back to plain truncation whenever the summary call fails, so it can only add value.
+const COMPACT_SUMMARY = (process.env.OPENAI_COMPACT_SUMMARY || PROJECT.OPENAI_COMPACT_SUMMARY || "1") !== "0";
+const COMPACT_MODEL = process.env.OPENAI_COMPACT_MODEL || PROJECT.OPENAI_COMPACT_MODEL ||
+  OPENAI_CLASSIFIER_MODEL || "gpt-4.1-mini";
 const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
 const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -405,6 +411,87 @@ function compactChatMessages(messages, keepRecent) {
 
 // Escalation ladder: keep 12 recent items, then 6, then 2. Each pass reclaims more.
 const COMPACT_STEPS = [12, 6, 2];
+
+// Caps on what the summariser itself is fed, so the compaction call cannot blow its own
+// context: at most this much of each result, and this much in total.
+const SUMMARY_PER_ITEM = 4000;
+const SUMMARY_TOTAL = 120000;
+const SUMMARY_MAX_TOKENS = 1500;
+
+// Ask a cheap model to condense the region being dropped. Returns null on any failure, which
+// makes the caller fall back to plain truncation — summarising must never be able to break a
+// request that truncation alone would have fixed.
+async function summariseDropped(pieces) {
+  if (!pieces.length) return null;
+  // Split the budget EVENLY rather than first-come-first-served. With a greedy budget, 36
+  // results at 4000 chars each blew the 120k total and the last items were fed nothing —
+  // observed live: a marker planted in result 31 of 36 was absent from the digest while ones
+  // in results 7 and 19 survived. An even share means every dropped result is represented.
+  const perItem = Math.max(400, Math.min(SUMMARY_PER_ITEM, Math.floor(SUMMARY_TOTAL / pieces.length)));
+  const parts = pieces.map(({ label, text }) => `### ${label}\n${text.slice(0, perItem)}`);
+  const prompt =
+    "You are compacting an AI coding agent's conversation to fit a context window. Below are " +
+    "tool results that are about to be dropped. Write a dense factual digest that preserves " +
+    "what a coding agent would still need: file paths, symbol and function names, key values, " +
+    "errors, counts, and conclusions reached. Omit boilerplate and repetition. Use terse " +
+    "bullets. Do not invent anything not present below.\n\n" + parts.join("\n\n");
+  try {
+    const r = await fetch(`${OPENAI_BASE}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: COMPACT_MODEL, max_output_tokens: SUMMARY_MAX_TOKENS,
+        input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!r.ok) { log(`  ! compaction summary failed (${r.status}); falling back to truncation`); return null; }
+    const j = await r.json();
+    let text = "";
+    for (const it of j.output || [])
+      if (it.type === "message") for (const c of it.content || []) if (c.type === "output_text") text += c.text || "";
+    text = text.trim();
+    if (!text) { log("  ! compaction summary came back empty; falling back to truncation"); return null; }
+    return text;
+  } catch (e) {
+    log(`  ! compaction summary error (${e.message}); falling back to truncation`);
+    return null;
+  }
+}
+
+// Compact, and if summarisation is enabled put a digest of what was dropped into the OLDEST
+// trimmed slot. No items are added or removed, so call_id pairing is untouched — the digest
+// simply occupies the place the information used to be.
+async function compactResponsesInputSummarised(input, keepRecent, summarise = summariseDropped) {
+  const plain = compactResponsesInput(input, keepRecent);
+  if (!COMPACT_SUMMARY || !plain.trimmed) return plain;
+
+  // Collect what this pass is discarding, oldest first, with a label the digest can reference.
+  const pieces = [];
+  let firstTrimmedIdx = -1;
+  const cutoff = Math.max(0, input.length - keepRecent);
+  for (let i = 0; i < cutoff; i++) {
+    const before = input[i], after = plain.input[i];
+    if (before?.type === "function_call_output" && after?.output === TRIMMED && before.output !== TRIMMED) {
+      if (firstTrimmedIdx === -1) firstTrimmedIdx = i;
+      // find the matching call so the digest can name the tool and its arguments
+      const call = input.find((x) => x?.type === "function_call" && x.call_id === before.call_id);
+      const label = call ? `${call.name || "tool"} ${String(call.arguments || "").slice(0, 120)}` : `result ${before.call_id}`;
+      pieces.push({ label, text: String(before.output || "") });
+    }
+  }
+  const digest = await summarise(pieces);
+  if (!digest || firstTrimmedIdx === -1) return plain;
+
+  const out = plain.input.slice();
+  out[firstTrimmedIdx] = {
+    ...out[firstTrimmedIdx],
+    output: `[proxy] ${pieces.length} earlier tool result(s) were compacted to fit the context ` +
+            `window. Digest of what they contained:\n\n${digest}`,
+  };
+  log(`  ! summarised ${pieces.length} dropped tool result(s) into a ${digest.length}-char digest (model ${COMPACT_MODEL})`);
+  return { input: out, trimmed: plain.trimmed, reclaimed: plain.reclaimed - digest.length, summarised: true };
+}
 
 // ---- tool-argument pruning ----
 // The model sometimes invents a parameter that belongs to a DIFFERENT tool: it called
@@ -910,9 +997,9 @@ async function callResponses(payload) {
     else if (CONTEXT_ERROR_RE.test(txt)) {
       let body = payload;
       for (const keep of COMPACT_STEPS) {
-        const { input, trimmed, reclaimed } = compactResponsesInput(body.input, keep);
+        const { input, trimmed, reclaimed, summarised } = await compactResponsesInputSummarised(body.input, keep);
         if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
-        log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
+        log(`  ! context exceeded — compacted ${trimmed} tool result(s)${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
         body = { ...body, input };
         res = await doFetch(body);
         if (res.status !== 400) break;
@@ -1233,7 +1320,8 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice,
-         compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED };
+         compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
+         compactResponsesInputSummarised, summariseDropped };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

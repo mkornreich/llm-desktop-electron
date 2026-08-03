@@ -69,6 +69,14 @@ const SCHEMA = [
     default: "1", label: "Gateway model discovery",
     help: "Makes the app list the proxy's /v1/models in its picker. OpenAI mode only." },
 
+  { group: "Compaction", file: ".openai-model", key: "OPENAI_COMPACT_SUMMARY", type: "bool",
+    default: "1", label: "Summarise instead of discarding",
+    help: "When the context window fills, old tool output is compacted. With this on, a cheap model condenses what is being dropped into a factual digest — file paths, symbols, errors, conclusions — instead of replacing it with a placeholder. Costs one extra call per compaction and falls back to plain truncation on any failure." },
+  { group: "Compaction", file: ".openai-model", key: "OPENAI_COMPACT_MODEL", type: "text",
+    default: "gpt-4.1-mini", suggestions: ["gpt-4.1-mini", "gpt-4.1", "gpt-5.4"],
+    label: "Summarising model",
+    help: "Used only for compaction digests. Small and fast is the point; it never answers the user." },
+
   { group: "Privacy", file: ".privacy", key: "DISABLE_TELEMETRY", type: "bool", default: "1",
     label: "Disable all telemetry",
     help: "Three levers at once: env vars for the agent, PRIVACY_DISABLE_TELEMETRY plus bundle patches for the desktop shell (whose gates are otherwise MDM-only), and DNS sinkholing for the renderer's Datadog/Sentry and the first-party-proxied analytics hosts. Verified 0 bytes egress." },
