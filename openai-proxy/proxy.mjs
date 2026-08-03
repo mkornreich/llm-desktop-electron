@@ -58,7 +58,12 @@ const PICKER_MODELS = (process.env.OPENAI_PICKER_MODELS || PROJECT.OPENAI_PICKER
   .split(",").map((s) => { const [id, ...n] = s.split(":"); return { id: (id || "").trim(), name: (n.join(":").trim() || (id || "").trim()) }; })
   .filter((m) => m.id);
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-const DEFAULT_MAX_TOKENS = parseInt(FILE.maxTokens || "1024", 10) || 1024;
+// Budget used only when the client omits max_tokens. It deliberately does NOT read
+// FILE.maxTokens any more: ~/.dbeaver-ai-complete is a DBeaver config and carries
+// maxTokens=512, which is fine for a SQL assistant and far too small for an agent — a request
+// that omitted max_tokens got 512 tokens, and with reasoning attached could return nothing at
+// all. Override with OPENAI_DEFAULT_MAX_TOKENS.
+const DEFAULT_MAX_TOKENS = parseInt(process.env.OPENAI_DEFAULT_MAX_TOKENS || PROJECT.OPENAI_DEFAULT_MAX_TOKENS || "8192", 10) || 8192;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
 // 64k; clamp so agents that request Claude-sized budgets don't 400.
 const MAX_OUTPUT_TOKENS = parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS || "32768", 10) || 32768;
@@ -165,6 +170,14 @@ const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "h
 // Compaction can either discard old tool output or SUMMARISE it. Summarising costs one extra
 // model call but keeps the substance, which is what Claude Code's native compaction does.
 // Falls back to plain truncation whenever the summary call fails, so it can only add value.
+// github issue #8. When a turn is cut off by the output cap, continue it automatically instead
+// of handing back a truncated answer.
+const CONTINUE_ON_TRUNCATION = (process.env.OPENAI_CONTINUE_ON_TRUNCATION || PROJECT.OPENAI_CONTINUE_ON_TRUNCATION || "1") !== "0";
+// Ceiling on the TOTAL output tokens spliced into one assistant message. This matters because
+// every continuation appends to the same message, and the client enforces its own per-response
+// maximum — "Claude's response exceeded the 64000 output token maximum". Splicing without a
+// budget is a plausible way to produce exactly that error, so continuations stop below it.
+const MAX_TURN_OUTPUT_TOKENS = parseInt(process.env.OPENAI_MAX_TURN_OUTPUT_TOKENS || PROJECT.OPENAI_MAX_TURN_OUTPUT_TOKENS || "56000", 10) || 56000;
 const COMPACT_SUMMARY = (process.env.OPENAI_COMPACT_SUMMARY || PROJECT.OPENAI_COMPACT_SUMMARY || "1") !== "0";
 const COMPACT_MODEL = process.env.OPENAI_COMPACT_MODEL || PROJECT.OPENAI_COMPACT_MODEL ||
   OPENAI_CLASSIFIER_MODEL || "gpt-4.1-mini";
@@ -1073,6 +1086,8 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
   let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic
+  let incompleteReason = null;                   // as reported by the API, never assumed
+  let totalOutTokens = 0;                        // cumulative across continuations
   const open = (itemId, cb) => {
     let it = items.get(itemId);
     if (!it) { it = { aIndex: nextIndex++, opened: false, closed: false }; items.set(itemId, it); }
@@ -1162,7 +1177,14 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
           }
           break;
         case "response.completed": usage = j.response?.usage; break;
-        case "response.incomplete": usage = j.response?.usage; incomplete = true; break;
+        case "response.incomplete":
+          usage = j.response?.usage;
+          incomplete = true;
+          // Take the reason the API actually gave. This used to be hardcoded to
+          // max_output_tokens, which made the empty-turn notice assert a cause it had not
+          // verified and hand out budget advice that might not apply.
+          incompleteReason = j.response?.incomplete_details?.reason || incompleteReason || "unknown";
+          break;
       }
       }
     }
@@ -1170,6 +1192,43 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   }
 
   await consume(upstream);
+  totalOutTokens += usage?.output_tokens || 0;
+
+  // Continue the turn in place when it was cut off by the output cap (issue #8). The client
+  // otherwise surfaces a truncated answer, or errors outright, and the user has to ask again.
+  // Each pass appends to the SAME assistant message, so the cumulative budget below is what
+  // keeps the spliced result under the client's own per-response maximum.
+  let truncContinued = 0;
+  while (CONTINUE_ON_TRUNCATION && allowContinue && payload && incomplete &&
+         incompleteReason === "max_output_tokens" &&
+         truncContinued < MAX_CONTINUATIONS && totalOutTokens < MAX_TURN_OUTPUT_TOKENS) {
+    truncContinued++;
+    const remaining = MAX_TURN_OUTPUT_TOKENS - totalOutTokens;
+    log(`  -> continue-on-truncation ${truncContinued}/${MAX_CONTINUATIONS}: cut off at the output cap after ${totalOutTokens} token(s); resuming with ${remaining} left`);
+    const carry = turnText.slice(-2000);   // enough context to resume mid-sentence
+    const next = {
+      ...payload,
+      max_output_tokens: Math.max(256, Math.min(payload.max_output_tokens || remaining, remaining)),
+      input: [...payload.input,
+              { role: "assistant", content: [{ type: "output_text", text: turnText }] },
+              { role: "user", content: [{ type: "input_text", text:
+                "Your previous message was cut off by the output token limit. Continue it from " +
+                "exactly where it stopped. Do not repeat anything already written, do not " +
+                "restate the question, and do not open with a preamble — resume mid-sentence if " +
+                "that is where it ended. The text ended with: " + JSON.stringify(carry) }] }],
+    };
+    // Reset the per-pass flags so the next consume() reports its own outcome.
+    incomplete = false; incompleteReason = null;
+    let up;
+    try { up = await callResponses(next); } catch (e) { log(`  -> continue-on-truncation fetch failed: ${e.message}`); break; }
+    if (!up.ok) { log(`  -> continue-on-truncation got ${up.status}; keeping the truncated turn`); break; }
+    payload = next;
+    await consume(up);
+    totalOutTokens += usage?.output_tokens || 0;
+  }
+  if (incomplete && incompleteReason === "max_output_tokens" && totalOutTokens >= MAX_TURN_OUTPUT_TOKENS) {
+    log(`  ! stopped continuing at ${totalOutTokens} output tokens (ceiling ${MAX_TURN_OUTPUT_TOKENS}) to stay under the client's per-response maximum`);
+  }
 
   // Continue the turn in place when the model only SAID it would act.
   let continued = 0;
@@ -1200,7 +1259,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   // Never hand back a blank turn (issue #1).
   if (!hasTool && textLen === 0) {
     const notice = emptyTurnNotice({ status: incomplete ? "incomplete" : "completed",
-                                     incomplete_details: incomplete ? { reason: "max_output_tokens" } : undefined,
+                                     incomplete_details: incompleteReason ? { reason: incompleteReason } : undefined,
                                      usage });
     const it = open("__empty__", { type: "text", text: "" });
     sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: notice } });
@@ -1210,7 +1269,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   }
   recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
-  log(`  <- responses stream stop_reason=${stop} out_tokens=${usage?.output_tokens ?? "?"} text=${textLen}ch` +
+  log(`  <- responses stream stop_reason=${stop} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
       (thinkLen ? ` thinking=${thinkLen}ch` : "") + ` -> ` +
       (toolCount ? `${toolCount} tool call(s)` :
        stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :

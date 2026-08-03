@@ -79,6 +79,12 @@ fi
 # Not used: MAX_THINKING_TOKENS / thinking.budget_tokens. The CLI's own migration notes call
 # that deprecated — "budget_tokens -> migrate to adaptive thinking on Opus 4.6 / Sonnet 4.6
 # (still functional but deprecated)" — and effort level is the current mechanism.
+# The client enforces its own per-response ceiling and says so when exceeded: "Claude's
+# response exceeded the 64000 output token maximum. To configure this behavior, set the
+# CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable." (issue #8). Set it explicitly so the
+# limit is visible rather than implicit; the proxy keeps its spliced continuations below it via
+# OPENAI_MAX_TURN_OUTPUT_TOKENS.
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-max}"
 export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT="${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT:-1}"
 echo "[run] CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL} (always-enable=${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT})"

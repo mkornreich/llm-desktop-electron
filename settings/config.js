@@ -69,6 +69,16 @@ const SCHEMA = [
     default: "1", label: "Gateway model discovery",
     help: "Makes the app list the proxy's /v1/models in its picker. OpenAI mode only." },
 
+  { group: "Output limits", file: ".openai-model", key: "OPENAI_CONTINUE_ON_TRUNCATION", type: "bool",
+    default: "1", label: "Continue when cut off by the output cap",
+    help: "When a turn ends truncated at max_output_tokens, the proxy resumes it and appends to the same message instead of handing back a half-finished answer (issue #8)." },
+  { group: "Output limits", file: ".openai-model", key: "OPENAI_MAX_TURN_OUTPUT_TOKENS", type: "int",
+    default: "56000", label: "Max total output per turn",
+    help: "Ceiling on output tokens spliced into a single assistant message across continuations. Kept under the client's own per-response maximum, which reports 'Claude's response exceeded the 64000 output token maximum'." },
+  { group: "Output limits", file: ".openai-model", key: "OPENAI_DEFAULT_MAX_TOKENS", type: "int",
+    default: "8192", label: "Default budget when unspecified",
+    help: "Used only when the client omits max_tokens. Previously inherited maxTokens=512 from ~/.dbeaver-ai-complete, a DBeaver setting, which starved such requests." },
+
   { group: "Compaction", file: ".openai-model", key: "OPENAI_COMPACT_SUMMARY", type: "bool",
     default: "1", label: "Summarise instead of discarding",
     help: "When the context window fills, old tool output is compacted. With this on, a cheap model condenses what is being dropped into a factual digest — file paths, symbols, errors, conclusions — instead of replacing it with a placeholder. Costs one extra call per compaction and falls back to plain truncation on any failure." },

@@ -775,3 +775,46 @@ test("every dropped result gets a share of the summariser budget", async () => {
   assert.ok(pieces.length >= 30, `expected most results dropped, got ${pieces.length}`);
   for (const p of pieces) assert.ok(p.text.length > 0, "every piece must carry content");
 });
+
+// ---------- issue #8: output-token limits ----------
+
+test("issue #8: the empty-turn notice reports the API's reason, never an assumed one", () => {
+  // It used to hardcode max_output_tokens, so it could blame the budget for a content filter
+  // and hand out advice that did not apply.
+  const filtered = emptyTurnNotice({ status: "incomplete", incomplete_details: { reason: "content_filter" },
+                                     usage: { output_tokens: 116 } });
+  assert.match(filtered, /reason=content_filter/);
+  assert.ok(!/max_output_tokens/.test(filtered), "must not invent a budget cause");
+  assert.ok(!/consumed by reasoning/.test(filtered), "must not give budget advice for a filter");
+  // and when it really is the budget, the advice appears
+  const starved = emptyTurnNotice({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+                                    usage: { output_tokens: 116, output_tokens_details: { reasoning_tokens: 116 } } });
+  assert.match(starved, /reason=max_output_tokens/);
+  assert.match(starved, /consumed by reasoning/);
+});
+
+test("issue #8: the default budget no longer comes from the DBeaver config", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.ok(!/DEFAULT_MAX_TOKENS = parseInt\(FILE\.maxTokens/.test(src),
+    "must not inherit maxTokens from ~/.dbeaver-ai-complete (it is 512)");
+  assert.match(src, /OPENAI_DEFAULT_MAX_TOKENS/);
+});
+
+test("issue #8: truncated turns are continued, bounded by a cumulative ceiling", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /CONTINUE_ON_TRUNCATION && allowContinue && payload && incomplete/);
+  assert.match(src, /incompleteReason === "max_output_tokens"/,
+    "must only resume when the cap was the actual reason");
+  assert.match(src, /totalOutTokens < MAX_TURN_OUTPUT_TOKENS/,
+    "continuations must respect the cumulative ceiling");
+  assert.match(src, /Do not repeat anything already written/, "the resume prompt must forbid repetition");
+  // the ceiling exists because splicing into one message can exceed the client's own maximum
+  assert.match(src, /MAX_TURN_OUTPUT_TOKENS = parseInt/);
+});
+
+test("issue #8: the cumulative total is what gets reported, not the last pass", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /out_tokens=\$\{totalOutTokens \|\| \(usage\?\.output_tokens \?\? "\?"\)\}/);
+  assert.equal((src.match(/totalOutTokens \+= usage\?\.output_tokens \|\| 0/g) || []).length, 2,
+    "must accumulate after the first pass and after each continuation");
+});

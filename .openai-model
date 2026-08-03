@@ -61,3 +61,13 @@ OPENAI_VERBOSITY=high
 # failure, so it can only add value. OPENAI_COMPACT_MODEL defaults to the classifier model.
 OPENAI_COMPACT_SUMMARY=1
 OPENAI_COMPACT_MODEL=gpt-4.1-mini
+# Output-token handling (github issue #8).
+# OPENAI_DEFAULT_MAX_TOKENS applies only when the client omits max_tokens. It used to be read
+# from ~/.dbeaver-ai-complete, which sets maxTokens=512 for a SQL assistant — far too small for
+# an agent, and with reasoning attached such a request could return nothing at all.
+# OPENAI_CONTINUE_ON_TRUNCATION resumes a turn that the output cap cut off, appending to the
+# same message. OPENAI_MAX_TURN_OUTPUT_TOKENS caps the total spliced into one message, staying
+# under the client's own ceiling ("exceeded the 64000 output token maximum").
+OPENAI_DEFAULT_MAX_TOKENS=8192
+OPENAI_CONTINUE_ON_TRUNCATION=1
+OPENAI_MAX_TURN_OUTPUT_TOKENS=56000

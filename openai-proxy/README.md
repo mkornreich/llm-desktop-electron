@@ -626,3 +626,44 @@ not the original text — so a question needing verbatim detail from a compacted
 miss. Recent turns, every user message and the opening task are always preserved intact.
 
 [issue #4]: https://github.com/mkornreich/llm-desktop-electron/issues/4
+
+## Output-token limits ([issue #8])
+
+Two problems, one of which the proxy had caused itself.
+
+**Turns cut off by the output cap are now resumed.** When a response ends
+`incomplete/max_output_tokens`, the proxy continues it and appends to the **same** assistant
+message, with a prompt that forbids repeating anything already written. Measured with
+`max_tokens=400` on a request that wanted ~900 words:
+
+```
+-> continue-on-truncation 1/2: cut off at the output cap after 400 token(s); resuming with 55600 left
+-> continue-on-truncation 2/2: cut off at the output cap after 800 token(s); resuming with 55200 left
+<- stop_reason=max_tokens out_tokens=1200 text=5760ch
+```
+
+5,760 characters delivered instead of ~1,900, and **zero repeated 8-grams** across both seams.
+`stop_reason` stays `max_tokens` when it is still incomplete, so the client is not told a
+truncated answer is finished. Controlled by `OPENAI_CONTINUE_ON_TRUNCATION`.
+
+**The cumulative ceiling matters more than the continuation count.** Every continuation appends
+to one message, and the client enforces its own per-response maximum — *"Claude's response
+exceeded the 64000 output token maximum"*. Splicing without a budget is a plausible way to
+produce exactly that error, which makes it a likely self-inflicted cause of the reported issue.
+`OPENAI_MAX_TURN_OUTPUT_TOKENS` (default 56,000) stops continuations below it, and `run.sh` now
+sets `CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000` explicitly so the client-side limit is visible rather
+than implicit. With realistic budgets the ceiling binds long before the continuation count does.
+
+**Two bugs found while fixing it:**
+
+- The default budget for requests that omit `max_tokens` was read from
+  `~/.dbeaver-ai-complete`, which sets **`maxTokens=512`** — a DBeaver setting for a SQL
+  assistant, far too small for an agent, and with reasoning attached such a request could return
+  nothing at all. Now `OPENAI_DEFAULT_MAX_TOKENS`, default 8192.
+- The empty-turn notice **hardcoded** `reason: "max_output_tokens"` whenever a stream reported
+  incomplete, so it could blame the token budget for a content filter and print advice that did
+  not apply. It now reports the reason the API actually gave, and only offers budget advice when
+  the budget really was the cause. This is the notice quoted in the issue's comment, and its
+  reason may well have been wrong.
+
+[issue #8]: https://github.com/mkornreich/llm-desktop-electron/issues/8
