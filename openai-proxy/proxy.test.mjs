@@ -9,7 +9,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
         buildPersistenceHint, withFormatHint, shouldAutoContinue, continueReason,
         workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
-        emptyTurnNotice } =
+        emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
+        COMPACT_STEPS, TRIMMED } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -578,4 +579,119 @@ test("issue #1: the hint demands text on every turn, including tool-call turns",
   assert.match(h, /Always say something in words/i);
   assert.match(h, /including turns whose main content is a tool call/i);
   assert.match(h, /Be verbose in your final answer/i);
+});
+
+// ---------- issue #4: automatic compaction when the context fills ----------
+
+// A realistic agent conversation: task, then many tool round-trips with big outputs.
+function conversation(pairs) {
+  const input = [{ role: "user", content: [{ type: "input_text", text: "audit the repo" }] }];
+  for (let i = 0; i < pairs; i++) {
+    input.push({ type: "function_call", call_id: `c${i}`, name: "Read", arguments: `{"file_path":"f${i}"}` });
+    input.push({ type: "function_call_output", call_id: `c${i}`, output: "X".repeat(20000) });
+  }
+  input.push({ role: "user", content: [{ type: "input_text", text: "now summarise" }] });
+  return input;
+}
+
+test("issue #4: the over-context error is recognised", () => {
+  // Verbatim from the API.
+  assert.ok(CONTEXT_ERROR_RE.test("Your input exceeds the context window of this model. Please adjust your input and try again."));
+  assert.ok(CONTEXT_ERROR_RE.test("context_length_exceeded"));
+  assert.ok(CONTEXT_ERROR_RE.test("This model's maximum context length is 400000 tokens"));
+  // and does not fire on unrelated 400s
+  assert.ok(!CONTEXT_ERROR_RE.test("Invalid value: 'max' is not supported with this model"));
+  assert.ok(!CONTEXT_ERROR_RE.test("Invalid 'tools': array too long"));
+});
+
+test("issue #4: compaction truncates old tool output and reclaims real volume", () => {
+  const input = conversation(20);
+  const before = JSON.stringify(input).length;
+  const { input: out, trimmed, reclaimed } = compactResponsesInput(input, 6);
+  assert.ok(trimmed > 0, "must trim something");
+  assert.ok(reclaimed > 200000, `expected substantial reclaim, got ${reclaimed}`);
+  assert.ok(JSON.stringify(out).length < before / 2, "payload should shrink dramatically");
+});
+
+test("issue #4: tool_use/tool_result PAIRING is never broken", () => {
+  // The critical constraint: function_call and function_call_output are separate items joined
+  // by call_id. Dropping one side makes OpenAI reject the request, so compaction truncates
+  // content and never removes items.
+  const input = conversation(15);
+  for (const keep of COMPACT_STEPS) {
+    const { input: out } = compactResponsesInput(input, keep);
+    assert.equal(out.length, input.length, "item count must not change");
+    const calls = out.filter((i) => i.type === "function_call").map((i) => i.call_id).sort();
+    const outs = out.filter((i) => i.type === "function_call_output").map((i) => i.call_id).sort();
+    assert.deepEqual(calls, outs, `pairing broken at keep=${keep}`);
+    // arguments are never touched — only outputs
+    for (const i of out.filter((x) => x.type === "function_call"))
+      assert.match(i.arguments, /^\{"file_path"/);
+  }
+});
+
+test("issue #4: the most recent items are preserved intact", () => {
+  const input = conversation(20);
+  const { input: out } = compactResponsesInput(input, 6);
+  const tail = out.slice(-6);
+  for (const i of tail)
+    if (i.type === "function_call_output") assert.notEqual(i.output, TRIMMED, "recent output must survive");
+  // the final user message is always intact
+  assert.deepEqual(out[out.length - 1], input[input.length - 1]);
+});
+
+test("issue #4: the task and the user's messages are never trimmed", () => {
+  const input = conversation(20);
+  const { input: out } = compactResponsesInput(input, 2);
+  assert.deepEqual(out[0], input[0], "the opening task must survive the hardest pass");
+  for (let i = 0; i < input.length; i++)
+    if (input[i].role === "user") assert.deepEqual(out[i], input[i], "user messages are never touched");
+});
+
+test("issue #4: escalation reclaims progressively more", () => {
+  const input = conversation(20);
+  const reclaimed = COMPACT_STEPS.map((k) => compactResponsesInput(input, k).reclaimed);
+  for (let i = 1; i < reclaimed.length; i++)
+    assert.ok(reclaimed[i] >= reclaimed[i - 1], `keep=${COMPACT_STEPS[i]} should reclaim >= keep=${COMPACT_STEPS[i - 1]}`);
+});
+
+test("issue #4: compaction is idempotent and reports nothing left to do", () => {
+  const input = conversation(10);
+  const once = compactResponsesInput(input, 2);
+  const twice = compactResponsesInput(once.input, 2);
+  assert.equal(twice.trimmed, 0, "already-trimmed output must not be re-trimmed");
+  assert.equal(twice.reclaimed, 0);
+});
+
+test("issue #4: a conversation with nothing to compact is left alone", () => {
+  const input = [{ role: "user", content: [{ type: "input_text", text: "hello" }] }];
+  const r = compactResponsesInput(input, 6);
+  assert.equal(r.trimmed, 0);
+  assert.deepEqual(r.input, input);
+  assert.deepEqual(compactResponsesInput(null, 6).input, null);
+});
+
+test("issue #4: the chat surface compacts role:tool messages the same way", () => {
+  const messages = [{ role: "system", content: "sys" }, { role: "user", content: "go" }];
+  for (let i = 0; i < 12; i++) {
+    messages.push({ role: "assistant", content: null, tool_calls: [{ id: `c${i}`, type: "function", function: { name: "Read", arguments: "{}" } }] });
+    messages.push({ role: "tool", tool_call_id: `c${i}`, content: "Y".repeat(15000) });
+  }
+  const { messages: out, trimmed, reclaimed } = compactChatMessages(messages, 6);
+  assert.ok(trimmed > 0 && reclaimed > 100000);
+  assert.equal(out.length, messages.length, "no messages removed");
+  assert.equal(out[0].content, "sys", "system prompt untouched");
+  assert.equal(out[1].content, "go", "first user message untouched");
+  // tool_call_ids still line up with the assistant tool_calls
+  const ids = out.filter((m) => m.role === "tool").map((m) => m.tool_call_id).sort();
+  const callIds = out.flatMap((m) => (m.tool_calls || []).map((t) => t.id)).sort();
+  assert.deepEqual(ids, callIds, "chat pairing broken");
+});
+
+test("issue #4: both call paths retry on the context error", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.equal((src.match(/CONTEXT_ERROR_RE\.test/g) || []).length >= 4, true,
+    "both paths must test the error and re-test after each retry");
+  assert.match(src, /compactResponsesInput\(body\.input, keep\)/);
+  assert.match(src, /compactChatMessages\(body\.messages, keep\)/);
 });

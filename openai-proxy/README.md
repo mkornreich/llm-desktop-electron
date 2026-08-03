@@ -552,3 +552,45 @@ only that the model returned nothing, rather than offering budget advice that wo
 apply.
 
 [issue #1]: https://github.com/mkornreich/llm-desktop-electron/issues/1
+
+## Automatic compaction ([issue #4])
+
+The app showed *"Your context window is full … Compact, rewind, or start a new session. Prompt
+is too long"*. Claude Code has its own auto-compaction, but it sizes the window from the model
+it believes it is talking to (`claude-opus-4-8`) while the proxy actually calls
+`gpt-5.3-codex` — so its threshold never trips and OpenAI rejects the request outright:
+
+```
+400  Your input exceeds the context window of this model. Please adjust your input and try again.
+```
+
+`GET /v1/models/gpt-5.3-codex` returns only `{id, object, created, owned_by}` — **no
+`context_window`** — so the limit cannot be read ahead of time. Compaction is therefore
+reactive: catch that error, shrink the conversation, retry, escalating through
+`COMPACT_STEPS = [12, 6, 2]` recent items until it fits.
+
+**What gets shrunk, and why only that.** Tool *output* is where an agent conversation's tokens
+actually live — file contents and command output, measured at ~110k input tokens per request.
+The proxy truncates that content and **never removes items**, because a `function_call` and its
+`function_call_output` are separate top-level items joined by `call_id`: drop one side and
+OpenAI rejects the whole request. Truncating content keeps the structure exactly intact. The
+same applies on the chat surface, where tool results are `role:"tool"` messages.
+
+Verified against a real overflow — 40 tool round-trips, 1.67 MB, ~419k estimated tokens:
+
+```
+! context exceeded — compacted 36 tool result(s), reclaimed ~374k tokens (keeping last 12 items); retrying
+<- responses status=completed out_tokens=23
+```
+
+HTTP 200 on the retry with input down to 79,867 tokens, and the answer was still **correct**:
+*"I read 40 files (src/file0.ts through src/file39.ts)."* That is the payoff of truncating
+output rather than removing items — the file paths lived in the `function_call` arguments,
+which are never touched.
+
+**Honest limits.** This is reactive, so the first over-limit request costs one wasted
+round-trip. And it *truncates* old tool output rather than summarising it, so information is
+genuinely lost — unlike Claude Code's native compaction, which summarises. Recent turns, every
+user message and the opening task are always preserved intact.
+
+[issue #4]: https://github.com/mkornreich/llm-desktop-electron/issues/4

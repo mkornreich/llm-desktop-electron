@@ -349,6 +349,63 @@ function emptyTurnNotice(resp) {
          `No tool was called, so nothing ran.${hint}`;
 }
 
+// ---- automatic compaction (github issue #4) ----
+// The app showed "Your context window is full ... Prompt is too long". Claude Code has its
+// own auto-compaction, but it sizes the window from the model it THINKS it is talking to
+// (claude-opus-4-8) while the proxy actually calls gpt-5.3-codex, so its threshold never
+// trips and OpenAI rejects the request outright with:
+//   400 "Your input exceeds the context window of this model. Please adjust your input and
+//        try again."
+// The models endpoint reports no context_window, so the limit cannot be read ahead of time —
+// compaction is therefore reactive: catch that error, shrink the conversation, retry.
+const CONTEXT_ERROR_RE = /exceeds the context window|context[_ ]length[_ ]exceeded|maximum context length|too many tokens|reduce the length/i;
+
+// What gets shrunk, and why only this. Tool OUTPUT is where an agent conversation's tokens
+// actually live — file contents and command output, measured at ~110k input tokens per
+// request. Their *content* is truncated rather than the items removed, because a
+// function_call and its function_call_output are separate top-level items joined by call_id:
+// dropping one side breaks the pairing and OpenAI rejects the request. Truncating content
+// keeps the structure exactly intact.
+const TRIMMED = "[earlier tool output trimmed by the proxy to fit the model's context window]";
+
+function compactResponsesInput(input, keepRecent) {
+  if (!Array.isArray(input)) return { input, trimmed: 0, reclaimed: 0 };
+  const cutoff = Math.max(0, input.length - keepRecent);
+  let trimmed = 0, reclaimed = 0;
+  const out = input.map((item, i) => {
+    if (i >= cutoff) return item;                                  // recent turns stay whole
+    if (item?.type === "function_call_output" && typeof item.output === "string"
+        && item.output.length > TRIMMED.length && item.output !== TRIMMED) {
+      reclaimed += item.output.length - TRIMMED.length;
+      trimmed++;
+      return { ...item, output: TRIMMED };
+    }
+    return item;
+  });
+  return { input: out, trimmed, reclaimed };
+}
+
+// Same idea on the chat surface, where tool results are role:"tool" messages.
+function compactChatMessages(messages, keepRecent) {
+  if (!Array.isArray(messages)) return { messages, trimmed: 0, reclaimed: 0 };
+  const cutoff = Math.max(0, messages.length - keepRecent);
+  let trimmed = 0, reclaimed = 0;
+  const out = messages.map((m, i) => {
+    if (i >= cutoff) return m;
+    if (m?.role === "tool" && typeof m.content === "string"
+        && m.content.length > TRIMMED.length && m.content !== TRIMMED) {
+      reclaimed += m.content.length - TRIMMED.length;
+      trimmed++;
+      return { ...m, content: TRIMMED };
+    }
+    return m;
+  });
+  return { messages: out, trimmed, reclaimed };
+}
+
+// Escalation ladder: keep 12 recent items, then 6, then 2. Each pass reclaims more.
+const COMPACT_STEPS = [12, 6, 2];
+
 // ---- tool-argument pruning ----
 // The model sometimes invents a parameter that belongs to a DIFFERENT tool: it called
 // Workflow with run_in_background (which Agent and Bash have, Workflow does not) and the
@@ -683,6 +740,23 @@ async function callOpenAI(payload) {
       delete retry.temperature;
     }
     if (retry) res = await doFetch(retry);
+    // Context window exceeded -> compact and retry (issue #4).
+    if (res.status === 400) {
+      const t1 = await res.clone().text();
+      if (CONTEXT_ERROR_RE.test(t1)) {
+        let body = retry || payload;
+        for (const keep of COMPACT_STEPS) {
+          const { messages, trimmed, reclaimed } = compactChatMessages(body.messages, keep);
+          if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
+          log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} messages); retrying`);
+          body = { ...body, messages };
+          res = await doFetch(body);
+          if (res.status !== 400) break;
+          const t2 = await res.clone().text();
+          if (!CONTEXT_ERROR_RE.test(t2)) break;
+        }
+      }
+    }
   }
   return res;
 }
@@ -832,6 +906,20 @@ async function callResponses(payload) {
     const txt = await res.clone().text();
     const cap = txt.match(/at most (\d+)/);
     if (cap && payload.max_output_tokens != null) res = await doFetch({ ...payload, max_output_tokens: Math.min(payload.max_output_tokens, parseInt(cap[1], 10)) });
+    // Context window exceeded -> compact the conversation and retry (issue #4).
+    else if (CONTEXT_ERROR_RE.test(txt)) {
+      let body = payload;
+      for (const keep of COMPACT_STEPS) {
+        const { input, trimmed, reclaimed } = compactResponsesInput(body.input, keep);
+        if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
+        log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
+        body = { ...body, input };
+        res = await doFetch(body);
+        if (res.status !== 400) break;
+        const t2 = await res.clone().text();
+        if (!CONTEXT_ERROR_RE.test(t2)) break;
+      }
+    }
     // Walk the effort ladder down until the model accepts one.
     else if (payload.reasoning?.effort && /not supported with the .* model/i.test(txt)) {
       let effort = payload.reasoning.effort, next, body = payload;
@@ -1144,7 +1232,8 @@ const server = http.createServer(async (req, res) => {
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
-         pruneToolArgs, emptyTurnNotice };
+         pruneToolArgs, emptyTurnNotice,
+         compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
