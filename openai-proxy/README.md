@@ -513,3 +513,42 @@ Counted on all four paths (chat and Responses, streaming and not) and persisted 
 which is what made the small-budget starvation above possible.
 
 [issue #5]: https://github.com/mkornreich/llm-desktop-electron/issues/5
+
+## Never output nothing ([issue #1])
+
+Two separate causes produced "output with no text", and they needed different fixes.
+
+**1. Turns that were only a tool call.** Every tool-calling turn in the proxy log came back
+`text=0ch` — `gpt-5.3-codex` is terse enough to call a tool and say nothing at all, so the UI
+showed a bare tool chip with no explanation. Claude narrates by default; codex does not. Two
+levers, both now on:
+
+- **`text.verbosity`**, the native OpenAI knob (`low|medium|high`; probing `'ultra'` returns
+  the list). It measurably changes output — `"4"` at low versus `"2 + 2 = **4**."` at high.
+  Set by `OPENAI_VERBOSITY`, default `high`, blank to omit.
+- **A hint rule**: every turn must contain words, including turns whose main content is a
+  tool call — one short line naming what is about to happen and why — and final answers
+  should be verbose about what was done, what was found, and what could not be verified.
+
+Measured before and after on the same prompts: `text=0ch → text=100ch` and `text=0ch →
+text=150ch`, e.g. *"I'm going to count the lines in `openai-proxy/proxy.mjs` directly so I
+can give you an exact number."*
+
+**2. Genuinely empty turns** — no text *and* no tool call. Those must never be forwarded as
+a blank, because a blank turn is indistinguishable from a hang. Both response paths now
+substitute an honest diagnostic carrying the real status and the actionable lever. This
+reports a failure; it never invents an answer. Reproduced by forcing the original starvation
+(`max_tokens=64` with the thinking budget guard lowered):
+
+```
+[proxy] The model returned no content for this turn (status=incomplete,
+reason=max_output_tokens, output_tokens=64, reasoning_tokens=64). No tool was called, so
+nothing ran. The token budget was consumed by reasoning before any answer was produced —
+raise max_tokens, or lower OPENAI_REASONING_EFFORT / raise OPENAI_THINKING_MIN_BUDGET.
+```
+
+The notice is deliberately conditional: with no reasoning tokens and no truncation it says
+only that the model returned nothing, rather than offering budget advice that would not
+apply.
+
+[issue #1]: https://github.com/mkornreich/llm-desktop-electron/issues/1

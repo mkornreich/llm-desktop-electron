@@ -8,7 +8,8 @@ process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
         buildPersistenceHint, withFormatHint, shouldAutoContinue, continueReason,
-        workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs } =
+        workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
+        emptyTurnNotice } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -525,4 +526,56 @@ test("the streaming loop wires the false-background reason to its own nudge", ()
     "the loop must pass BOTH workDone and bgUsed");
   assert.match(src, /nothing was started and no result will ever arrive/,
     "the nudge must state the consequence");
+});
+
+// ---------- issue #1: never output nothing ----------
+
+test("issue #1: an empty turn becomes an honest diagnostic, never a blank", () => {
+  const n = emptyTurnNotice({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+                              usage: { output_tokens: 64, output_tokens_details: { reasoning_tokens: 64 } } });
+  assert.match(n, /returned no content/);
+  assert.match(n, /status=incomplete/);
+  assert.match(n, /reason=max_output_tokens/);
+  assert.match(n, /output_tokens=64/);
+  assert.match(n, /reasoning_tokens=64/);
+  // must name the actual cause and the lever, since this is the starvation case
+  assert.match(n, /consumed by reasoning/);
+  assert.match(n, /OPENAI_REASONING_EFFORT|OPENAI_THINKING_MIN_BUDGET/);
+  assert.match(n, /nothing ran/);
+});
+
+test("issue #1: the notice reports a failure and never invents an answer", () => {
+  const n = emptyTurnNotice({ status: "completed", usage: { output_tokens: 0 } });
+  assert.match(n, /^\[proxy\] /, "must be clearly labelled as coming from the proxy");
+  assert.match(n, /no content/);
+  // no reasoning tokens and no truncation -> no misleading budget advice
+  assert.ok(!/consumed by reasoning/.test(n));
+  assert.ok(!/raise max_tokens/.test(n));
+});
+
+test("issue #1: both response paths substitute the notice", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // streaming
+  assert.match(src, /if \(!hasTool && textLen === 0\) \{/, "streaming path must guard empty turns");
+  // non-streaming
+  assert.match(src, /if \(!content\.length\) \{\s*\n\s*content\.push\(\{ type: "text", text: emptyTurnNotice\(resp\) \}\)/,
+    "non-streaming path must guard empty turns");
+  // and usage must be recorded exactly once per stream, not twice
+  assert.equal((src.match(/recordUsage\(payload\?\.model/g) || []).length, 1,
+    "recordUsage must not be duplicated by the empty-turn guard");
+});
+
+test("issue #1: verbosity is sent and configurable", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /OPENAI_VERBOSITY/);
+  assert.match(src, /out\.text = \{ \.\.\.\(out\.text \|\| \{\}\), verbosity: VERBOSITY \}/);
+});
+
+test("issue #1: the hint demands text on every turn, including tool-call turns", () => {
+  // These live in buildFormatHint rather than buildPersistenceHint: they are about the shape
+  // of the output, and travel with the other rendering rules.
+  const h = buildFormatHint([{ name: "Bash" }]);
+  assert.match(h, /Always say something in words/i);
+  assert.match(h, /including turns whose main content is a tool call/i);
+  assert.match(h, /Be verbose in your final answer/i);
 });

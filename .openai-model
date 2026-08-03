@@ -50,3 +50,8 @@ OPENAI_MAX_CONTINUATIONS=2
 # output, so this costs real tokens and latency.
 OPENAI_SHOW_THINKING=1
 OPENAI_REASONING_EFFORT=max
+# Output verbosity (github issue #1: "sometimes I see output with no text"). Native OpenAI
+# knob text.verbosity — low|medium|high. gpt-5.3-codex is terse enough that tool-calling
+# turns came back with zero characters of prose, so the UI showed a bare tool chip. Blank to
+# omit the parameter entirely.
+OPENAI_VERBOSITY=high

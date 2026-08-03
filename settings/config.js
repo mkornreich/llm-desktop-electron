@@ -45,6 +45,11 @@ const SCHEMA = [
     default: "4000", label: "Minimum budget for thinking",
     help: "Reasoning shares max_output_tokens with the answer, so thinking is only requested above this budget. Set too low and small calls (e.g. 64-token title generation) come back empty." },
 
+  { group: "Reasoning", file: ".openai-model", key: "OPENAI_VERBOSITY", type: "enum",
+    options: ["", "low", "medium", "high"], default: "high",
+    label: "Output verbosity",
+    help: "Native OpenAI text.verbosity. gpt-5.3-codex is terse enough that tool-calling turns came back with zero prose — a bare tool chip and no explanation (issue #1). Blank omits the parameter." },
+
   { group: "Agent behaviour", file: ".openai-model", key: "OPENAI_PERSISTENCE", type: "bool",
     default: "1", label: "Persistence directive",
     help: "Tells the model to finish the request before ending its turn, and not to offer to act when it can just act. Note: A/B testing could not show this changes behaviour on its own." },

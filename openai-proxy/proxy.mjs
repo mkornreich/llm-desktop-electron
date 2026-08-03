@@ -154,6 +154,14 @@ function lowerEffort(model, rejected) {
 // is 4000 rather than 2000 because effort is now `max`: on one measured prompt the hidden
 // reasoning went 98 tokens at medium -> 476 at xhigh, so the room needed grew with it.
 const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || PROJECT.OPENAI_THINKING_MIN_BUDGET || "4000", 10) || 2000;
+// github issue #1 — "sometimes I see output with no text". Two causes, two fixes.
+// (a) gpt-5.3-codex is terse to the point of silence: every tool-calling turn in the proxy
+//     log came back text=0ch, so the UI showed a tool chip and no prose. OpenAI has a native
+//     knob for this — text.verbosity, values low|medium|high (probed; 'ultra' 400s with the
+//     list). It measurably changes output: "4" at low vs "2 + 2 = **4**." at high.
+// (b) a turn can come back genuinely empty — no text AND no tool call — which must never be
+//     forwarded as a blank turn. See emptyTurnNotice().
+const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "high";
 const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
 const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -319,6 +327,28 @@ function toolResultText(blk) {
   return blk.is_error ? `[tool error] ${body}` : body;
 }
 
+// A turn with no text and no tool call is useless to the user and indistinguishable from a
+// hang. Rather than forward the blank, say what actually happened — the real status and the
+// likely cause. This reports a failure; it never invents an answer.
+function emptyTurnNotice(resp) {
+  const status = resp?.status || "completed";
+  const reason = resp?.incomplete_details?.reason;
+  const out = resp?.usage?.output_tokens;
+  const reasoning = resp?.usage?.output_tokens_details?.reasoning_tokens;
+  const bits = [`status=${status}`];
+  if (reason) bits.push(`reason=${reason}`);
+  if (out != null) bits.push(`output_tokens=${out}`);
+  if (reasoning) bits.push(`reasoning_tokens=${reasoning}`);
+  let hint = "";
+  if (reason === "max_output_tokens") {
+    hint = reasoning
+      ? " The token budget was consumed by reasoning before any answer was produced — raise max_tokens, or lower OPENAI_REASONING_EFFORT / raise OPENAI_THINKING_MIN_BUDGET."
+      : " The output token budget was exhausted — raise max_tokens.";
+  }
+  return `[proxy] The model returned no content for this turn (${bits.join(", ")}). ` +
+         `No tool was called, so nothing ran.${hint}`;
+}
+
 // ---- tool-argument pruning ----
 // The model sometimes invents a parameter that belongs to a DIFFERENT tool: it called
 // Workflow with run_in_background (which Agent and Bash have, Workflow does not) and the
@@ -427,6 +457,8 @@ function buildFormatHint(tools) {
     picture,
     background,
     "- Carry out requests with the tools available to you instead of describing what the user should do.",
+    "- Always say something in words. Every turn must contain text, including turns whose main content is a tool call: write one short line naming what you are about to do and why before calling it. A turn that is only a tool call shows the user a bare chip with no explanation.",
+    "- Be verbose in your final answer: state what you did, what you found, the evidence for it, and anything you could not verify. Prefer a complete explanation over a terse one.",
   ].join("\n");
 }
 
@@ -768,6 +800,7 @@ function toResponses(body, model) {
   if (SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
     out.reasoning = { effort: effortFor(model), summary: "detailed" };
   }
+  if (VERBOSITY) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
   const nameMap = new Map();
   const schemas = new Map(); // original tool name -> input_schema, for argument pruning
@@ -833,6 +866,7 @@ function respStopReason(resp, hasTool) {
 function fromResponses(resp, reqModel, nameMap, schemas) {
   const content = [];
   let hasTool = false;
+  // filled in below if nothing else is
   for (const item of resp.output || []) {
     if (item.type === "message") {
       for (const c of item.content || []) if (c.type === "output_text" && c.text) content.push({ type: "text", text: fixMath(c.text) });
@@ -843,6 +877,10 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
         content.push({ type: "tool_use", id: item.call_id || item.id, name: nm, input: pruneByName(schemas, nm, safeParse(item.arguments || "{}")) });
       }
     } // reasoning items are dropped
+  }
+  if (!content.length) {
+    content.push({ type: "text", text: emptyTurnNotice(resp) });
+    log("  ! empty turn — substituted a diagnostic notice instead of blank output");
   }
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel, content,
@@ -984,6 +1022,17 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     await consume(up);
   }
 
+  // Never hand back a blank turn (issue #1).
+  if (!hasTool && textLen === 0) {
+    const notice = emptyTurnNotice({ status: incomplete ? "incomplete" : "completed",
+                                     incomplete_details: incomplete ? { reason: "max_output_tokens" } : undefined,
+                                     usage });
+    const it = open("__empty__", { type: "text", text: "" });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: notice } });
+    close("__empty__");
+    textLen = notice.length;
+    log(`  ! empty turn — substituted a diagnostic notice instead of blank output`);
+  }
   recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
   log(`  <- responses stream stop_reason=${stop} out_tokens=${usage?.output_tokens ?? "?"} text=${textLen}ch` +
@@ -1095,7 +1144,7 @@ const server = http.createServer(async (req, res) => {
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
-         pruneToolArgs };
+         pruneToolArgs, emptyTurnNotice };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
