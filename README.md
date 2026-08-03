@@ -234,44 +234,40 @@ syncing). If Claude Desktop is running, the launcher warns: a session it happens
 to be writing at that instant can copy incompletely, and relaunching picks up the
 final version.
 
-### Grouping — where it actually lives
+### Grouping — settled
 
-An earlier version of this file said grouping was server-side. That was **wrong**, and the
-mistake was methodological: the check grepped the profiles for `sgrp_` and found zero hits.
-`sgrp_` is only the format used in the desktop bundle's *notification* plumbing. The sidebar's
-groups use a different prefix entirely, and they are local:
+Grouping is **server-side**, and there is nothing to sync. Captured with
+`--net-log-capture-mode=Everything`, `GET /api/claude_code/organizations/{org}/user_settings`
+returns the entire sidebar store:
 
-| Where | What |
-|---|---|
-| `Local Storage` → `LSS-persisted.dframe-group-scopes` | group definitions — ids like `cg-1b717816-…` with names, e.g. `App Analysis` |
-| `Local Storage` → persisted store | the `groupBy` mode, e.g. `"custom"` |
-| `local_<uuid>.json` | **nothing** — a recursive dump of all 400 session files found 555 distinct key paths and not one grouping field (only `chromeTabGroupId`, which is Chrome tab groups) |
+```json
+{"state":{"groupByByMode":{"code":"custom"},
+          "customGroups":[{"id":"cg-1b717816-…","name":"App Analysis"}, … 7 groups …],
+          "customGroupAssignments":{},
+          "customGroupOrder":{},
+          "pinnedOrder":[],"recentsTypeFilter":"all","recentsStatusFilter":"active"},
+ "version":1}
+```
 
-So syncing sessions alone could never group them: the sessions were refreshed every launch
-while the state that groups them had been copied once by hand and then went stale. `run.sh`
-now syncs the claude.ai Local Storage too, controlled by `SYNC_CLAUDE_UI_STATE` in
-[`.sync`](.sync).
+Because it follows the account, both apps see identical grouping the moment they are logged in.
+`LSS-persisted.dframe-group-scopes` in Local Storage is only a **local mirror** of this.
 
-It is a whole-directory copy, because individual keys cannot be written into a Chromium
-LevelDB without a LevelDB library. That makes the guards the real work:
+**Why the sidebar nonetheless looks ungrouped: `customGroupAssignments` is `{}`.** The mode is
+`custom` and seven groups are defined, but no session is assigned to any of them — server-side,
+for both apps. So there is no sync bug to fix here; the assignments simply are not set. They are
+made in the UI, and nothing this launcher does can substitute for that.
 
-- **Skipped entirely while Claude Desktop is running** — copying an open LevelDB can capture a
-  torn write and leave the destination unreadable, losing this build's own state for nothing.
-- **The previous state is backed up** to `user-data/Local Storage.bak` before replacing.
-- **The copy is verified** to contain the grouping keys, and the backup is restored if it is
-  not. Both branches are tested against controlled sources.
-- **Cookies are not touched**, so login is unaffected — confirmed by relaunching after a real
-  sync: `isLoggedOut: false`, 53 org and 237 GrowthBook features, no new errors.
+Two corrections this produced, both recorded because the reasoning was wrong twice:
 
-Trade-off worth knowing: this replaces the build's own claude.ai UI state, including composer
-drafts and sidebar preferences. Hence the backup, and `SYNC_CLAUDE_UI_STATE=0` to opt out.
+- The first answer, "grouping is server-side", was reached by grepping for `sgrp_` and finding
+  nothing. Right conclusion, wrong evidence — `sgrp_` is the desktop bundle's *notification*
+  format and never appears in either profile.
+- The second answer, "grouping is local in Local Storage", came from finding
+  `dframe-group-scopes` and `cg-` ids there. Wrong: that is a cache of the server store.
 
-**Still unresolved.** Group *membership* — which session belongs to which group — was not found
-in either profile's Local Storage: the real profile showed **0** session ids near the
-membership key against 430 synced sessions. Either it is server-side, or it lives somewhere not
-yet located (IndexedDB is the obvious next place to look). So group definitions and the grouping
-mode now travel; whether every session lands in the right group is not yet proven. Tracked in
-[issue #3](https://github.com/mkornreich/llm-desktop-electron/issues/3), left open.
+The network capture is what settled it, because it shows the authoritative source rather than a
+copy of it. `SYNC_CLAUDE_UI_STATE` still exists for replacing this build's UI state deliberately,
+but it now defaults to **0** — it cannot help grouping and it does overwrite composer drafts.
 
 ### Are the migrated sessions grouped correctly?
 

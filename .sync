@@ -25,11 +25,21 @@
 # Set to 0 to launch without syncing.
 SYNC_CLAUDE_SESSIONS=1
 
-# SYNC_CLAUDE_UI_STATE=1 -> also copy claude.ai's Local Storage from Claude Desktop, which is
-# where the sidebar's GROUPING lives: LSS-persisted.dframe-group-scopes holds the group
-# definitions (ids like cg-<uuid> with names) and the groupBy mode. The session files contain
-# no group field at all — 555 distinct key paths, none of them grouping — so syncing sessions
-# alone leaves them ungrouped.
+# SYNC_CLAUDE_UI_STATE -> copy claude.ai's Local Storage from Claude Desktop.
+#
+# DEFAULT 0, and the reason matters. This was added to make session GROUPING sync, on the
+# evidence that Local Storage holds LSS-persisted.dframe-group-scopes. Capturing the network
+# with --net-log-capture-mode=Everything then showed that is only a local MIRROR: the real
+# store is server-side at
+#   GET /api/claude_code/organizations/{org}/user_settings
+# which returns groupByByMode, customGroups (id + name), customGroupAssignments and
+# customGroupOrder. Because it follows the account, both apps already see identical grouping
+# and there is nothing to sync. Copying Local Storage therefore cannot help grouping, while it
+# does replace this build's own composer drafts and sidebar prefs — so it is off by default.
+#
+# Set to 1 only if you specifically want this build's claude.ai UI state replaced by Claude
+# Desktop's. The guards still apply: skipped while Claude Desktop is running, previous state
+# backed up to "user-data/Local Storage.bak", and the copy verified before being kept.
 #
 # Unlike the session sync this is a whole-directory copy and it REPLACES this build's own
 # claude.ai UI state (composer drafts, sidebar prefs). The previous state is kept at
@@ -38,4 +48,4 @@ SYNC_CLAUDE_SESSIONS=1
 # contain the grouping keys before being kept.
 #
 # Cookies are NOT copied, so this does not affect being logged in.
-SYNC_CLAUDE_UI_STATE=1
+SYNC_CLAUDE_UI_STATE=0
