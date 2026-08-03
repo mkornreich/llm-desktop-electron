@@ -1,0 +1,7 @@
+{
+  "name": "llm-desktop-settings",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Settings window for the llm-desktop-electron build: edits the launcher dot files.",
+  "main": "main.js"
+}

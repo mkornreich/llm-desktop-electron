@@ -37,6 +37,7 @@ would in the desktop app. Quit with `Cmd+Q`.
 | [FINDINGS.md](FINDINGS.md) | Notable and unreleased features found in the bundle — companion-hardware pairing, remote device control, permission modes, the extension registry |
 | [LINUX.md](LINUX.md) | A phased plan for running this build on Linux, with the native-module and folded-conditional blockers |
 | [openai-proxy/README.md](openai-proxy/README.md) | The Anthropic↔OpenAI proxy: scope, the twelve bundle patches, output shaping, auto-continue, and its 49 tests |
+| `settings/` | The settings window: `server.js` (local API), `config.js` (dot-file read/write), `index.html` (UI), and 8 tests covering comment preservation |
 
 ## How it was assembled
 
@@ -47,6 +48,35 @@ would in the desktop app. Quit with `Cmd+Q`.
 | `user-data/` | An **isolated** profile — this build never *writes* to your real Claude install's data in `~/Library/Application Support/Claude`. It does *read* from it: `run.sh` copies Claude Desktop's sessions in on each launch (see [Sessions and memory](#sessions-and-memory)). |
 | `run.sh` | The one launcher. Self-heals the layout, selects the model provider, applies the telemetry toggle, syncs sessions, then execs Electron. `run-openai.sh` and `run-anthropic.sh` are one-line wrappers over it. |
 | `openai-proxy/` | The Anthropic↔OpenAI translation proxy and its test suite. Only used in OpenAI mode. |
+
+### Settings window
+
+```bash
+./settings.sh
+```
+
+A GUI for every parameter below — grouped, each with the reasoning behind it, plus live
+status chips (is the app running, is the proxy up, which model and classifier, tokens used
+so far) and a **Save & restart app** button, since most settings are read at launch.
+
+It runs as a small local page rather than an Electron window, for a concrete reason:
+`run.sh` symlinks `Resources/app.asar → app/` because several of the app's worker paths
+resolve through `<resourcesPath>/app.asar`, and that symlink makes Electron load
+**Anthropic's** app and ignore any CLI app path — verified with both `electron settings`
+and `electron --app=settings`, which each booted `appVersion 1.24012.9`. A second Electron
+would mean another ~200 MB runtime, and patching a window into their bundle would have to
+be redone on every re-extraction. `settings.sh` opens it as a chrome-less app window when
+Chrome/Canary/Edge/Brave is available, otherwise in the default browser.
+
+The server binds to `127.0.0.1` and requires a **per-start token** in the URL. That is not
+decoration: the API writes config and can restart the app, and without a token any web page
+you happened to visit could POST to `127.0.0.1:8765` and do the same. Requests without it
+get a 403.
+
+Writes are surgical — only the `KEY=value` line changes. These dot files are mostly
+documentation, so a GUI that rewrote them from a schema would silently delete the reasoning
+they carry. Verified on the live file: a save changed exactly one line of 52 and left all 38
+comment lines byte-identical.
 
 ### Configuration — four dot files
 

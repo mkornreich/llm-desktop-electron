@@ -15,3 +15,4 @@ user-data/
 .DS_Store
 openai-proxy/tools-dump.txt
 openai-proxy/usage.json
+settings/server.log
