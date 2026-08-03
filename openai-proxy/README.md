@@ -334,8 +334,34 @@ Controlled by `OPENAI_SHOW_THINKING` (default on) and `OPENAI_REASONING_EFFORT`
 (default `medium`). Responses path only — Chat Completions has no reasoning parameter,
 so the chat models in the picker show no thinking.
 
-**What you get is summaries, not chain-of-thought — and raising effort does not
-change that.** OpenAI never exposes raw reasoning tokens: *"While reasoning tokens are
+**Effort is set to the maximum the model allows.** `OPENAI_REASONING_EFFORT=max` is the
+API-wide top of `none|minimal|low|medium|high|xhigh|max`, but each model supports only a
+subset and reports it only by rejecting the request:
+
+```
+Unsupported value: 'max' is not supported with the 'gpt-5.3-codex' model.
+Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.
+```
+
+(`gpt-5.4` answers identically.) So the proxy asks for `max` and walks `EFFORT_LADDER`
+down until the model accepts one, caching the result per model — one extra round-trip per
+model per proxy start, and it keeps working if a model that *does* support `max` is later
+selected:
+
+```
+! reasoning effort 'max' unsupported by gpt-5.3-codex — falling back to 'xhigh'
+```
+
+**Correction to an earlier measurement here.** This file previously said raising effort
+does not increase the visible summary. That holds up to `high` (36/34/44 chars at
+low/medium/high) but **not** beyond it: at `xhigh` the same class of prompt produced
+**105 characters** of summary. What it costs is steep — one measured turn billed
+**6,791 output tokens** for a 1,365-character answer, since reasoning is billed as output
+and never shown. `OPENAI_THINKING_MIN_BUDGET` was raised 2000 → 4000 to match, because
+hidden reasoning went 98 tokens at medium → 476 at xhigh on a fixed prompt and the
+starvation guard has to leave proportionally more room.
+
+**What you get is summaries, not chain-of-thought.** OpenAI never exposes raw reasoning tokens: *"While reasoning tokens are
 not visible via the API, they still occupy space in the model's context window and are
 billed as output tokens."* Probing the API confirms there is no switch for it —
 `reasoning.summary` accepts only `concise`, `detailed`, `auto` (`'raw'` → 400 listing
@@ -351,9 +377,9 @@ Measured on one hard prompt — effort buys *hidden* reasoning, not visible summ
 | medium | 98 | 34 chars |
 | high | 207 | 44 chars |
 
-So `OPENAI_REASONING_EFFORT` is a quality/cost knob, **not** a "more thinking shown"
-knob: expect roughly one bold header per step regardless
-("**Proving minimal crossings seven**"). Asking the model to narrate its working in the
+So below `xhigh`, effort is a quality/cost knob rather than a "more thinking shown" knob —
+expect roughly one bold header per step ("**Proving minimal crossings seven**"). At `xhigh`
+you get a few more. Asking the model to narrate its working in the
 answer instead does not help on `gpt-5.3-codex` — it ignored an explicit "write a
 '## Working' section" instruction *and* returned a 0-char summary for that request.
 For genuine chain-of-thought you need a model whose reasoning is in the output you

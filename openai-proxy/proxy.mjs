@@ -126,13 +126,34 @@ const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENC
 // Completions has no reasoning parameter.
 const SHOW_THINKING = (process.env.OPENAI_SHOW_THINKING || PROJECT.OPENAI_SHOW_THINKING || "1") !== "0";
 const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || PROJECT.OPENAI_REASONING_EFFORT || "medium";
+// The reasoning-effort enum is API-wide but each model supports a SUBSET, and the API only
+// tells you by rejecting the request: gpt-5.3-codex and gpt-5.4 both answer
+//   "Unsupported value: 'max' is not supported with the '<model>' model.
+//    Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+// even though the enum itself is none|minimal|low|medium|high|xhigh|max. So asking for the
+// true maximum and stepping down on rejection gets the highest each model actually allows,
+// and keeps working when a model that does support 'max' is selected. The resolved value is
+// cached per model so this costs at most one extra round-trip per model per proxy start.
+const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+const effortByModel = new Map();
+const effortFor = (model) => effortByModel.get(model) || REASONING_EFFORT;
+function lowerEffort(model, rejected) {
+  const i = EFFORT_LADDER.indexOf(rejected);
+  const next = i === -1 ? "high" : EFFORT_LADDER[i + 1];
+  if (!next) return null;
+  effortByModel.set(model, next);
+  log(`  ! reasoning effort '${rejected}' unsupported by ${model} — falling back to '${next}'`);
+  return next;
+}
 // Reasoning tokens are drawn from the SAME max_output_tokens budget as the answer, so
 // asking for thinking on a small-budget call can consume the whole allowance and return
 // nothing. Observed in the app: background title calls (max_tokens=64, no tools) came back
 // status=incomplete/max_output_tokens with 0 characters of text, four times in a row. The
 // same call needs ~10 output tokens with no reasoning and ~26-64 with it. Utility calls
-// gain nothing from thinking, so only request it when there is room to spare.
-const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || PROJECT.OPENAI_THINKING_MIN_BUDGET || "2000", 10) || 2000;
+// gain nothing from thinking, so only request it when there is room to spare. The threshold
+// is 4000 rather than 2000 because effort is now `max`: on one measured prompt the hidden
+// reasoning went 98 tokens at medium -> 476 at xhigh, so the room needed grew with it.
+const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || PROJECT.OPENAI_THINKING_MIN_BUDGET || "4000", 10) || 2000;
 const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
 const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -703,7 +724,7 @@ function toResponses(body, model) {
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
   // Both fields are required for summaries to appear; effort alone or summary alone gives none.
   if (SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
-    out.reasoning = { effort: REASONING_EFFORT, summary: "detailed" };
+    out.reasoning = { effort: effortFor(model), summary: "detailed" };
   }
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isClassifierRequest(body), body.tools);
   const nameMap = new Map();
@@ -736,6 +757,18 @@ async function callResponses(payload) {
     const txt = await res.clone().text();
     const cap = txt.match(/at most (\d+)/);
     if (cap && payload.max_output_tokens != null) res = await doFetch({ ...payload, max_output_tokens: Math.min(payload.max_output_tokens, parseInt(cap[1], 10)) });
+    // Walk the effort ladder down until the model accepts one.
+    else if (payload.reasoning?.effort && /not supported with the .* model/i.test(txt)) {
+      let effort = payload.reasoning.effort, next, body = payload;
+      while ((next = lowerEffort(payload.model, effort))) {
+        body = { ...body, reasoning: { ...body.reasoning, effort: next } };
+        res = await doFetch(body);
+        if (res.status !== 400) break;
+        const t2 = await res.clone().text();
+        if (!/not supported with the .* model/i.test(t2)) break;
+        effort = next;
+      }
+    }
   }
   return res;
 }

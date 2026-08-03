@@ -56,7 +56,7 @@ the same name. None contains a secret.
 | File | Setting | Default | Effect |
 |---|---|---|---|
 | [`.provider`](.provider) | `PROVIDER` | `openai` | `anthropic` = the agent calls Anthropic with Claude; `openai` = via the proxy |
-| [`.openai-model`](.openai-model) | `OPENAI_MODEL` and friends | `gpt-5.3-codex` | Model, classifier model, output shaping, auto-continue, thinking |
+| [`.openai-model`](.openai-model) | `OPENAI_MODEL` and friends | `gpt-5.3-codex` | Model, classifier model, output shaping, auto-continue, thinking. `OPENAI_REASONING_EFFORT=max` — the proxy steps down to the highest value the model accepts (`xhigh` for gpt-5.3-codex/5.4) |
 | [`.privacy`](.privacy) | `DISABLE_TELEMETRY` | `1` | Kills first-party telemetry, Sentry, Datadog and the proxied analytics hosts |
 | [`.sync`](.sync) | `SYNC_CLAUDE_SESSIONS` | `1` | Copies Claude Desktop's sessions into this build on every launch |
 
@@ -130,6 +130,13 @@ uses its own Anthropic host. Anthropic mode also actively drops
 `CLAUDE_CODE_BG_CLASSIFIER_MODEL` and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`
 if they are set — they hold OpenAI model ids in `.openai-model`, and sending
 `gpt-4.1-mini` to Anthropic just errors.
+
+Maximum reasoning is the default in both modes, via two different knobs: the proxy's
+`OPENAI_REASONING_EFFORT` on the OpenAI path, and `CLAUDE_CODE_EFFORT_LEVEL=max` plus
+`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` exported by `run.sh` for the app and the Claude CLI —
+the latter is read by the app's own `getDefaultEffort()` and sets the default for new
+sessions. `MAX_THINKING_TOKENS` is deliberately not used: the CLI's own migration notes
+call `thinking.budget_tokens` deprecated in favour of adaptive thinking.
 
 Either way this only affects the **agent**. The chat window is the remote claude.ai
 web app talking to Anthropic in both modes. `CLAUDE_CODE_LOCAL_BINARY`, the telemetry

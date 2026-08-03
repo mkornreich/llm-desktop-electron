@@ -38,9 +38,15 @@ OPENAI_PERSISTENCE=1
 # confirmation requests for destructive actions, or for the safety classifier.
 OPENAI_AUTO_CONTINUE=1
 OPENAI_MAX_CONTINUATIONS=2
-# Show the model's thinking. The Responses API only emits reasoning SUMMARIES, and only
-# when BOTH summary and an explicit effort are sent — these become Anthropic `thinking`
-# blocks. Raise effort for longer/deeper summaries (low|medium|high); it also affects
-# latency and cost. OPENAI_SHOW_THINKING=0 turns it off.
+# Show the model's thinking. The Responses API only emits reasoning SUMMARIES, and only when
+# BOTH summary and an explicit effort are sent — these become Anthropic `thinking` blocks.
+# OPENAI_SHOW_THINKING=0 turns it off.
+#
+# OPENAI_REASONING_EFFORT is set to the API-wide maximum, `max`. Each model supports only a
+# SUBSET of none|minimal|low|medium|high|xhigh|max and reports it only by rejecting the
+# request, so the proxy walks the ladder down to the highest value the selected model
+# accepts and caches it per model. For gpt-5.3-codex and gpt-5.4 that lands on `xhigh`.
+# Effort buys deeper hidden reasoning, not longer visible summaries — and it is billed as
+# output, so this costs real tokens and latency.
 OPENAI_SHOW_THINKING=1
-OPENAI_REASONING_EFFORT=medium
+OPENAI_REASONING_EFFORT=max

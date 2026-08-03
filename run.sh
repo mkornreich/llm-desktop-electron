@@ -68,6 +68,21 @@ else
   echo "[run] WARN: no 'claude' on PATH — the app will try to download its own agent binary"
 fi
 
+# Maximum reasoning by default on the ANTHROPIC/Claude-CLI side. This is a different knob
+# from the proxy's OPENAI_REASONING_EFFORT: the app reads CLAUDE_CODE_EFFORT_LEVEL in its own
+# getDefaultEffort() —
+#   loadUserEnvVars().CLAUDE_CODE_EFFORT_LEVEL ?? process.env.CLAUDE_CODE_EFFORT_LEVEL ?? null
+# — so this sets the default effort for NEW sessions. `max` is the app's own top value (56 of
+# the synced sessions already use it). Exported in BOTH provider modes because it belongs to
+# the app and the CLI, not to OpenAI.
+#
+# Not used: MAX_THINKING_TOKENS / thinking.budget_tokens. The CLI's own migration notes call
+# that deprecated — "budget_tokens -> migrate to adaptive thinking on Opus 4.6 / Sonnet 4.6
+# (still functional but deprecated)" — and effort level is the current mechanism.
+export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-max}"
+export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT="${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT:-1}"
+echo "[run] CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL} (always-enable=${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT})"
+
 if [ "$PROVIDER" = "openai" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
