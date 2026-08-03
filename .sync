@@ -24,3 +24,18 @@
 #
 # Set to 0 to launch without syncing.
 SYNC_CLAUDE_SESSIONS=1
+
+# SYNC_CLAUDE_UI_STATE=1 -> also copy claude.ai's Local Storage from Claude Desktop, which is
+# where the sidebar's GROUPING lives: LSS-persisted.dframe-group-scopes holds the group
+# definitions (ids like cg-<uuid> with names) and the groupBy mode. The session files contain
+# no group field at all — 555 distinct key paths, none of them grouping — so syncing sessions
+# alone leaves them ungrouped.
+#
+# Unlike the session sync this is a whole-directory copy and it REPLACES this build's own
+# claude.ai UI state (composer drafts, sidebar prefs). The previous state is kept at
+# "user-data/Local Storage.bak". It is skipped entirely while Claude Desktop is running,
+# because copying an open LevelDB can capture a torn write, and the result is verified to
+# contain the grouping keys before being kept.
+#
+# Cookies are NOT copied, so this does not affect being logged in.
+SYNC_CLAUDE_UI_STATE=1

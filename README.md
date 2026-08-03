@@ -234,6 +234,45 @@ syncing). If Claude Desktop is running, the launcher warns: a session it happens
 to be writing at that instant can copy incompletely, and relaunching picks up the
 final version.
 
+### Grouping — where it actually lives
+
+An earlier version of this file said grouping was server-side. That was **wrong**, and the
+mistake was methodological: the check grepped the profiles for `sgrp_` and found zero hits.
+`sgrp_` is only the format used in the desktop bundle's *notification* plumbing. The sidebar's
+groups use a different prefix entirely, and they are local:
+
+| Where | What |
+|---|---|
+| `Local Storage` → `LSS-persisted.dframe-group-scopes` | group definitions — ids like `cg-1b717816-…` with names, e.g. `App Analysis` |
+| `Local Storage` → persisted store | the `groupBy` mode, e.g. `"custom"` |
+| `local_<uuid>.json` | **nothing** — a recursive dump of all 400 session files found 555 distinct key paths and not one grouping field (only `chromeTabGroupId`, which is Chrome tab groups) |
+
+So syncing sessions alone could never group them: the sessions were refreshed every launch
+while the state that groups them had been copied once by hand and then went stale. `run.sh`
+now syncs the claude.ai Local Storage too, controlled by `SYNC_CLAUDE_UI_STATE` in
+[`.sync`](.sync).
+
+It is a whole-directory copy, because individual keys cannot be written into a Chromium
+LevelDB without a LevelDB library. That makes the guards the real work:
+
+- **Skipped entirely while Claude Desktop is running** — copying an open LevelDB can capture a
+  torn write and leave the destination unreadable, losing this build's own state for nothing.
+- **The previous state is backed up** to `user-data/Local Storage.bak` before replacing.
+- **The copy is verified** to contain the grouping keys, and the backup is restored if it is
+  not. Both branches are tested against controlled sources.
+- **Cookies are not touched**, so login is unaffected — confirmed by relaunching after a real
+  sync: `isLoggedOut: false`, 53 org and 237 GrowthBook features, no new errors.
+
+Trade-off worth knowing: this replaces the build's own claude.ai UI state, including composer
+drafts and sidebar preferences. Hence the backup, and `SYNC_CLAUDE_UI_STATE=0` to opt out.
+
+**Still unresolved.** Group *membership* — which session belongs to which group — was not found
+in either profile's Local Storage: the real profile showed **0** session ids near the
+membership key against 430 synced sessions. Either it is server-side, or it lives somewhere not
+yet located (IndexedDB is the obvious next place to look). So group definitions and the grouping
+mode now travel; whether every session lands in the right group is not yet proven. Tracked in
+[issue #3](https://github.com/mkornreich/llm-desktop-electron/issues/3), left open.
+
 ### Are the migrated sessions grouped correctly?
 
 Grouping has exactly two sources, and neither is extra local state to copy:

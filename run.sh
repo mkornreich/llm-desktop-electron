@@ -170,6 +170,45 @@ if [ "${SYNC_VAL:-1}" != "0" ]; then
     fi
     mkdir -p "$DST"
     before=$(find "$DST" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+  # ---- claude.ai UI state, which is where GROUPING lives (issue #3) ----
+  # Sessions alone are not enough to make the sidebar look like Claude Desktop's. Group
+  # definitions live in the claude.ai origin's Local Storage under
+  # LSS-persisted.dframe-group-scopes (ids like cg-<uuid> with names, e.g. "App Analysis"),
+  # alongside the groupBy mode ("custom"). None of that is in the session files — their 555
+  # distinct key paths contain no group field at all, only chromeTabGroupId, which is
+  # unrelated. So sessions were being refreshed every launch while the state that groups them
+  # was copied once by hand and then went stale.
+  #
+  # This is a whole-directory copy because there is no way to write individual keys into a
+  # Chromium LevelDB without a LevelDB library. That makes the guards below load-bearing.
+  SYNC_UI_VAL=$(sed -n 's/^SYNC_CLAUDE_UI_STATE=//p' .sync 2>/dev/null | head -1)
+  if [ -n "${SYNC_UI_VAL:-}" ] && [ "${SYNC_UI_VAL}" != "0" ]; then
+    SRC_LS="$HOME/Library/Application Support/Claude/Local Storage"
+    DST_LS="$PWD/user-data/Local Storage"
+    if pgrep -f "/Claude.app/Contents/MacOS/Claude" >/dev/null 2>&1; then
+      # Copying an open LevelDB can capture a torn write and leave the destination unreadable,
+      # which would lose this build's own UI state for no gain.
+      echo "[run] NOTE: Claude Desktop is running — skipping UI-state sync. Quit it and relaunch to pick up grouping changes."
+    elif [ -d "$SRC_LS" ]; then
+      if [ -d "$DST_LS" ]; then
+        rm -rf "$DST_LS.bak"
+        cp -R "$DST_LS" "$DST_LS.bak"
+      fi
+      if rsync -a --delete "$SRC_LS/" "$DST_LS/" 2>/dev/null; then
+        # Verify the copy actually carries the grouping keys; restore the backup if not.
+        if grep -raq "dframe-group-scopes" "$DST_LS" 2>/dev/null; then
+          groups=$(grep -raoh "cg-[0-9a-f-]\{36\}" "$DST_LS" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+          echo "[run] synced claude.ai UI state (grouping): ${groups} group definition(s); previous state kept at Local Storage.bak"
+        else
+          echo "[run] WARN: copied UI state has no grouping keys — restoring the previous state"
+          rm -rf "$DST_LS"; [ -d "$DST_LS.bak" ] && cp -R "$DST_LS.bak" "$DST_LS"
+        fi
+      else
+        echo "[run] WARN: UI-state sync failed — leaving this build's state untouched"
+      fi
+    fi
+  fi
+
     if rsync -a --update "$SRC/" "$DST/" 2>/dev/null; then
       after=$(find "$DST" -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
       echo "[run] synced Claude sessions: ${before} -> ${after} session files"
