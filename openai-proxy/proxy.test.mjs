@@ -7,7 +7,8 @@ import fs from "node:fs";
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
-        buildPersistenceHint, withFormatHint, shouldAutoContinue, workDoneThisTurn, pruneToolArgs } =
+        buildPersistenceHint, withFormatHint, shouldAutoContinue, continueReason,
+        workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -448,4 +449,80 @@ test("workDoneThisTurn detects tool activity since the last real user message", 
   // A NEW user message after the tools means a fresh turn with no work done yet.
   assert.equal(workDoneThisTurn([userMsg, { type: "function_call", name: "Bash" }, userMsg]), false);
   assert.equal(workDoneThisTurn(null), false);
+});
+
+// ---------- issue #5: claiming background work that never started ----------
+
+// Verbatim from https://github.com/mkornreich/llm-desktop-electron/issues/5
+const ISSUE_5 = `Got it — I started a deep Slack analysis workflow on that exact permalink plus recent bizforce status context.
+
+It’s running now in the background, and I’ll report back with a clear go / no-go recommendation as soon as it finishes.`;
+
+test("issue #5: a false 'running in the background' claim is caught", () => {
+  // No tool was called, so nothing is running and no report is coming — the user waits forever.
+  assert.equal(continueReason(ISSUE_5, false, false), "false-background");
+  assert.ok(shouldAutoContinue(ISSUE_5));
+});
+
+test("issue #5: it fires even when a NON-background tool ran this turn", () => {
+  // Having called Read does not make a background workflow claim true.
+  assert.equal(continueReason(ISSUE_5, true, false), "false-background");
+});
+
+test("issue #5: it does NOT fire when a background-capable tool really ran", () => {
+  // Workflow/Agent/Bash genuinely can leave work running; the claim is then plausible.
+  assert.equal(continueReason(ISSUE_5, true, true), null);
+  assert.equal(continueReason("I've kicked off the audit; it's running in the background.", true, true), null);
+});
+
+test("issue #5: every phrasing of the claim is covered", () => {
+  for (const t of [
+    "I started a deep Slack analysis workflow.",
+    "I've launched the sweep.",
+    "I have spawned three subagents to look at this.",
+    "I've queued the job and will report back when it completes.",
+    "It's running now in the background.",
+    "The audit is running; I'll report back with results.",
+    "That's running in the background as we speak.",
+    "I triggered the run.",
+    "I've set it off already.",
+  ]) assert.equal(continueReason(t, false, false), "false-background", `missed: ${t}`);
+});
+
+test("issue #5: legitimate progress reports are left alone", () => {
+  // These describe finished or foreground work, not phantom background jobs.
+  for (const t of [
+    "Done — tests pass 57/57.",
+    "I read the file and found three call sites.",
+    "Here are the results: 4589, 4527, 4482.",
+    "The command failed with exit code 1; here is the output.",
+  ]) assert.notEqual(continueReason(t, false, false), "false-background", `false positive: ${t}`);
+});
+
+test("backgroundToolUsedThisTurn distinguishes background-capable calls", () => {
+  const userMsg = { role: "user", content: [{ type: "input_text", text: "go" }] };
+  assert.equal(backgroundToolUsedThisTurn([userMsg, { type: "function_call", name: "Read" }]), false);
+  assert.equal(backgroundToolUsedThisTurn([userMsg, { type: "function_call", name: "Workflow" }]), true);
+  assert.equal(backgroundToolUsedThisTurn([userMsg, { type: "function_call", name: "Agent" }]), true);
+  assert.equal(backgroundToolUsedThisTurn([userMsg, { type: "function_call", name: "Bash" }]), true);
+  // a fresh user message ends the turn — earlier background work does not carry over
+  assert.equal(backgroundToolUsedThisTurn([userMsg, { type: "function_call", name: "Workflow" }, userMsg]), false);
+  assert.equal(backgroundToolUsedThisTurn(null), false);
+});
+
+test("the persistence hint states the rule explicitly", () => {
+  assert.match(buildPersistenceHint(), /Never say that work is running, started, queued or happening in the background/i);
+});
+
+test("the streaming loop wires the false-background reason to its own nudge", () => {
+  // Guards the wiring the unit tests above cannot reach: the loop must pick the nudge that
+  // matches the reason, or a caught false claim would get a nudge about "what you intend to
+  // do" — wrong for a claim that something already started.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /reason === "false-background" \? NUDGE_FALSE_BACKGROUND : NUDGE/,
+    "nudge selection must key off the reason");
+  assert.match(src, /continueReason\(turnText, workDoneThisTurn\(payload\.input\),\s*backgroundToolUsedThisTurn\(payload\.input\)\)/,
+    "the loop must pass BOTH workDone and bgUsed");
+  assert.match(src, /nothing was started and no result will ever arrive/,
+    "the nudge must state the consequence");
 });

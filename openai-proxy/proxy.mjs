@@ -185,22 +185,56 @@ const DONE_RE = new RegExp([
   "\\b(here['’]?s|here is|here are|results?:)\\b",
   "\\b(tests? pass|passing|no changes needed|nothing to do|already (correct|done))\\b",
 ].join("|"), "i");
+// Claims that background work is ALREADY underway. github issue #5: the agent answered
+// "Got it — I started a deep Slack analysis workflow ... It's running now in the background,
+// and I'll report back ... as soon as it finishes" having called no tool at all, so nothing
+// was running and no report was ever coming. This is the inverse of INTENT_RE: not a promise
+// to act, but a false statement that action has been taken — which is worse, because the user
+// waits. Only meaningful when no background-capable tool actually ran this turn.
+const FALSE_BACKGROUND_RE = new RegExp([
+  "\\b(i|i['’]ve|i have)\\s+(just\\s+)?(started|kicked[- ]off|launched|spawned|queued|triggered|dispatched|set (it |them )?(off|running))\\b",
+  "\\b(it|that|these|those|they|the (workflow|audit|job|analysis|run|task|tasks|agents?|scan|sweep))\\b[^.!?]{0,30}\\b(is|are|'s|’s)?\\s*(now\\s+)?running\\b",
+  "\\brunning\\b[^.!?]{0,20}\\bin the background\\b",
+  "\\bin the background\\b[^.!?]{0,40}\\b(now|already|as we speak)\\b",
+  "\\bi'?’?ll report back\\b[^.!?]{0,50}\\b(finishes|completes|done|results?)\\b",
+].join("|"), "i");
+// Tools that can genuinely leave something running after the turn ends. If one of these was
+// called this turn, "it's running in the background" may well be true — leave it alone.
+const BG_CAPABLE_RE = /^(workflow|agent|task|taskcreate|bash|bashoutput|croncreate|schedulewakeup|remotetrigger|mcp__ccd_session__spawn_task)$/i;
+function backgroundToolUsedThisTurn(input) {
+  if (!Array.isArray(input)) return false;
+  for (let i = input.length - 1; i >= 0; i--) {
+    const it = input[i];
+    if (it?.type === "function_call" && BG_CAPABLE_RE.test(String(it.name || ""))) return true;
+    if (it?.role === "user" && Array.isArray(it.content) && it.content.some((c) => c?.type === "input_text")) return false;
+  }
+  return false;
+}
+
 // Overrides everything: a turn that ends asking to confirm something destructive MUST stay
 // ended. Continuing it would answer the user's question for them and then act.
 const NEEDS_USER_RE = /\b(confirm|are you sure|permanently|irreversibl|destructive|cannot be undone|can['’]?t be undone|before i (proceed|continue)|your (approval|permission)|need your ok|force[- ]?push|rm -rf|drop (table|database))\b/i;
 
-// Continue only when the model still owes the user work on the CURRENT request.
-// workDone = tools already ran in this turn, so the request has probably been served.
-const shouldAutoContinue = (text, workDone = false) => {
+// Why this turn should continue, or null to leave it ended. Returning the reason (rather
+// than a boolean) lets the caller pick a matching nudge and log something meaningful.
+//   workDone = any tool ran this turn; bgUsed = a background-capable tool ran this turn.
+function continueReason(text, workDone = false, bgUsed = false) {
   const t = String(text || "");
-  if (!t.trim()) return false;
-  if (NEEDS_USER_RE.test(t)) return false;
-  if (INTENT_RE.test(t)) return true;            // promised to act, then didn't
+  if (!t.trim()) return null;
+  if (NEEDS_USER_RE.test(t)) return null;                     // destructive confirmation
+  // Checked BEFORE the done/workDone stop, because a false "I started it" reads as completed
+  // work and would otherwise be treated as a finished turn.
+  if (!bgUsed && FALSE_BACKGROUND_RE.test(t)) return "false-background";
+  if (INTENT_RE.test(t)) return "intent";                     // promised to act, then didn't
   // Reported finished work, or already used tools this turn, and promised nothing further:
   // anything it offers now is optional follow-up the user did not ask for. Stop here.
-  if (DONE_RE.test(t) || workDone) return false;
-  return OFFER_RE.test(t) || MISSING_RE.test(t);
-};
+  if (DONE_RE.test(t) || workDone) return null;
+  if (OFFER_RE.test(t)) return "offer";
+  if (MISSING_RE.test(t)) return "missing-detail";
+  return null;
+}
+const shouldAutoContinue = (text, workDone = false, bgUsed = false) =>
+  continueReason(text, workDone, bgUsed) !== null;
 
 // Did this turn already run tools? Walk back to the last real user message (an input_text
 // item, not a tool result) and look for function calls after it.
@@ -213,6 +247,13 @@ function workDoneThisTurn(input) {
   }
   return false;
 }
+
+const NUDGE_FALSE_BACKGROUND =
+  "Your reply states that work is running in the background, but you called no tool this turn, " +
+  "so nothing was started and no result will ever arrive. Do one of two things now: actually " +
+  "start the work with the appropriate tool (and if it is asynchronous, say which tool you " +
+  "used), or correct the statement and tell the user plainly that you have not started it yet. " +
+  "Never describe background work as underway unless a tool call actually started it.";
 
 const NUDGE = "You ended your turn without calling any tool, but the user's request is not finished — " +
   "the text above only says what you intend to do. Do it now with the tools you have. If you were " +
@@ -401,6 +442,7 @@ function buildPersistenceHint() {
     "- Never reply with an offer to act — \"If you want, I can…\", \"Shall I…\", \"Let me know and I'll…\" — when you have the tools to do it. Do it now, then report what you found. Investigation and read-only steps never need permission.",
     "- When the work has several steps, carry out all of them in order, reporting as you go. Do not stop after the first step to ask for confirmation to continue.",
     "- If something fails, try the alternatives available to you before handing the problem back to the user.",
+    "- Never say that work is running, started, queued or happening in the background unless a tool call in this turn actually started it. If you have not started it, say so plainly or start it now — a user told that something is running will wait for a result that never comes.",
     // The observed stall: asked for the most recently abandoned Gerrit CLs, the model
     // replied "which Gerrit host/project should I query?" and ended the turn. That detail
     // was discoverable from git remotes, dotfiles and the project's own memory files.
@@ -918,15 +960,22 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
 
   // Continue the turn in place when the model only SAID it would act.
   let continued = 0;
+  let reason;
   while (AUTO_CONTINUE && allowContinue && payload && !hasTool && !incomplete &&
-         continued < MAX_CONTINUATIONS && shouldAutoContinue(turnText, workDoneThisTurn(payload.input))) {
+         continued < MAX_CONTINUATIONS &&
+         (reason = continueReason(turnText, workDoneThisTurn(payload.input),
+                                  backgroundToolUsedThisTurn(payload.input)))) {
     continued++;
-    log(`  -> auto-continue ${continued}/${MAX_CONTINUATIONS}: announced an action but called no tool; re-prompting`);
+    const why = reason === "false-background"
+      ? "claimed background work was running but called no tool — nothing was started"
+      : "announced an action but called no tool";
+    log(`  -> auto-continue ${continued}/${MAX_CONTINUATIONS} (${reason}): ${why}; re-prompting`);
+    const nudge = reason === "false-background" ? NUDGE_FALSE_BACKGROUND : NUDGE;
     const next = {
       ...payload,
       input: [...payload.input,
               { role: "assistant", content: [{ type: "output_text", text: turnText }] },
-              { role: "user", content: [{ type: "input_text", text: NUDGE }] }],
+              { role: "user", content: [{ type: "input_text", text: nudge }] }],
     };
     let up;
     try { up = await callResponses(next); } catch (e) { log(`  -> auto-continue fetch failed: ${e.message}`); break; }
@@ -1045,7 +1094,8 @@ const server = http.createServer(async (req, res) => {
 // this module without binding the port.
 export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
-         shouldAutoContinue, workDoneThisTurn, pruneToolArgs };
+         shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
+         pruneToolArgs };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

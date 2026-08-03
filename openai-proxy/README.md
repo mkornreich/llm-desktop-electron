@@ -267,6 +267,32 @@ match, so "That command would permanently delete the remote branch. Confirm and 
 will run it." stays ended — continuing it would answer the user's question on
 their behalf and then act. Genuine either/or questions are likewise left alone.
 
+**Nor is a false claim of background work left alone** ([issue #5]) — this is the inverse
+case and the more damaging one. The agent answered:
+
+> "Got it — I started a deep Slack analysis workflow on that exact permalink plus recent
+> bizforce status context. It's running now in the background, and I'll report back with a
+> clear go / no-go recommendation as soon as it finishes."
+
+having called **no tool at all**. Nothing was running and no report was ever coming, so the
+user waits indefinitely. `INTENT_RE` missed it because that pattern matches promises ("I'll
+run…"), not statements that action has already been taken. `FALSE_BACKGROUND_RE` now covers
+"I started / launched / queued / triggered / kicked off", "it's running", "running in the
+background" and friends, and is checked **before** the completion stop — a false "I started
+it" otherwise reads as finished work.
+
+The guard that keeps it honest is `backgroundToolUsedThisTurn()`: if `Workflow`, `Agent`,
+`Bash`, `Task` or similar actually ran this turn, work plausibly *is* running and the claim
+is left alone. Only an unbacked claim triggers a continuation, and it gets its own nudge —
+telling the model to either start the work for real or say plainly that it has not — rather
+than the "you only said what you intend to do" wording, which would be wrong here.
+
+Honest limit: the trigger is unit-tested against the verbatim issue text, nine phrasings,
+four negative controls and both guard states, and the continuation loop itself was verified
+live earlier. But across four live attempts the model called `Workflow` correctly every
+time, so this specific path has not been observed firing in production — the underlying
+misbehaviour is intermittent.
+
 **Nor on a suggested follow-up.** "If you want, I can …" means two opposite things
 depending on when it appears: *"shall I do what you asked?"* **before** the work, and
 *"shall I do something extra?"* **after** it. Only the first should continue; continuing
@@ -485,3 +511,5 @@ Counted on all four paths (chat and Responses, streaming and not) and persisted 
 `openai-proxy/usage.json` (gitignored), since the proxy restarts on every app launch.
 `reasoning_tokens` is tracked separately — those are billed as output but never shown,
 which is what made the small-budget starvation above possible.
+
+[issue #5]: https://github.com/mkornreich/llm-desktop-electron/issues/5
