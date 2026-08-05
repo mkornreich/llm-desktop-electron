@@ -164,6 +164,29 @@ const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || PROJECT.OPENAI_R
 // and keeps working when a model that does support 'max' is selected. The resolved value is
 // cached per model so this costs at most one extra round-trip per model per proxy start.
 const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+// Per-model memo of parameters the API has rejected, so the 400 is paid ONCE per process
+// instead of on every request. This is not just tidiness: the recovery costs a full extra
+// round trip, and the auto-mode safety classifier has a 60s deadline after which the CLI
+// DENIES the action. Observed in the live log — request at 21:29:56, `stop` rejected at
+// 21:30:10, retry, classifier aborted at 21:30:26 — the doubled latency was itself the
+// cause of the denial the user saw.
+const unsupportedByModel = new Map();
+function rememberUnsupported(model, param) {
+  if (!unsupportedByModel.has(model)) unsupportedByModel.set(model, new Set());
+  const set = unsupportedByModel.get(model);
+  if (!set.has(param)) {
+    set.add(param);
+    log(`  ! remembering that ${model} rejects '${param}' — it will not be sent again`);
+  }
+}
+function stripUnsupported(payload) {
+  const bad = unsupportedByModel.get(payload?.model);
+  if (!bad || bad.size === 0) return payload;
+  const out = { ...payload };
+  for (const p of bad) delete out[p];
+  return out;
+}
+
 const effortByModel = new Map();
 const effortFor = (model) => effortByModel.get(model) || REASONING_EFFORT;
 function lowerEffort(model, rejected) {
@@ -1153,7 +1176,7 @@ async function callOpenAI(payload) {
   const doFetch = (body) => fetch(`${OPENAI_BASE}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-    body: JSON.stringify(body),
+    body: JSON.stringify(stripUnsupported(body)),
   });
   let res = await doFetch(payload);
   if (res.status === 400) {
@@ -1186,6 +1209,7 @@ async function callOpenAI(payload) {
       if (bad && /unsupported_parameter|Unsupported parameter/i.test(txt)) {
         const base = retry || payload;
         if (base[bad[1]] !== undefined) {
+          rememberUnsupported(payload.model, bad[1]);
           retry = { ...base };
           delete retry[bad[1]];
           log(`  ! ${payload.model} rejected '${bad[1]}' — dropped it and retried`);
@@ -1360,7 +1384,7 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
 }
 
 async function callResponses(payload) {
-  const doFetch = (b) => fetch(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(b) });
+  const doFetch = (b) => fetch(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) });
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();
@@ -1370,6 +1394,7 @@ async function callResponses(payload) {
     else if (/unsupported_parameter|Unsupported parameter/i.test(txt) && /"param":\s*"([^"]+)"/.test(txt)) {
       const bad = txt.match(/"param":\s*"([^"]+)"/)[1];
       if (payload[bad] !== undefined) {
+        rememberUnsupported(payload.model, bad);
         const { [bad]: _dropped, ...rest } = payload;
         log(`  ! ${payload.model} rejected '${bad}' — dropped it and retried`);
         res = await doFetch(rest);
@@ -1900,7 +1925,8 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
          toResponses, toOpenAI, pickModel,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
-         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS };
+         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
+         rememberUnsupported, stripUnsupported };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

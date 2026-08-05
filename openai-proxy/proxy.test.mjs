@@ -13,7 +13,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
-        newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS } =
+        newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
+        rememberUnsupported, stripUnsupported } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1361,4 +1362,35 @@ test("an unsupported parameter is dropped by name and retried, on both surfaces"
   // it must only drop a parameter that is actually present, never blindly
   assert.match(src, /if \(base\[bad\[1\]\] !== undefined\)/);
   assert.match(src, /if \(payload\[bad\] !== undefined\)/);
+});
+
+// ---------- per-model unsupported-parameter memo ----------
+//
+// The recovery costs a full extra round trip, and the safety classifier has a 60s deadline
+// after which the CLI DENIES the action. The live log showed the doubling itself causing a
+// denial: request 21:29:56, `stop` rejected 21:30:10, retry, classifier aborted 21:30:26.
+// So the 400 must be paid once per process, not once per request.
+
+test("a rejected parameter is remembered and never sent to that model again", () => {
+  const payload = { model: "test-model-a", stop: ["</block>"], max_tokens: 50 };
+  assert.deepEqual(stripUnsupported(payload), payload, "nothing stripped before the rejection");
+  rememberUnsupported("test-model-a", "stop");
+  const after = stripUnsupported(payload);
+  assert.equal(after.stop, undefined, "the rejected parameter is gone");
+  assert.equal(after.max_tokens, 50, "everything else survives");
+  assert.equal(payload.stop.length, 1, "the caller's object is not mutated");
+});
+
+test("the memo is per model, not global", () => {
+  rememberUnsupported("test-model-b", "stop");
+  assert.equal(stripUnsupported({ model: "test-model-c", stop: ["x"] }).stop?.length, 1,
+    "an unrelated model must keep the parameter");
+});
+
+test("the memo is applied on the way out, on both surfaces", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.equal((src.match(/JSON\.stringify\(stripUnsupported\(/g) || []).length, 2,
+    "both callOpenAI and callResponses must strip before sending");
+  assert.equal((src.match(/rememberUnsupported\(payload\.model, bad/g) || []).length, 2,
+    "both 400 handlers must record the rejection");
 });
