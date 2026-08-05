@@ -13,7 +13,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
-        newTaskState, appendTaskEcho } =
+        newTaskState, appendTaskEcho, shouldRetryEmpty } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -818,8 +818,19 @@ test("issue #8: truncated turns are continued, bounded by a cumulative ceiling",
 test("issue #8: the cumulative total is what gets reported, not the last pass", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /out_tokens=\$\{totalOutTokens \|\| \(usage\?\.output_tokens \?\? "\?"\)\}/);
-  assert.equal((src.match(/totalOutTokens \+= usage\?\.output_tokens \|\| 0/g) || []).length, 2,
-    "must accumulate after the first pass and after each continuation");
+  // The invariant, not a count: EVERY pass that consumes an upstream response must add its
+  // tokens to the turn total. Expressed as a magic number this used to pass while the
+  // auto-continue loop silently skipped the accumulation, under-reporting out_tokens whenever
+  // that loop fired.
+  const consumes = (src.match(/await consume\(/g) || []).length;
+  const accums = (src.match(/totalOutTokens \+= usage\?\.output_tokens \|\| 0/g) || []).length;
+  assert.equal(accums, consumes,
+    `every consume() must be followed by an accumulation (${consumes} consumes, ${accums} accumulations)`);
+  assert.ok(consumes >= 4, "first pass + truncation + auto-continue + empty-retry");
+  // and each one is adjacent, not just present somewhere in the function (comments skipped)
+  const noComments = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  for (const m of noComments.matchAll(/await consume\([^)]*\);\s*\n([^\n]*)/g))
+    assert.match(m[1], /totalOutTokens \+= usage/, `consume() not followed by accumulation: ${m[1].trim()}`);
 });
 
 // ---------- issue #6: the auto-mode safety classifier ----------
@@ -1142,4 +1153,80 @@ test("the guard matches a construction, not a bare verb", () => {
   // the dangerous markers stay bare on purpose
   for (const kept of ["irreversibl", "cannot be undone", "rm -rf", "force[- ]?push"])
     assert.ok(block.includes(kept), `${kept} must stay a bare marker`);
+});
+
+// ---------- empty-turn recovery (the "predict cash flow" stall) ----------
+//
+// The user hit four consecutive stalls in one session: send a message, wait ~40s, get
+// "[proxy] The model returned no content for this turn (status=completed)". proxy.log holds 20
+// of them, across input=10..273 and elapsed 0..57s, EVERY one with no usage at all — the
+// fingerprint of a stream that ended without a terminal event. The old code reported
+// "status=completed" on no evidence (it inferred it from `incomplete` being false) and then
+// abandoned the turn.
+
+const RETRY_BASE = { enabled: true, allowContinue: true, hasTool: false, textLen: 0,
+                     refusalText: "", streamError: null, incomplete: false,
+                     retries: 0, maxRetries: 2 };
+
+test("an empty turn with no terminal event is retried", () => {
+  assert.equal(shouldRetryEmpty(RETRY_BASE), true);
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, retries: 1 }), true);
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, retries: 2 }), false, "bounded by maxRetries");
+});
+
+test("a turn that produced something is never retried", () => {
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, hasTool: true }), false);
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, textLen: 1 }), false);
+});
+
+test("the three carve-outs where retrying is actively wrong", () => {
+  // a refusal IS the answer — asking again just refuses again
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, refusalText: "I can't help with that" }), false);
+  // a hard upstream failure: the message is the useful output
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, streamError: "server had an error" }), false);
+  // truncation has its own loop, which RESUMES rather than restarting
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, incomplete: true }), false);
+});
+
+test("the retry respects its switches", () => {
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, enabled: false }), false);
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, allowContinue: false }), false,
+    "classifier turns pass allowContinue=false, so a verdict is never retried");
+});
+
+test("the notice reports the status the API gave, not one the proxy inferred", () => {
+  // the bug: "completed" was inferred from `incomplete` being false, so a stream that reported
+  // nothing at all was described as a normal completion
+  const none = emptyTurnNotice({ status: "no terminal event", retries: 2 });
+  assert.match(none, /status=no terminal event/);
+  assert.match(none, /retries=2/);
+  assert.match(none, /transport failure rather than the model declining to answer/);
+  assert.ok(!/status=completed/.test(none));
+
+  const failed = emptyTurnNotice({ status: "failed", error: "server had an error" });
+  assert.match(failed, /status=failed/);
+  assert.match(failed, /The upstream reported: server had an error/);
+
+  // unhandled event names are surfaced so a future silent drop is explainable
+  const unk = emptyTurnNotice({ status: "no terminal event", unhandled: ["response.mystery"] });
+  assert.match(unk, /unhandled_events=response\.mystery/);
+
+  // and the budget advice still appears when the budget really was the cause (issue #8)
+  const starved = emptyTurnNotice({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+                                    usage: { output_tokens: 116, output_tokens_details: { reasoning_tokens: 116 } } });
+  assert.match(starved, /consumed by reasoning/);
+});
+
+test("the events that used to be dropped are now handled", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  for (const ev of ['case "response.failed"', 'case "error"', 'case "response.refusal.delta"'])
+    assert.ok(src.includes(ev), `${ev} must be handled — dropping it is how the turn went silently empty`);
+  // a refusal must reach the user as text, not vanish
+  assert.match(src, /refusalText \+= String\(j\.delta\)/);
+  // unknown events are recorded rather than ignored
+  assert.match(src, /unknownEvents\.add\(j\.type\)/);
+  // and the no-terminal-event case is measured
+  assert.match(src, /ended with NO terminal event after \$\{streamMs\}ms and \$\{streamBytes\} byte/);
+  // the retry drops reasoning, which is what shortens the silent phase that gets cut
+  assert.match(src, /const \{ reasoning, \.\.\.retry \} = payload/);
 });

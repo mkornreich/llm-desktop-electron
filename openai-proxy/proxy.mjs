@@ -182,6 +182,12 @@ const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "h
 // Falls back to plain truncation whenever the summary call fails, so it can only add value.
 // github issue #8. When a turn is cut off by the output cap, continue it automatically instead
 // of handing back a truncated answer.
+// An empty turn stalls the session: the user waits ~40s and gets a diagnostic instead of work.
+// Retry instead. Bounded, and skipped for refusals, truncation and hard upstream errors — see
+// the loop in streamResponses for why each of those must not be retried.
+const EMPTY_RETRY = (process.env.OPENAI_EMPTY_RETRY || PROJECT.OPENAI_EMPTY_RETRY || "1") !== "0";
+const MAX_EMPTY_RETRIES = parseInt(process.env.OPENAI_MAX_EMPTY_RETRIES ||
+  PROJECT.OPENAI_MAX_EMPTY_RETRIES || "2", 10) || 0;
 const CONTINUE_ON_TRUNCATION = (process.env.OPENAI_CONTINUE_ON_TRUNCATION || PROJECT.OPENAI_CONTINUE_ON_TRUNCATION || "1") !== "0";
 // Ceiling on the TOTAL output tokens spliced into one assistant message. This matters because
 // every continuation appends to the same message, and the client enforces its own per-response
@@ -387,6 +393,20 @@ function toolResultText(blk) {
 // A turn with no text and no tool call is useless to the user and indistinguishable from a
 // hang. Rather than forward the blank, say what actually happened — the real status and the
 // likely cause. This reports a failure; it never invents an answer.
+// Should an empty turn be retried? Split out so the carve-outs are testable, because each one
+// is a case where retrying is actively wrong:
+//   refusal   - the refusal IS the answer; asking again just refuses again
+//   error     - a hard upstream failure; the message is the useful output
+//   incomplete- the truncation loop owns that, and it resumes rather than restarting
+function shouldRetryEmpty(s) {
+  if (!s.enabled || !s.allowContinue) return false;
+  if (s.hasTool || s.textLen > 0) return false;
+  if (s.refusalText || s.streamError || s.incomplete) return false;
+  return s.retries < s.maxRetries;
+}
+
+const nowMs = () => Date.now();
+
 function emptyTurnNotice(resp) {
   const status = resp?.status || "completed";
   const reason = resp?.incomplete_details?.reason;
@@ -396,11 +416,22 @@ function emptyTurnNotice(resp) {
   if (reason) bits.push(`reason=${reason}`);
   if (out != null) bits.push(`output_tokens=${out}`);
   if (reasoning) bits.push(`reasoning_tokens=${reasoning}`);
+  if (resp?.retries) bits.push(`retries=${resp.retries}`);
+  if (resp?.unhandled?.length) bits.push(`unhandled_events=${resp.unhandled.join(",")}`);
   let hint = "";
-  if (reason === "max_output_tokens") {
+  if (resp?.error) {
+    hint = ` The upstream reported: ${resp.error}.`;
+  } else if (reason === "max_output_tokens") {
     hint = reasoning
       ? " The token budget was consumed by reasoning before any answer was produced — raise max_tokens, or lower OPENAI_REASONING_EFFORT / raise OPENAI_THINKING_MIN_BUDGET."
       : " The output token budget was exhausted — raise max_tokens.";
+  } else if (status === "no terminal event") {
+    // The fingerprint of every empty turn in the log: no content, no usage, and neither
+    // response.completed nor response.incomplete ever arrived. Say that, rather than claiming
+    // the model completed normally and simply chose to say nothing.
+    hint = " The upstream stream ended without reporting a result, so this is a transport" +
+           " failure rather than the model declining to answer. Sending the message again" +
+           " usually works.";
   }
   return `[proxy] The model returned no content for this turn (${bits.join(", ")}). ` +
          `No tool was called, so nothing ran.${hint}`;
@@ -1354,6 +1385,10 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
   let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic
   let taskChanged = false;                       // a task tool ran this turn (issue #7)
+  let sawTerminal = null;                        // "completed"|"incomplete"|"failed"|"error", or null if the stream just stopped
+  let streamError = null;                        // message from an error / response.failed event
+  let refusalText = "";                          // a refusal is content, and must not be retried
+  const unknownEvents = new Set();               // SSE event types this proxy does not handle
   let incompleteReason = null;                   // as reported by the API, never assumed
   let totalOutTokens = 0;                        // cumulative across continuations
   const open = (itemId, cb) => {
@@ -1372,15 +1407,18 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   };
 
   let turnText = "";        // this upstream's plain text, for the unfulfilled-intent check
+  let streamBytes = 0, streamMs = 0;   // to characterise a stream that ends with no terminal event
   // Consume ONE upstream response, emitting into the message already in progress.
   async function consume(up) {
     turnText = "";
     const reader = up.body.getReader();
     const dec = new TextDecoder();
+    const startedAt = nowMs();
     let buf = "";
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      streamBytes += value?.length || 0;
       buf += dec.decode(value, { stream: true });
       const lines = buf.split("\n");
       buf = lines.pop();
@@ -1446,17 +1484,52 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
             close(j.item.id);
           }
           break;
-        case "response.completed": usage = j.response?.usage; break;
+        case "response.completed": usage = j.response?.usage; sawTerminal = "completed"; break;
         case "response.incomplete":
           usage = j.response?.usage;
           incomplete = true;
+          sawTerminal = "incomplete";
           // Take the reason the API actually gave. This used to be hardcoded to
           // max_output_tokens, which made the empty-turn notice assert a cause it had not
           // verified and hand out budget advice that might not apply.
           incompleteReason = j.response?.incomplete_details?.reason || incompleteReason || "unknown";
           break;
+        // A refusal produces no output_text at all, so without this the turn looked empty and
+        // the reason was invisible. Surface it as text: the user is entitled to see it, and a
+        // refusal must NOT be retried — the model will refuse again.
+        case "response.refusal.delta":
+          if (j.delta) {
+            const it = open(j.item_id || "__refusal__", { type: "text", text: "" });
+            refusalText += String(j.delta);
+            textLen += String(j.delta).length;
+            sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: String(j.delta) } });
+          }
+          break;
+        // Terminal failures. Neither of these was handled, so an upstream error mid-stream
+        // produced a silent empty turn that the notice then blamed on "status=completed".
+        case "response.failed":
+          sawTerminal = "failed";
+          streamError = j.response?.error?.message || j.response?.error?.code || "response.failed with no detail";
+          break;
+        case "error":
+          sawTerminal = sawTerminal || "error";
+          streamError = j.message || j.error?.message || j.code || "error event with no detail";
+          break;
+        default:
+          // Unknown events are usually harmless bookkeeping, but a silently-dropped one is
+          // exactly how the empty turn hid. Record the names once so the next occurrence is
+          // explainable instead of mysterious.
+          if (typeof j.type === "string") unknownEvents.add(j.type);
+          break;
       }
       }
+    }
+    streamMs = nowMs() - startedAt;
+    if (!sawTerminal) {
+      // The fingerprint of the failure in issue-report terms: the upstream hung up without
+      // saying completed or incomplete. Recording bytes and duration makes it measurable
+      // instead of anecdotal.
+      log(`  ! upstream stream ended with NO terminal event after ${streamMs}ms and ${streamBytes} byte(s)`);
     }
     for (const id of items.keys()) close(id);
   }
@@ -1524,6 +1597,9 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     if (!up.ok) { log(`  -> auto-continue got ${up.status}; keeping the original turn`); break; }
     payload = next;
     await consume(up);
+    // This was missing: an auto-continued pass produced tokens that were never added to the
+    // turn total, so out_tokens under-reported every time this loop fired.
+    totalOutTokens += usage?.output_tokens || 0;
   }
 
   // Show the list the agent just changed, since nothing downstream will (issue #7). Emitted
@@ -1539,16 +1615,51 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     }
   }
 
+  // An empty turn used to be reported and then abandoned, which stalls the session: the user
+  // sends a message, waits ~40s, and gets a diagnostic instead of work. Ask again instead.
+  //
+  // Retried only when retrying can plausibly help. NOT for a refusal (the model will refuse
+  // again, and the refusal is the answer), NOT for a truncated turn (the truncation loop above
+  // owns that), and NOT for a hard upstream failure reported by error/response.failed.
+  let emptyRetries = 0;
+  while (payload && shouldRetryEmpty({ enabled: EMPTY_RETRY, allowContinue, hasTool, textLen,
+                                       refusalText, streamError, incomplete,
+                                       retries: emptyRetries, maxRetries: MAX_EMPTY_RETRIES })) {
+    emptyRetries++;
+    log(`  -> empty turn, retry ${emptyRetries}/${MAX_EMPTY_RETRIES}` +
+        ` (terminal=${sawTerminal || "none"}${unknownEvents.size ? `, unhandled=[${[...unknownEvents].join(",")}]` : ""})`);
+    // Drop reasoning on the retry. A turn that burned ~40s and returned nothing was almost
+    // certainly spent reasoning, and asking for the same hidden reasoning again reproduces it.
+    const { reasoning, ...retry } = payload;
+    let up;
+    try { up = await callResponses(retry); } catch (e) { log(`  -> empty-turn retry fetch failed: ${e.message}`); break; }
+    if (!up.ok) { log(`  -> empty-turn retry got ${up.status}; giving up on the retry`); break; }
+    sawTerminal = null; streamError = null;
+    await consume(up);
+    totalOutTokens += usage?.output_tokens || 0;
+  }
+
   // Never hand back a blank turn (issue #1).
   if (!hasTool && textLen === 0) {
-    const notice = emptyTurnNotice({ status: incomplete ? "incomplete" : "completed",
-                                     incomplete_details: incompleteReason ? { reason: incompleteReason } : undefined,
-                                     usage });
+    // Report what the API actually said. `status` used to be inferred as
+    // `incomplete ? "incomplete" : "completed"`, so a stream that ended with NO terminal event
+    // at all — which is what every empty turn in the log looked like, all with no usage —
+    // was reported as "completed" on no evidence whatsoever.
+    const notice = emptyTurnNotice({
+      status: streamError ? "failed" : (sawTerminal || "no terminal event"),
+      incomplete_details: incompleteReason ? { reason: incompleteReason } : undefined,
+      usage, error: streamError, retries: emptyRetries,
+      unhandled: unknownEvents.size ? [...unknownEvents] : null,
+    });
     const it = open("__empty__", { type: "text", text: "" });
     sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: notice } });
     close("__empty__");
     textLen = notice.length;
-    log(`  ! empty turn — substituted a diagnostic notice instead of blank output`);
+    log(`  ! empty turn after ${emptyRetries} retr${emptyRetries === 1 ? "y" : "ies"}` +
+        ` — terminal=${sawTerminal || "none"}${streamError ? `, error=${streamError}` : ""}` +
+        `${unknownEvents.size ? `, unhandled=[${[...unknownEvents].join(",")}]` : ""}`);
+  } else if (emptyRetries) {
+    log(`  -> recovered after ${emptyRetries} empty-turn retr${emptyRetries === 1 ? "y" : "ies"}`);
   }
   recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
@@ -1675,7 +1786,7 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
          toResponses, toOpenAI, pickModel,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
-         newTaskState, appendTaskEcho };
+         newTaskState, appendTaskEcho, shouldRetryEmpty };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

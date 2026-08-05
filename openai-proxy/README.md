@@ -778,3 +778,74 @@ likely, so it is fixed here.
 
 [issue #7]: https://github.com/mkornreich/llm-desktop-electron/issues/7
 [issue #6]: https://github.com/mkornreich/llm-desktop-electron/issues/6
+
+## Empty turns: retry instead of stalling
+
+The symptom, from a real session ("predict cash flow"): send a message, wait ~40s, get
+
+```
+[proxy] The model returned no content for this turn (status=completed). No tool was called, so nothing ran.
+```
+
+Four times in a row. `proxy.log` held **20** of them across ~2.5 hours.
+
+### It was not "completed"
+
+That status was **inferred**, not reported — `incomplete ? "incomplete" : "completed"`. Every
+one of the 20 logged `out_tokens=?`, meaning no usage ever arrived, which means neither
+`response.completed` nor `response.incomplete` was ever seen. The stream simply stopped. The
+notice then described that as a normal completion in which the model chose to say nothing.
+(Same class of mistake as the hardcoded reason fixed in [issue #8] — asserting a cause the
+code had not observed.)
+
+The spread rules out the obvious explanations:
+
+| | range |
+|---|---|
+| input items | 10 – 273 |
+| tools | 205 – 221 |
+| elapsed before the empty turn | 0s – 57s |
+
+Not budget (no `incomplete`), not context size, not one model, not one tool. Two replays of the
+exact failing request rebuilt from the session transcript — 263 messages / ~162k tokens, once
+with no tools and once with 215 — both **succeeded** (46s and 14s, with content). So it is
+intermittent and transport-level, not a property of the conversation.
+
+### Three fixes
+
+**1. Events that were being dropped.** The streaming switch had no case for `error`, none for
+`response.failed`, and none for refusals — so an upstream error mid-stream, or a refusal,
+produced a silent empty turn. All three are handled now. A refusal is emitted as text, because
+it is the answer and the user is entitled to see it. Unknown event types are collected and
+named in the notice, so the next silent drop is explainable rather than mysterious.
+
+**2. The truth, and a measurement.** The notice now reports `status=no terminal event` when
+that is what happened, says plainly that this is *"a transport failure rather than the model
+declining to answer"*, and the log records how long the stream ran and how many bytes it
+carried before dying — turning an anecdote into something measurable.
+
+**3. It retries.** Up to `OPENAI_MAX_EMPTY_RETRIES` (default 2), and the retry **drops
+reasoning** — a turn that burned 40s and returned nothing was almost certainly in a long silent
+reasoning phase, which is exactly the window that gets cut, so asking for the same hidden
+reasoning again reproduces the failure.
+
+Retrying is skipped in the three cases where it is wrong, each with a test:
+
+| case | why not |
+|---|---|
+| refusal | the refusal *is* the answer; asking again just refuses again |
+| `error` / `response.failed` | a hard upstream failure; the message is the useful output |
+| `incomplete` | the truncation loop owns it, and it **resumes** rather than restarting |
+
+Classifier calls pass `allowContinue=false`, so a safety verdict is never retried ([issue #6]).
+
+### A bug found by a failing test
+
+Adding the retry broke `issue #8: the cumulative total is what gets reported` — it asserted
+exactly **two** usage-accumulation sites. Chasing that turned up a real defect: of the four
+places that consume an upstream response, the **auto-continue** loop never added its tokens to
+the turn total, so `out_tokens` under-reported every time that loop fired. Fixed, and the test
+now asserts the invariant — every `await consume(` is followed by an accumulation — instead of
+a magic number that passed while the property was false.
+
+[issue #8]: https://github.com/mkornreich/llm-desktop-electron/issues/8
