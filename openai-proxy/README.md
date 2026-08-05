@@ -688,3 +688,67 @@ than implicit. With realistic budgets the ceiling binds long before the continua
   reason may well have been wrong.
 
 [issue #8]: https://github.com/mkornreich/llm-desktop-electron/issues/8
+
+## Showing the task list ([issue #7])
+
+When the agent changes its task list the session shows a collapsed label — "Updated
+tasks" — and not the tasks. That is not something this build can restyle: the chat UI
+is the remote claude.ai app, and the local bundle holds only tool-name registries and
+i18n ids (`builtinTool.TaskUpdate`), no renderer.
+
+Nothing downstream carries the list either. Verified in CLI 2.1.217:
+
+| tool | tool_result content |
+|---|---|
+| `TaskUpdate` | `Updated task #3 status` |
+| `TodoWrite` | `Todos have been modified successfully. Ensure that you continue to use the todo list…` |
+
+and `TodoWrite`'s `renderToolUseMessage()` returns `null`. The full list appears in
+exactly one place — a **nudge** that only fires when the task tools have been idle,
+`"Here are the existing tasks:\n\n#1. [completed] …"`, built as
+`` `#${o.id}. [${o.status}] ${o.subject}` `` and marked `isMeta`.
+
+So the proxy renders it, as its own text block after the tool calls:
+
+```
+**Tasks** — 2 done, 1 to do
+- [x] #1 Read the bug report
+- [x] #2 Reproduce it
+- [ ] #3 Write the fix
+```
+
+`[x]` completed, `[~]` in progress, `[ ]` pending.
+
+**Where the numbers come from.** Nothing is invented. `TodoWrite` carries the whole
+list on every call, so that echo is exact. For `TaskCreate`/`TaskUpdate` the prior
+state is rebuilt from the transcript — the nudge blocks give ids, statuses and
+subjects, and earlier task tool calls are replayed on top — then this turn's call is
+applied. A `TaskCreate` shows its tasks marked `_(new)_` **without an id**, because ids
+are assigned server-side and the proxy does not have one yet; it never fabricates one.
+A call that changes nothing (`TaskUpdate` with no id, `TodoWrite` with no todos) echoes
+nothing.
+
+**Placement.** The echo is emitted *after* the tool-call blocks using the same
+`open`/`close` helper as the empty-turn notice, which allocates a fresh trailing index —
+so no existing block's index moves. Verified on a live stream: blocks `text(0)`,
+`tool_use(1)`, `text(2)`, indices contiguous from 0, every block opened and closed,
+starts monotonic, `stop_reason=tool_use`.
+
+Skipped entirely for classifier calls ([issue #6]) — a verdict must not gain a task
+list. Disable with `OPENAI_TASK_ECHO=0`.
+
+### Narration
+
+The same issue asks for the agent to be verbose about what it is doing, so the
+persistence hint gained a **Narrating your work** section: one short line naming the
+next step before taking it, saying what actually came back afterwards, and restating
+the task list in prose when it changes — *"The task tools do not show this to the user,
+so if you do not write it down nobody sees it."*
+
+The last bullet is the guard, and it is load-bearing: "be verbose" on its own invites
+exactly the padding [issue #1] complained about, so the directive ends with
+*"Narration is information, never padding"* plus an explicit ban on restating the
+request, announcing summaries, and filler.
+
+[issue #7]: https://github.com/mkornreich/llm-desktop-electron/issues/7
+[issue #6]: https://github.com/mkornreich/llm-desktop-electron/issues/6

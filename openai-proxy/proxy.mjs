@@ -647,6 +647,16 @@ function buildPersistenceHint() {
     // was discoverable from git remotes, dotfiles and the project's own memory files.
     "- Missing details are something to go and find, not a reason to stop. Before asking the user for a value you could discover yourself — a host, URL, path, account, project or branch name — look for it with the tools you have: git remotes and config, dotfiles and config files in the repo, the environment, CLAUDE.md and memory files, and earlier sessions. Only ask if that search actually fails, and then say what you already tried.",
     "- Do stop and ask when the next action is destructive, irreversible, or sends something outward; when you need a credential or a decision only the user can make; or when the request is genuinely ambiguous in a way that changes what you would build. In those cases state exactly what you need and why.",
+    "",
+    // Issue #7. Working autonomously for many turns is opaque: the session shows tool cards
+    // and, for a task change, only a collapsed label. Narration is the only thing that makes
+    // a long unattended run followable. The last bullet is the guard — "be verbose" invites
+    // padding, which is what issue #1 complained about.
+    "## Narrating your work",
+    "- Say what you are doing as you go. Before starting a new step, write one short line naming what you are about to do and why. One line per step, not per tool call.",
+    "- When a step finishes, say what actually came back — the number, the filename, the error, the verdict. Do not just move on to the next tool call in silence.",
+    "- When you add, start or finish a task, restate the list in your text: what you just finished, what you are starting, and what is left. The task tools do not show this to the user, so if you do not write it down nobody sees it.",
+    "- Narration is information, never padding. No restating the request back, no announcing what you are about to summarise, no \"great question\", no filler adjectives. If a line would not tell the user something new, leave it out.",
   ].join("\n");
 }
 
@@ -709,6 +719,134 @@ function fixMath(text) {
   if (!OUTPUT_FIXUPS || !text) return text;
   const f = makeMathFixer();
   return f.push(text) + f.flush();
+}
+
+// ---- task echo (issue #7) ----
+//
+// When the agent changes its task list the session shows only a collapsed label. That is not
+// something this build can restyle: the chat UI is the remote claude.ai app. What the tools
+// hand back carries no list either — verified in CLI 2.1.217:
+//   TaskUpdate -> "Updated task #3 status"
+//   TodoWrite  -> "Todos have been modified successfully. Ensure that you continue to use…"
+//   TodoWrite's renderToolUseMessage() returns null
+// The full list appears in exactly one place, a NUDGE that only fires when the task tools have
+// been idle ("Here are the existing tasks:\n\n#1. [completed] …"), and it is marked isMeta.
+//
+// So the proxy renders the list itself, as a text block next to the tool call. It is a
+// rendering of what the model actually did — read from its own tool-call arguments and from
+// the transcript — never invented.
+const TASK_ECHO = (process.env.OPENAI_TASK_ECHO || PROJECT.OPENAI_TASK_ECHO || "1") !== "0";
+const taskToolKind = (name) => (
+  name === "TaskCreate" ? "create" :
+  name === "TaskUpdate" ? "update" :
+  name === "TodoWrite" ? "todos" : null);
+
+const STATUS_MARK = { completed: "x", in_progress: "~", pending: " " };
+const newTaskState = () => ({ byId: new Map(), todos: null, created: [], changed: [] });
+
+// "#1. [completed] Assemble runnable app tree" — the exact shape the CLI's task_reminder
+// builds (`#${o.id}. [${o.status}] ${o.subject}`), which is the only authoritative list the
+// proxy ever sees.
+const REMINDER_LINE_RE = /^#(\S+)\.\s*\[([a-z_]+)\]\s*(.+)$/gm;
+function parseTaskReminder(text) {
+  const out = [];
+  if (!text || !text.includes("Here are the existing tasks")) return out;
+  const after = text.slice(text.indexOf("Here are the existing tasks"));
+  for (const m of after.matchAll(REMINDER_LINE_RE)) out.push({ id: m[1], status: m[2], subject: m[3].trim() });
+  return out;
+}
+
+function applyTaskCall(state, name, input) {
+  const kind = taskToolKind(name);
+  if (!kind || !input || typeof input !== "object") return false;
+  if (kind === "todos") {
+    // TodoWrite always carries the WHOLE list, so this echo is exact and complete.
+    if (Array.isArray(input.todos)) { state.todos = input.todos; return true; }
+    return false;
+  }
+  if (kind === "create") {
+    // Ids are assigned server-side, so a create has no id to show yet — say so rather than
+    // inventing one.
+    const list = Array.isArray(input.tasks) ? input.tasks : [input];
+    let any = false;
+    for (const t of list) {
+      const subject = t?.subject || t?.content || t?.description;
+      if (subject) { state.created.push({ subject: String(subject), status: t?.status || "pending" }); any = true; }
+    }
+    return any;
+  }
+  const id = input.taskId ?? input.id;
+  if (id == null) return false;
+  const key = String(id);
+  const prev = state.byId.get(key) || { status: "pending", subject: "" };
+  const next = { status: input.status || prev.status, subject: input.subject || prev.subject };
+  state.byId.set(key, next);
+  const fields = ["status", "subject", "description", "owner", "activeForm"].filter((f) => input[f] !== undefined);
+  state.changed.push({ id: key, from: prev.status, to: next.status, fields });
+  return true;
+}
+
+// Rebuild what the list looked like BEFORE this turn, from the transcript alone: the reminder
+// blocks give ids/subjects/statuses, and replaying earlier task tool calls carries forward
+// changes made after the last reminder.
+function collectPriorTasks(body) {
+  const state = newTaskState();
+  for (const m of body?.messages || []) {
+    const content = m?.content;
+    if (typeof content === "string") {
+      if (m.role === "user") for (const t of parseTaskReminder(content)) state.byId.set(t.id, { status: t.status, subject: t.subject });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const blk of content) {
+      if (m.role === "user" && blk?.type === "text") {
+        for (const t of parseTaskReminder(blk.text)) state.byId.set(t.id, { status: t.status, subject: t.subject });
+      } else if (m.role === "assistant" && blk?.type === "tool_use") {
+        applyTaskCall(state, blk.name, blk.input);
+      }
+    }
+  }
+  state.created = [];   // only THIS turn's creations are news
+  state.changed = [];
+  return state;
+}
+
+// Renders the list as a markdown checklist. Returns null when there is nothing worth showing,
+// so a no-op task call never adds noise.
+function renderTaskEcho(state) {
+  const line = (mark, label, text) => `- [${mark}] ${label}${text}`;
+  const rows = [];
+  if (state.todos) {
+    for (const t of state.todos) rows.push(line(STATUS_MARK[t?.status] ?? " ", "", String(t?.content ?? t?.subject ?? "").trim()));
+  } else {
+    for (const [id, t] of state.byId) rows.push(line(STATUS_MARK[t.status] ?? " ", `#${id} `, t.subject || "(no subject)"));
+    for (const c of state.created) rows.push(line(STATUS_MARK[c.status] ?? " ", "", `${c.subject}  _(new)_`));
+  }
+  if (!rows.length) return null;
+  const all = state.todos
+    ? state.todos.map((t) => t?.status)
+    : [...state.byId.values()].map((t) => t.status).concat(state.created.map((c) => c.status));
+  const n = (s) => all.filter((x) => x === s).length;
+  const counts = [n("completed") && `${n("completed")} done`, n("in_progress") && `${n("in_progress")} in progress`,
+                  n("pending") && `${n("pending")} to do`].filter(Boolean).join(", ");
+  return `**Tasks**${counts ? ` — ${counts}` : ""}\n${rows.join("\n")}`;
+}
+
+// Non-streaming form of the same echo: replay this message's task calls onto the prior state
+// and append one text block. Mutates `msg` in place and returns whether it added anything.
+function appendTaskEcho(msg, body, isCls) {
+  if (!TASK_ECHO || isCls || !Array.isArray(msg?.content)) return false;
+  const calls = msg.content.filter((c) => c.type === "tool_use" && taskToolKind(c.name));
+  if (!calls.length) return false;
+  const state = collectPriorTasks(body);
+  let changed = false;
+  for (const c of calls) if (applyTaskCall(state, c.name, c.input)) changed = true;
+  if (!changed) return false;
+  const echo = renderTaskEcho(state);
+  if (!echo) return false;
+  msg.content.push({ type: "text", text: `\n\n${echo}\n` });
+  log(`  -> task echo: ${echo.split("\n").length - 1} item(s)`);
+  return true;
 }
 
 // ---- per-request model routing ----
@@ -1179,7 +1317,7 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
 }
 
 // Responses SSE -> Anthropic SSE
-async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null) {
+async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null, taskState = null) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -1187,6 +1325,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
   let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic
+  let taskChanged = false;                       // a task tool ran this turn (issue #7)
   let incompleteReason = null;                   // as reported by the API, never assumed
   let totalOutTokens = 0;                        // cumulative across continuations
   const open = (itemId, cb) => {
@@ -1272,6 +1411,8 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
               }
               const pruned = pruneByName(schemas, it.toolName, safeParse(it.argBuf || "{}"));
               sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
+              // Record the task change while the arguments are in hand (issue #7).
+              if (taskState && applyTaskCall(taskState, it.toolName, pruned)) taskChanged = true;
               it.argBuf = undefined;
             }
             close(j.item.id);
@@ -1357,6 +1498,19 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     await consume(up);
   }
 
+  // Show the list the agent just changed, since nothing downstream will (issue #7). Emitted
+  // as its own text block AFTER the tool calls, so no existing block's indices move.
+  if (TASK_ECHO && taskChanged && taskState) {
+    const echo = renderTaskEcho(taskState);
+    if (echo) {
+      const it = open("__tasks__", { type: "text", text: "" });
+      sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "text_delta", text: `\n\n${echo}\n` } });
+      close("__tasks__");
+      textLen += echo.length;
+      log(`  -> task echo: ${echo.split("\n").length - 1} item(s)`);
+    }
+  }
+
   // Never hand back a blank turn (issue #1).
   if (!hasTool && textLen === 0) {
     const notice = emptyTurnNotice({ status: incomplete ? "incomplete" : "completed",
@@ -1434,7 +1588,8 @@ const server = http.createServer(async (req, res) => {
       }
       if (payload.stream) {
         const mayContinue = !isCls && !!payload.tools?.length;
-        try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue, schemas); }
+        const taskState = TASK_ECHO && !isCls ? collectPriorTasks(body) : null;
+        try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue, schemas, taskState); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
@@ -1453,6 +1608,7 @@ const server = http.createServer(async (req, res) => {
         }
         recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens);
         const msg = fromResponses(rj, reqModel, nameMap, schemas);
+        appendTaskEcho(msg, body, isCls);
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
                    msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
         return sendJSON(res, 200, msg); }
@@ -1472,7 +1628,9 @@ const server = http.createServer(async (req, res) => {
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
                 oai?.usage?.completion_tokens_details?.reasoning_tokens);
-    return sendJSON(res, 200, toAnthropic(oai, reqModel, nameMap, schemas));
+    { const msg = toAnthropic(oai, reqModel, nameMap, schemas);
+      appendTaskEcho(msg, body, isCls);
+      return sendJSON(res, 200, msg); }
   }
 
   anthropicError(res, 404, "not_found_error", `no route for ${req.method} ${url}`);
@@ -1487,7 +1645,9 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
          compactResponsesInputSummarised, summariseDropped,
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
-         toResponses, toOpenAI, pickModel };
+         toResponses, toOpenAI, pickModel,
+         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
+         newTaskState, appendTaskEcho };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

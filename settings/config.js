@@ -69,6 +69,9 @@ const SCHEMA = [
   { group: "Agent behaviour", file: ".openai-model", key: "OPENAI_OUTPUT_FIXUPS", type: "bool",
     default: "1", label: "Output shaping (math + SVG)",
     help: "Rewrites \\(…\\) to $…$ and \\[…\\] to $$…$$ (fence-aware), and tells the model to render images with the widget tool rather than pasting raw markup." },
+  { group: "Agent behaviour", file: ".openai-model", key: "OPENAI_TASK_ECHO", type: "bool",
+    default: "1", label: "Show the task list when it changes",
+    help: "When the agent calls TaskCreate, TaskUpdate or TodoWrite, appends the actual list as a markdown checklist. The session otherwise shows only a collapsed label, and neither tool result carries the list — TaskUpdate returns just \"Updated task #3 status\". Rendered from the model's own tool arguments plus the task list the CLI puts in the transcript; never invented." },
 
   { group: "Claude CLI", file: ".openai-model", key: "CLAUDE_CODE_BG_CLASSIFIER_MODEL", type: "text",
     default: "gpt-4.1-mini", label: "Background classifier model",

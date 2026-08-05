@@ -11,7 +11,9 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
-        isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel } =
+        isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
+        taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
+        newTaskState, appendTaskEcho } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -977,4 +979,123 @@ test("issue #6: the proxy log is appended, not truncated, on launch", () => {
   assert.ok(!/node proxy\.mjs > proxy\.log/.test(run),
     "truncating on launch destroys the evidence for the next bug report");
   assert.match(run, /node proxy\.mjs >> proxy\.log/);
+});
+
+// ---------- issue #7: show the actual tasks, and narrate the work ----------
+//
+// The session shows a collapsed label when the task list changes, and neither tool result
+// carries the list (verified in CLI 2.1.217: TaskUpdate -> "Updated task #3 status",
+// TodoWrite -> "Todos have been modified successfully…", renderToolUseMessage() -> null).
+// The full list appears only in an idle NUDGE, marked isMeta. So the proxy renders it.
+
+test("issue #7: TodoWrite echoes the whole list, exactly", () => {
+  const s = newTaskState();
+  assert.equal(applyTaskCall(s, "TodoWrite", { todos: [
+    { content: "Read the issue", status: "completed" },
+    { content: "Write the fix", status: "in_progress" },
+    { content: "Add tests", status: "pending" },
+  ] }), true);
+  const echo = renderTaskEcho(s);
+  assert.match(echo, /^\*\*Tasks\*\* — 1 done, 1 in progress, 1 to do$/m);
+  assert.match(echo, /^- \[x\] Read the issue$/m);
+  assert.match(echo, /^- \[~\] Write the fix$/m);
+  assert.match(echo, /^- \[ \] Add tests$/m);
+});
+
+test("issue #7: the prior list is recovered from the CLI's own reminder text", () => {
+  // Exactly the shape the CLI builds: `#${id}. [${status}] ${subject}`.
+  const reminder = "The task tools haven't been used recently. …\n\nHere are the existing tasks:\n\n" +
+    "#1. [completed] Assemble runnable app tree\n#2. [in_progress] Boot and debug the app\n#3. [pending] Build the proxy";
+  assert.deepEqual(parseTaskReminder(reminder).map((t) => t.id), ["1", "2", "3"]);
+  assert.equal(parseTaskReminder(reminder)[1].status, "in_progress");
+  assert.equal(parseTaskReminder(reminder)[0].subject, "Assemble runnable app tree");
+  // text without the marker yields nothing, so ordinary prose can't be mistaken for a list
+  assert.deepEqual(parseTaskReminder("#1. [done] not a reminder"), []);
+  assert.deepEqual(parseTaskReminder(""), []);
+});
+
+test("issue #7: a TaskUpdate is rendered against the recovered list", () => {
+  const body = { messages: [
+    { role: "user", content: [{ type: "text", text: "Here are the existing tasks:\n\n#1. [completed] First\n#2. [in_progress] Second\n#3. [pending] Third" }] },
+  ] };
+  const s = collectPriorTasks(body);
+  assert.equal(s.byId.size, 3);
+  applyTaskCall(s, "TaskUpdate", { taskId: "2", status: "completed" });
+  const echo = renderTaskEcho(s);
+  assert.match(echo, /- \[x\] #2 Second/, "the updated task shows its new status");
+  assert.match(echo, /- \[ \] #3 Third/, "untouched tasks are still listed");
+  assert.match(echo, /2 done, 1 to do/);
+});
+
+test("issue #7: TaskCreate is marked new, because ids are assigned server-side", () => {
+  const s = newTaskState();
+  applyTaskCall(s, "TaskCreate", { tasks: [{ subject: "Post the comment" }] });
+  const echo = renderTaskEcho(s);
+  assert.match(echo, /- \[ \] Post the comment  _\(new\)_/);
+  assert.ok(!/#undefined|#null/.test(echo), "must never invent an id");
+});
+
+test("issue #7: nothing is echoed when there is nothing to show", () => {
+  assert.equal(renderTaskEcho(newTaskState()), null);
+  const s = newTaskState();
+  assert.equal(applyTaskCall(s, "TaskUpdate", {}), false, "an update with no id changes nothing");
+  assert.equal(applyTaskCall(s, "TodoWrite", {}), false, "a TodoWrite with no todos changes nothing");
+  assert.equal(applyTaskCall(s, "Bash", { command: "ls" }), false, "a non-task tool is ignored");
+  assert.equal(renderTaskEcho(s), null);
+  assert.equal(taskToolKind("Bash"), null);
+  for (const n of ["TaskCreate", "TaskUpdate", "TodoWrite"]) assert.ok(taskToolKind(n));
+});
+
+test("issue #7: prior-turn task calls are replayed but not reported as news", () => {
+  const body = { messages: [
+    { role: "user", content: [{ type: "text", text: "Here are the existing tasks:\n\n#1. [pending] Only task" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "TaskUpdate", input: { taskId: "1", status: "in_progress" } }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "TaskCreate", input: { tasks: [{ subject: "Made earlier" }] } }] },
+  ] };
+  const s = collectPriorTasks(body);
+  assert.equal(s.byId.get("1").status, "in_progress", "the earlier update carried forward");
+  assert.deepEqual(s.created, [], "an earlier creation is not re-announced as new");
+  assert.deepEqual(s.changed, [], "an earlier change is not re-announced");
+});
+
+test("issue #7: appendTaskEcho adds one text block, and only when a task tool ran", () => {
+  const body = { messages: [{ role: "user", content: [{ type: "text", text: "Here are the existing tasks:\n\n#1. [pending] Thing" }] }] };
+  const msg = { content: [{ type: "tool_use", id: "x", name: "TaskUpdate", input: { taskId: "1", status: "completed" } }] };
+  assert.equal(appendTaskEcho(msg, body, false), true);
+  assert.equal(msg.content.length, 2);
+  assert.equal(msg.content[1].type, "text");
+  assert.match(msg.content[1].text, /- \[x\] #1 Thing/);
+  // no task tool -> untouched
+  const plain = { content: [{ type: "tool_use", id: "y", name: "Bash", input: { command: "ls" } }] };
+  assert.equal(appendTaskEcho(plain, body, false), false);
+  assert.equal(plain.content.length, 1);
+  // and never on a classifier turn (issue #6)
+  const cls = { content: [{ type: "tool_use", id: "z", name: "TaskUpdate", input: { taskId: "1", status: "completed" } }] };
+  assert.equal(appendTaskEcho(cls, body, true), false);
+  assert.equal(cls.content.length, 1);
+});
+
+test("issue #7: the echo goes AFTER the tool calls so no block index moves", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // streaming: emitted after the consume loop, using the same open/close helper as the
+  // empty-turn notice, which allocates a fresh trailing index
+  assert.match(src, /if \(TASK_ECHO && taskChanged && taskState\)/);
+  assert.match(src, /open\("__tasks__", \{ type: "text", text: "" \}\)/);
+  const echoAt = src.indexOf('open("__tasks__"');
+  const emptyAt = src.indexOf('open("__empty__"');
+  assert.ok(echoAt > 0 && emptyAt > echoAt, "the task echo must run before the empty-turn guard");
+  // non-streaming: push, never splice
+  assert.match(src, /msg\.content\.push\(\{ type: "text", text: `\\n\\n\$\{echo\}\\n` \}\)/);
+});
+
+test("issue #7: the narration directive is present and guarded against padding", () => {
+  const h = buildPersistenceHint();
+  assert.match(h, /## Narrating your work/);
+  assert.match(h, /one short line naming what you are about to do/);
+  assert.match(h, /restate the list in your text/);
+  // the guard: "be verbose" without this invites the padding issue #1 complained about
+  assert.match(h, /Narration is information, never padding/);
+  assert.match(h, /No restating the request back/);
+  // and it is still suppressed for a classifier call (issue #6)
+  assert.equal(withFormatHint("SYS", false, null), "SYS");
 });
