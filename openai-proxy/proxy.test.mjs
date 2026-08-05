@@ -1302,3 +1302,24 @@ test("a context overflow is not treated as a plain empty turn", () => {
     refusalText: "", streamError: "Your input exceeds the context window of this model.",
     incomplete: false, incompleteReason: null, retries: 0, maxRetries: 2 }), false);
 });
+
+// ---------- classifier latency (issue #11) ----------
+//
+// #11 is the same message as #6, for WebFetch on claude-opus-4-8. Its own error dump says
+// "Request was aborted." — the CLI's wall-clock budget expiring, after which it fails CLOSED
+// and denies the action. A verdict is ~11 output tokens, so the budget is only ever reached
+// when the proxy is slow.
+
+test("issue #11: a classifier verdict is timed, and warns before the CLI's cliff", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /CLASSIFIER_SLOW_MS = parseInt/);
+  assert.match(src, /classifier=\$\{family\} verdict in \$\{ms\}ms/);
+  assert.match(src, /The CLI aborts its classifier at 60s and then DENIES the action/);
+});
+
+test("issue #11: log lines carry a date, so latency cannot be measured across a wrap", () => {
+  // Two wrong latency figures came out of a time-of-day-only log spanning a day boundary.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /toISOString\(\)\.slice\(5, 19\)\.replace\("T", " "\)/);
+  assert.ok(!/toISOString\(\)\.slice\(11, 19\)/.test(src), "time-of-day only is ambiguous");
+});

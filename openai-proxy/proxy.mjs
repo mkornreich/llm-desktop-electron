@@ -182,6 +182,14 @@ const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "h
 // Falls back to plain truncation whenever the summary call fails, so it can only add value.
 // github issue #8. When a turn is cut off by the output cap, continue it automatically instead
 // of handing back a truncated answer.
+// The CLI gives its auto-mode safety classifier a wall-clock budget (60s for the fast stage,
+// 120s for the thinking stage) and fails CLOSED when it expires — the user sees "<model> is
+// temporarily unavailable, so auto mode cannot determine the safety of X" and the action is
+// denied. A classifier verdict is ~11 output tokens, so anything near that budget means the
+// proxy is the problem. Warn well before the cliff.
+const CLASSIFIER_SLOW_MS = parseInt(process.env.OPENAI_CLASSIFIER_SLOW_MS ||
+  PROJECT.OPENAI_CLASSIFIER_SLOW_MS || "20000", 10) || 20000;
+
 // An empty turn stalls the session: the user waits ~40s and gets a diagnostic instead of work.
 // Retry instead. Bounded, and skipped for refusals, truncation and hard upstream errors — see
 // the loop in streamResponses for why each of those must not be retried.
@@ -377,7 +385,11 @@ function usageSummary() {
 // ---------- helpers ----------
 const rid = (p) => p + crypto.randomBytes(16).toString("hex");
 const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
-const log = (...a) => console.log(`[proxy ${new Date().toISOString().slice(11, 19)}]`, ...a);
+// Date included on purpose. With time-of-day alone, any measurement across the log's day
+// boundary silently wraps — which produced two wrong latency figures while diagnosing the
+// classifier aborts (a "median 34s" and then a "median 483s", both artefacts) before the
+// ambiguity was noticed. UTC, matching the ISO timestamps the rest of the pipeline uses.
+const log = (...a) => console.log(`[proxy ${new Date().toISOString().slice(5, 19).replace("T", " ")}]`, ...a);
 const sanitizeToolName = (n) => String(n || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
 // Flatten an Anthropic tool_result's content to text. Neither OpenAI surface has an
 // error flag on tool output, so is_error is marked inline — without it a failed command
@@ -1770,6 +1782,7 @@ const server = http.createServer(async (req, res) => {
       const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
       log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""} hints=${hintOn ? "on" : "off"}${isCls ? ` classifier=${family} reasoning=off` : ""}`);
       let upstream;
+      const startedAt = Date.now();
       try { upstream = await callResponses(payload); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
       if (!upstream.ok) {
@@ -1800,6 +1813,15 @@ const server = http.createServer(async (req, res) => {
         recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens);
         const msg = fromResponses(rj, reqModel, nameMap, schemas);
         appendTaskEcho(msg, body, isCls);
+        if (isCls) {
+          // Measured, not inferred: a classifier verdict that approaches the CLI's budget is
+          // what produces "temporarily unavailable" and a denied action.
+          const ms = Date.now() - startedAt;
+          log(`  <- classifier=${family} verdict in ${ms}ms` +
+              (ms >= CLASSIFIER_SLOW_MS
+                ? ` — SLOW. The CLI aborts its classifier at 60s and then DENIES the action.`
+                : ""));
+        }
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
                    msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
         return sendJSON(res, 200, msg); }

@@ -930,3 +930,63 @@ Two related decisions:
   rather than being judged on a silently shortened transcript ([issue #6]).
 
 [issue #4]: https://github.com/mkornreich/llm-desktop-electron/issues/4
+
+## Is the classifier still calling Anthropic? ([issue #11])
+
+[issue #11] is the same message as [issue #6], for `WebFetch` on `claude-opus-4-8`, and asks the
+right question. The answer has two halves.
+
+**The app's classifier calls do not go to Anthropic.** They are served by this proxy —
+119 `classifier=safety` requests logged, all `hints=off reasoning=off`, mapped to
+`gpt-5.3-codex`. The model name in the CLI's error message is simply the name the CLI *asked*
+for; the proxy maps it and the CLI echoes its own name back.
+
+**But some classifier failures in the dump directory genuinely are Anthropic.** Six of the 30
+dumps carry
+
+```
+529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},
+     "request_id":"req_011Cdjnjpn88pMEb3LYdfahN"}
+```
+
+HTTP 529, `overloaded_error` and a `req_011C…` id are Anthropic's shapes — this proxy only ever
+emits `type: "api_error"`. All six are on a `claude-sonnet-5[1m]` model, and **no `claude-*[1m]`
+model ever appears in the proxy log**, so those requests never went through it. They are ordinary
+terminal Claude Code sessions talking to `api.anthropic.com`, sharing the same dump directory
+because the dumps are per-user, not per-app.
+
+### Nothing further to fix, and here is why
+
+The cause was the [issue #6] detection gap, and the numbers say it is closed:
+
+| | |
+|---|---|
+| issue #11's own dump | 12:34, **before** the fixed proxy was serving |
+| last classifier failure of any kind | 14:30 |
+| classifier requests served since | 119, zero errors |
+| gap since the last failure | ~113 minutes of active use |
+| measured round-trip on #11's own prompt | **7.3s** (2.1–7.3s across runs), against a 60s budget |
+
+The budget matters because the CLI **fails closed**: when its classifier deadline expires the
+action is *denied*, which is what "temporarily unavailable" means. A verdict is ~11 output
+tokens, so the deadline is only ever reached when the proxy is slow.
+
+### Two diagnostic fixes, because this was measured wrong twice
+
+Working out that latency produced two confidently-stated wrong answers — a "median 34s" and then
+a "median 483s" — before the cause was spotted: log lines carried **time of day only**, and the
+log spans more than one day, so every duration computed across the wrap was nonsense. On top of
+that, requests are concurrent, so pairing a start line with the next completion line pairs
+unrelated requests.
+
+Both are fixed at the source rather than worked around:
+
+- Log timestamps now include the date (`[proxy 08-05 20:22:41]`).
+- A classifier verdict is **timed directly** and logged as
+  `<- classifier=safety verdict in 7252ms`, with an explicit warning above
+  `OPENAI_CLASSIFIER_SLOW_MS` (default 20s) naming the consequence:
+  *"The CLI aborts its classifier at 60s and then DENIES the action."*
+
+No more inferring latency from interleaved log lines.
+
+[issue #11]: https://github.com/mkornreich/llm-desktop-electron/issues/11
