@@ -1175,6 +1175,23 @@ async function callOpenAI(payload) {
       retry = { ...(retry || payload) };
       delete retry.temperature;
     }
+    // Generic: the API names the offending parameter, so drop exactly that one and retry.
+    // Found by pointing the stock `claude` CLI at the proxy — the CLI sends stop_sequences,
+    // this surface forwards them as `stop`, and gpt-5.x rejects it:
+    //   "Unsupported parameter: 'stop' is not supported with this model."
+    // Twelve 400s in one short session before this existed. Keying off the API's own `param`
+    // field means the next unsupported knob self-heals instead of needing its own rule.
+    {
+      const bad = txt.match(/"param":\s*"([^"]+)"/);
+      if (bad && /unsupported_parameter|Unsupported parameter/i.test(txt)) {
+        const base = retry || payload;
+        if (base[bad[1]] !== undefined) {
+          retry = { ...base };
+          delete retry[bad[1]];
+          log(`  ! ${payload.model} rejected '${bad[1]}' — dropped it and retried`);
+        }
+      }
+    }
     if (retry) res = await doFetch(retry);
     // Context window exceeded -> compact and retry (issue #4).
     if (res.status === 400) {
@@ -1349,6 +1366,15 @@ async function callResponses(payload) {
     const txt = await res.clone().text();
     const cap = txt.match(/at most (\d+)/);
     if (cap && payload.max_output_tokens != null) res = await doFetch({ ...payload, max_output_tokens: Math.min(payload.max_output_tokens, parseInt(cap[1], 10)) });
+    // Same generic unsupported-parameter recovery as the chat surface above.
+    else if (/unsupported_parameter|Unsupported parameter/i.test(txt) && /"param":\s*"([^"]+)"/.test(txt)) {
+      const bad = txt.match(/"param":\s*"([^"]+)"/)[1];
+      if (payload[bad] !== undefined) {
+        const { [bad]: _dropped, ...rest } = payload;
+        log(`  ! ${payload.model} rejected '${bad}' — dropped it and retried`);
+        res = await doFetch(rest);
+      }
+    }
     // Context window exceeded -> compact the conversation and retry (issue #4).
     else if (CONTEXT_ERROR_RE.test(txt)) {
       let body = payload;

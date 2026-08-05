@@ -1349,3 +1349,16 @@ test("issue #11: the safety model is still overridable, and prefix stays separat
   assert.match(src, /family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL/);
   assert.match(src, /family === "prefix" && OPENAI_CLASSIFIER_MODEL/);
 });
+
+test("an unsupported parameter is dropped by name and retried, on both surfaces", () => {
+  // Found by pointing the stock `claude` CLI at the proxy: it sends stop_sequences, the chat
+  // surface forwards them as `stop`, and gpt-5.x rejects it — 12 400s in one short session.
+  // Keyed off the API's own "param" field so the next unsupported knob self-heals.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const hits = src.match(/unsupported_parameter\|Unsupported parameter/g) || [];
+  assert.equal(hits.length, 2, "both callOpenAI and callResponses must recover");
+  assert.equal((src.match(/rejected '\$\{bad(\[1\])?\}' — dropped it and retried/g) || []).length, 2);
+  // it must only drop a parameter that is actually present, never blindly
+  assert.match(src, /if \(base\[bad\[1\]\] !== undefined\)/);
+  assert.match(src, /if \(payload\[bad\] !== undefined\)/);
+});
