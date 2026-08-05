@@ -1637,6 +1637,36 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     }
   }
 
+  // A context-window overflow can arrive as a mid-stream `error` event on a 200 response, not
+  // only as an HTTP 400. The compaction path in callResponses only ever saw the 400 form, so
+  // this shape surfaced as an empty turn with no recovery at all — which is what left the
+  // "predict cash flow" session unable to answer anything:
+  //   error=Your input exceeds the context window of this model. Please adjust your input...
+  // Claude Code's own auto-compaction cannot help here: it sizes the window from the model it
+  // thinks it is talking to (a 1M-context Claude), not the model actually being called.
+  //
+  // Gated on allowContinue, so a classifier turn that overflows fails closed rather than being
+  // judged on a silently shortened transcript (issue #6).
+  let ctxCompacted = 0;
+  while (payload && allowContinue && streamError && CONTEXT_ERROR_RE.test(streamError) &&
+         !hasTool && textLen === 0 && ctxCompacted < COMPACT_STEPS.length) {
+    const keep = COMPACT_STEPS[ctxCompacted++];
+    const { input, trimmed, reclaimed, summarised } =
+      await compactResponsesInputSummarised(payload.input, keep);
+    if (!trimmed) { log(`  ! context exceeded mid-stream and nothing left to compact (keep=${keep})`); break; }
+    log(`  -> context exceeded mid-stream — compacted ${trimmed} tool result(s)` +
+        `${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens` +
+        ` (keeping last ${keep}); retrying`);
+    payload = { ...payload, input };
+    let up;
+    try { up = await callResponses(payload); }
+    catch (e) { log(`  -> compaction retry fetch failed: ${e.message}`); break; }
+    if (!up.ok) { log(`  -> compaction retry got ${up.status}; giving up`); break; }
+    streamError = null; sawTerminal = null; incomplete = false; incompleteReason = null;
+    await consume(up);
+    totalOutTokens += usage?.output_tokens || 0;
+  }
+
   // An empty turn used to be reported and then abandoned, which stalls the session: the user
   // sends a message, waits ~40s, and gets a diagnostic instead of work. Ask again instead.
   //

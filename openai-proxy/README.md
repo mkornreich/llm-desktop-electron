@@ -887,3 +887,41 @@ with no terminal event — the exact fingerprint — rather than by waiting for 
 
 The stub echoes back whether it was sent a `reasoning` field, and on the retry it reports
 `reasoning=false` — confirming the retry really does drop it.
+
+### The actual cause: a context overflow arriving as an event
+
+Once `error` events stopped being dropped, the session said what had been wrong all along:
+
+```
+[proxy] The model returned no content for this turn (status=failed). No tool was called, so
+nothing ran. The upstream reported: Your input exceeds the context window of this model.
+Please adjust your input and try again.
+```
+
+The proxy has had compaction for this since [issue #4] — but it lived in `callResponses` and
+only ever saw the **HTTP 400** form. This arrives as an `error` **event on a 200 response**,
+mid-stream, so compaction never ran and the turn surfaced as "no content" with no recovery.
+Claude Code's own auto-compaction cannot help either: it sizes the window from the model it
+believes it is talking to (a 1M-context Claude), not the model actually being called.
+
+The streaming path now runs the same compaction ladder (`COMPACT_STEPS = [12, 6, 2]` tool
+results kept, summarising what it drops) and retries. Verified against a stub that reproduces
+the exact shape — 200, then that error, succeeding once the payload fits:
+
+```
+call 1: 61 items / 124689 bytes -> context error
+        -> context exceeded mid-stream — compacted 24 tool result(s), reclaimed ~24k tokens
+           (keeping last 12); retrying
+call 3: 61 items /  30513 bytes -> OK
+```
+
+and the client received the model's real answer, not a notice.
+
+Two related decisions:
+
+- A context overflow is **not** retried by the empty-turn loop — re-sending the same oversized
+  input cannot help, so `shouldRetryEmpty` vetoes it and the compaction loop owns it.
+- Compaction is gated on `allowContinue`, so a **classifier** turn that overflows fails closed
+  rather than being judged on a silently shortened transcript ([issue #6]).
+
+[issue #4]: https://github.com/mkornreich/llm-desktop-electron/issues/4

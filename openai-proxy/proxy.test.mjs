@@ -1263,3 +1263,42 @@ test("benign bookkeeping events are not reported as unhandled", () => {
   for (const ev of ["error", "response.failed", "response.refusal.delta", "response.completed"])
     assert.ok(!BENIGN_EVENTS.has(ev), `${ev} must never be treated as benign`);
 });
+
+// ---------- mid-stream context overflow ----------
+//
+// The real cause of the "predict cash flow" stall, revealed once `error` events stopped being
+// dropped: "Your input exceeds the context window of this model." It arrives as an event on a
+// 200 response, and the compaction path in callResponses only ever saw the HTTP 400 form.
+
+test("the upstream's context-overflow wording is recognised", () => {
+  assert.ok(CONTEXT_ERROR_RE.test("Your input exceeds the context window of this model. Please adjust your input and try again."));
+  // the other shapes the same guard has to catch
+  for (const m of ["context_length_exceeded", "maximum context length is 272000 tokens",
+                   "Please reduce the length of the messages"])
+    assert.ok(CONTEXT_ERROR_RE.test(m), `should match: ${m}`);
+  assert.ok(!CONTEXT_ERROR_RE.test("Your input is fine"), "must not match unrelated text");
+});
+
+test("a mid-stream context error compacts and retries, it does not just report", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /streamError && CONTEXT_ERROR_RE\.test\(streamError\)/,
+    "the streaming path must handle the event form, not only the HTTP 400 form");
+  assert.match(src, /ctxCompacted < COMPACT_STEPS\.length/, "bounded by the compaction ladder");
+  assert.match(src, /context exceeded mid-stream/);
+  // it must clear the error before re-consuming, or the loop re-fires on stale state
+  const block = src.slice(src.indexOf("let ctxCompacted"), src.indexOf("An empty turn used to be"));
+  assert.match(block, /streamError = null; sawTerminal = null;/);
+  assert.match(block, /await consume\(up\);/);
+  assert.match(block, /totalOutTokens \+= usage\?\.output_tokens \|\| 0;/);
+  // gated on allowContinue so a classifier turn fails closed instead of being judged on a
+  // silently shortened transcript
+  assert.match(block, /allowContinue && streamError/);
+});
+
+test("a context overflow is not treated as a plain empty turn", () => {
+  // shouldRetryEmpty must veto it: re-sending the same oversized input cannot help. The
+  // compaction loop above is what recovers it.
+  assert.equal(shouldRetryEmpty({ enabled: true, allowContinue: true, hasTool: false, textLen: 0,
+    refusalText: "", streamError: "Your input exceeds the context window of this model.",
+    incomplete: false, incompleteReason: null, retries: 0, maxRetries: 2 }), false);
+});
