@@ -250,7 +250,35 @@ function backgroundToolUsedThisTurn(input) {
 
 // Overrides everything: a turn that ends asking to confirm something destructive MUST stay
 // ended. Continuing it would answer the user's question for them and then act.
-const NEEDS_USER_RE = /\b(confirm|are you sure|permanently|irreversibl|destructive|cannot be undone|can['’]?t be undone|before i (proceed|continue)|your (approval|permission)|need your ok|force[- ]?push|rm -rf|drop (table|database))\b/i;
+//
+// The permission-seeking half matches the CONSTRUCTION, not the bare verb. It used to match a
+// bare `confirm` or `destructive` anywhere in the text, which quietly disabled the whole
+// auto-continue rescue as soon as the model narrated its work — "I'll run the suite to confirm
+// nothing regressed" and "nothing destructive here, moving on" both returned null. That got
+// far more likely once the narration directive asked for exactly this kind of sentence.
+// The genuinely dangerous markers stay bare: they are almost never incidental.
+const NEEDS_USER_RE = new RegExp([
+  "please confirm",
+  "confirm (?:and|before|first|whether|that you)",
+  "(?:if|once|when|unless) you confirm",
+  "you to confirm",
+  "your confirmation",
+  "awaiting (?:your )?confirmation",
+  "confirm (?:this|these|that|the) (?:action|change|deletion|command|step|operation)",
+  "are you sure",
+  "\\bbefore i (?:proceed|continue)\\b",
+  "your (?:approval|permission)",
+  "need your ok",
+  "\\bpermanently\\b",
+  "irreversibl",
+  "cannot be undone",
+  "can['’]?t be undone",
+  "(?:is|are|would be) destructive",
+  "destructive (?:action|operation|command|change|step)",
+  "force[- ]?push",
+  "rm -rf",
+  "drop (?:table|database)",
+].join("|"), "i");
 
 // Why this turn should continue, or null to leave it ended. Returning the reason (rather
 // than a boolean) lets the caller pick a matching nudge and log something meaningful.

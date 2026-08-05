@@ -750,5 +750,31 @@ exactly the padding [issue #1] complained about, so the directive ends with
 *"Narration is information, never padding"* plus an explicit ban on restating the
 request, announcing summaries, and filler.
 
+`OPENAI_VERBOSITY` was not the lever: it is already `high`, the top of the enum, and
+`ultra` is a 400. Prompt wording is all there is.
+
+### The collision this exposed
+
+`NEEDS_USER_RE` is an override — a turn that ends asking permission for something
+destructive must stay ended, or auto-continue would answer the user's question for them
+and then act. It matched a **bare** `confirm` or `destructive` anywhere in the text, so
+narration silenced the whole rescue:
+
+| text | before | after |
+|---|---|---|
+| `I'll run the tests now to confirm the fix holds.` | `null` | `intent` |
+| `Next I will check the file for anything destructive.` | `null` | `intent` |
+| `This would delete the branch. Confirm and I will run it.` | `null` | `null` |
+
+The permission half now matches the **construction** — `please confirm`,
+`confirm and…`, `once you confirm`, `your confirmation`, `is/would be destructive`,
+`destructive action|operation|…` — while the markers that are almost never incidental
+(`irreversibl`, `cannot be undone`, `permanently`, `rm -rf`, `force push`,
+`drop table`) stay bare. Fourteen genuine permission requests still stop the turn dead;
+three narration sentences that used to be swallowed now continue.
+
+This was a pre-existing bug, but asking for narration turned it from theoretical into
+likely, so it is fixed here.
+
 [issue #7]: https://github.com/mkornreich/llm-desktop-electron/issues/7
 [issue #6]: https://github.com/mkornreich/llm-desktop-electron/issues/6

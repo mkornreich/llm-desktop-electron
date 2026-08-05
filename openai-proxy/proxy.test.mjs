@@ -1099,3 +1099,47 @@ test("issue #7: the narration directive is present and guarded against padding",
   // and it is still suppressed for a classifier call (issue #6)
   assert.equal(withFormatHint("SYS", false, null), "SYS");
 });
+
+// ---------- the narration/auto-continue interaction (found while fixing issue #7) ----------
+//
+// NEEDS_USER_RE is an override: a turn that ends asking permission for something destructive
+// must STAY ended. It used to match a bare `confirm` or `destructive` anywhere in the text,
+// so the moment the model narrated its work the whole auto-continue rescue went quiet. Asking
+// for narration (issue #7) made that collision likely rather than theoretical.
+
+test("narration that merely mentions confirming still auto-continues", () => {
+  // Each of these returned null before the guard was tightened.
+  assert.equal(continueReason("I'll run the tests now to confirm the fix holds.", true, false), "intent");
+  assert.equal(continueReason("I will now run the suite to confirm nothing regressed.", true, false), "intent");
+  assert.equal(continueReason("Next I will check the file for anything destructive.", true, false), "intent");
+});
+
+test("a genuine request for permission still stops the turn dead", () => {
+  for (const t of [
+    "This would delete the branch. Confirm and I will run it.",
+    "Please confirm before I proceed.",
+    "Are you sure you want that?",
+    "This permanently deletes the data.",
+    "This change is irreversible.",
+    "It cannot be undone.",
+    "I'll force push once you say so.",
+    "I can run rm -rf /tmp/x if you want.",
+    "This is a destructive operation.",
+    "That change would be destructive.",
+    "I need your approval first.",
+    "Awaiting your confirmation.",
+    "Let me know once you confirm.",
+    "I'll drop the table when you tell me to.",
+  ]) assert.equal(continueReason(t, true, false), null, `must not auto-continue: ${t}`);
+});
+
+test("the guard matches a construction, not a bare verb", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const block = src.slice(src.indexOf("const NEEDS_USER_RE"), src.indexOf("].join(\"|\"), \"i\")", src.indexOf("const NEEDS_USER_RE")));
+  assert.ok(block, "NEEDS_USER_RE block not found");
+  assert.ok(!/^\s*"confirm",\s*$/m.test(block), "a bare `confirm` alternative would swallow narration again");
+  assert.ok(!/^\s*"destructive",\s*$/m.test(block), "a bare `destructive` alternative would swallow narration again");
+  // the dangerous markers stay bare on purpose
+  for (const kept of ["irreversibl", "cannot be undone", "rm -rf", "force[- ]?push"])
+    assert.ok(block.includes(kept), `${kept} must stay a bare marker`);
+});
