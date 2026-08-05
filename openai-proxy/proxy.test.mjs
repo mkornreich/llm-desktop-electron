@@ -13,7 +13,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
-        newTaskState, appendTaskEcho, shouldRetryEmpty } =
+        newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1251,4 +1251,15 @@ test("the events that used to be dropped are now handled", () => {
   assert.match(src, /ended with NO terminal event after \$\{streamMs\}ms and \$\{streamBytes\} byte/);
   // the retry drops reasoning, which is what shortens the silent phase that gets cut
   assert.match(src, /const \{ reasoning, \.\.\.retry \} = payload/);
+});
+
+test("benign bookkeeping events are not reported as unhandled", () => {
+  // Without this the notice said `unhandled_events=response.created` on every failure, which
+  // points at nothing. The field should only ever name something genuinely unexpected.
+  for (const ev of ["response.created", "response.in_progress", "response.content_part.added",
+                    "response.output_text.done", "rate_limits.updated"])
+    assert.ok(BENIGN_EVENTS.has(ev), `${ev} should be known-benign`);
+  // the ones that carry real meaning must NOT be silently benign
+  for (const ev of ["error", "response.failed", "response.refusal.delta", "response.completed"])
+    assert.ok(!BENIGN_EVENTS.has(ev), `${ev} must never be treated as benign`);
 });

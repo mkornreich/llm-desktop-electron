@@ -833,6 +833,11 @@ produced a silent empty turn. All three are handled now. A refusal is emitted as
 it is the answer and the user is entitled to see it. Unknown event types are collected and
 named in the notice, so the next silent drop is explainable rather than mysterious.
 
+Benign bookkeeping events (`response.created`, `response.in_progress`,
+`response.content_part.*`, `rate_limits.updated`, …) are named in a known-benign set, so
+`unhandled_events` in the notice only ever reports something genuinely unexpected — without
+that it said `unhandled_events=response.created` on every failure, which points at nothing.
+
 **2. The truth, and a measurement.** The notice now reports `status=no terminal event` when
 that is what happened, says plainly that this is *"a transport failure rather than the model
 declining to answer"*, and the log records how long the stream ran and how many bytes it
@@ -869,3 +874,16 @@ now asserts the invariant — every `await consume(` is followed by an accumulat
 a magic number that passed while the property was false.
 
 [issue #8]: https://github.com/mkornreich/llm-desktop-electron/issues/8
+
+### Verified deterministically
+
+The failure is intermittent, so it was reproduced against a stub upstream that ends its stream
+with no terminal event — the exact fingerprint — rather than by waiting for it to happen again:
+
+| scenario | result |
+|---|---|
+| upstream always empty | `NO terminal event after 1ms and 35 byte(s)` → `retry 1/2` → `retry 2/2` → notice reading `status=no terminal event, retries=2` |
+| empty once, then content | `retry 1/2` → `recovered after 1 empty-turn retry`, no notice shown |
+
+The stub echoes back whether it was sent a `reasoning` field, and on the retry it reports
+`reasoning=false` — confirming the retry really does drop it.

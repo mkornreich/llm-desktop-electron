@@ -413,6 +413,17 @@ function shouldRetryEmpty(s) {
   return s.retries < s.maxRetries;
 }
 
+// Responses events that are normal bookkeeping and safely ignored. Naming them keeps the
+// empty-turn notice's `unhandled_events` field meaningful: without this it reported
+// `response.created` on every failure, which tells nobody anything.
+const BENIGN_EVENTS = new Set([
+  "response.created", "response.in_progress", "response.queued",
+  "response.content_part.added", "response.content_part.done",
+  "response.output_text.done", "response.function_call_arguments.done",
+  "response.reasoning_summary_text.done", "response.reasoning_text.delta",
+  "response.reasoning_text.done", "rate_limits.updated",
+]);
+
 const nowMs = () => Date.now();
 
 function emptyTurnNotice(resp) {
@@ -1527,7 +1538,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
           // Unknown events are usually harmless bookkeeping, but a silently-dropped one is
           // exactly how the empty turn hid. Record the names once so the next occurrence is
           // explainable instead of mysterious.
-          if (typeof j.type === "string") unknownEvents.add(j.type);
+          if (typeof j.type === "string" && !BENIGN_EVENTS.has(j.type)) unknownEvents.add(j.type);
           break;
       }
       }
@@ -1797,7 +1808,7 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
          toResponses, toOpenAI, pickModel,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
-         newTaskState, appendTaskEcho, shouldRetryEmpty };
+         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS };
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
