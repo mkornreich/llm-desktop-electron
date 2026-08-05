@@ -395,13 +395,21 @@ function toolResultText(blk) {
 // likely cause. This reports a failure; it never invents an answer.
 // Should an empty turn be retried? Split out so the carve-outs are testable, because each one
 // is a case where retrying is actively wrong:
-//   refusal   - the refusal IS the answer; asking again just refuses again
-//   error     - a hard upstream failure; the message is the useful output
-//   incomplete- the truncation loop owns that, and it resumes rather than restarting
+//   refusal - the refusal IS the answer; asking again just refuses again
+//   error   - a hard upstream failure; the message is the useful output
+//   incomplete for any reason OTHER than the output cap (content_filter, …) - not a retry's job
+//
+// An `incomplete` turn caused by the output cap that produced NOTHING is deliberately still
+// retried: that is reasoning starvation, and the retry drops reasoning, which is the cure.
+// Classifying the 21 empty turns in the log showed why this distinction matters — 10 of them
+// were exactly that case, and vetoing on `incomplete` wholesale would have left the largest
+// group unfixed. Truncation of a turn that DID produce content is different, and belongs to the
+// continue-on-truncation loop, which resumes instead of restarting.
 function shouldRetryEmpty(s) {
   if (!s.enabled || !s.allowContinue) return false;
   if (s.hasTool || s.textLen > 0) return false;
-  if (s.refusalText || s.streamError || s.incomplete) return false;
+  if (s.refusalText || s.streamError) return false;
+  if (s.incomplete && s.incompleteReason !== "max_output_tokens") return false;
   return s.retries < s.maxRetries;
 }
 
@@ -1542,8 +1550,11 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   // Each pass appends to the SAME assistant message, so the cumulative budget below is what
   // keeps the spliced result under the client's own per-response maximum.
   let truncContinued = 0;
+  // (textLen || hasTool): there must be something to continue FROM. A turn whose whole budget
+  // went to reasoning has nothing, and asking it to "continue" just burns two more starved
+  // calls — which is what the log shows happening before this guard existed.
   while (CONTINUE_ON_TRUNCATION && allowContinue && payload && incomplete &&
-         incompleteReason === "max_output_tokens" &&
+         incompleteReason === "max_output_tokens" && (textLen > 0 || hasTool) &&
          truncContinued < MAX_CONTINUATIONS && totalOutTokens < MAX_TURN_OUTPUT_TOKENS) {
     truncContinued++;
     const remaining = MAX_TURN_OUTPUT_TOKENS - totalOutTokens;
@@ -1623,7 +1634,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   // owns that), and NOT for a hard upstream failure reported by error/response.failed.
   let emptyRetries = 0;
   while (payload && shouldRetryEmpty({ enabled: EMPTY_RETRY, allowContinue, hasTool, textLen,
-                                       refusalText, streamError, incomplete,
+                                       refusalText, streamError, incomplete, incompleteReason,
                                        retries: emptyRetries, maxRetries: MAX_EMPTY_RETRIES })) {
     emptyRetries++;
     log(`  -> empty turn, retry ${emptyRetries}/${MAX_EMPTY_RETRIES}` +
@@ -1634,7 +1645,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     let up;
     try { up = await callResponses(retry); } catch (e) { log(`  -> empty-turn retry fetch failed: ${e.message}`); break; }
     if (!up.ok) { log(`  -> empty-turn retry got ${up.status}; giving up on the retry`); break; }
-    sawTerminal = null; streamError = null;
+    sawTerminal = null; streamError = null; incomplete = false; incompleteReason = null;
     await consume(up);
     totalOutTokens += usage?.output_tokens || 0;
   }

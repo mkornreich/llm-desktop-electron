@@ -1166,7 +1166,7 @@ test("the guard matches a construction, not a bare verb", () => {
 
 const RETRY_BASE = { enabled: true, allowContinue: true, hasTool: false, textLen: 0,
                      refusalText: "", streamError: null, incomplete: false,
-                     retries: 0, maxRetries: 2 };
+                     incompleteReason: null, retries: 0, maxRetries: 2 };
 
 test("an empty turn with no terminal event is retried", () => {
   assert.equal(shouldRetryEmpty(RETRY_BASE), true);
@@ -1179,13 +1179,35 @@ test("a turn that produced something is never retried", () => {
   assert.equal(shouldRetryEmpty({ ...RETRY_BASE, textLen: 1 }), false);
 });
 
-test("the three carve-outs where retrying is actively wrong", () => {
+test("the carve-outs where retrying is actively wrong", () => {
   // a refusal IS the answer — asking again just refuses again
   assert.equal(shouldRetryEmpty({ ...RETRY_BASE, refusalText: "I can't help with that" }), false);
   // a hard upstream failure: the message is the useful output
   assert.equal(shouldRetryEmpty({ ...RETRY_BASE, streamError: "server had an error" }), false);
-  // truncation has its own loop, which RESUMES rather than restarting
-  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, incomplete: true }), false);
+  // incomplete for a reason a retry cannot fix
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, incomplete: true, incompleteReason: "content_filter" }), false);
+});
+
+test("reasoning starvation IS retried — it was the largest group in the log", () => {
+  // Classifying the 21 empty turns: 9 had no terminal event, 10 were incomplete/max_output_tokens
+  // with usage present and NO output — the whole budget spent on hidden reasoning — and 2 were
+  // silent completions. Vetoing on `incomplete` wholesale, as the first version of this did,
+  // would have left that group of 10 unfixed. The retry drops reasoning, which is the cure.
+  assert.equal(shouldRetryEmpty({ ...RETRY_BASE, incomplete: true, incompleteReason: "max_output_tokens" }), true);
+});
+
+test("the truncation loop only resumes a turn that produced something", () => {
+  // Otherwise a starved turn gets two more starved "continue" calls, which is what the log
+  // shows happening: continue-on-truncation 1/2 and 2/2, then the same empty notice.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /incompleteReason === "max_output_tokens" && \(textLen > 0 \|\| hasTool\)/);
+});
+
+test("a retry clears the previous pass's terminal state", () => {
+  // Otherwise a starved first pass leaves incomplete=true set, and the loop's own guard would
+  // veto the second attempt it just decided to make.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /sawTerminal = null; streamError = null; incomplete = false; incompleteReason = null;/);
 });
 
 test("the retry respects its switches", () => {

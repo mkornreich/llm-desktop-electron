@@ -789,16 +789,24 @@ The symptom, from a real session ("predict cash flow"): send a message, wait ~40
 
 Four times in a row. `proxy.log` held **20** of them across ~2.5 hours.
 
-### It was not "completed"
+### They were three different failures
 
-That status was **inferred**, not reported — `incomplete ? "incomplete" : "completed"`. Every
-one of the 20 logged `out_tokens=?`, meaning no usage ever arrived, which means neither
-`response.completed` nor `response.incomplete` was ever seen. The stream simply stopped. The
-notice then described that as a normal completion in which the model chose to say nothing.
-(Same class of mistake as the hardcoded reason fixed in [issue #8] — asserting a cause the
-code had not observed.)
+Classifying every `empty turn` line against the summary line that follows it — which is worth
+doing before designing a fix, and which an earlier version of this section skipped:
 
-The spread rules out the obvious explanations:
+| count | signature | what it means |
+|---|---|---|
+| 9 | `end_turn`, **no usage**, 107ch notice | the stream stopped without a terminal event |
+| 10 | `max_tokens`, usage present, 338–340ch notice | the whole output budget went to hidden reasoning |
+| 2 | `end_turn`, usage present | a genuine silent completion |
+
+The **9** are the ones the user reported, and all 9 are the same session. For those the status
+was **inferred**, not reported — `incomplete ? "incomplete" : "completed"` — so a stream that
+said nothing at all was described as a normal completion in which the model chose to stay
+silent. Same class of mistake as the hardcoded reason fixed in [issue #8]: asserting a cause
+the code had not observed.
+
+They are also intermittent, not a property of the conversation. The spread:
 
 | | range |
 |---|---|
@@ -806,10 +814,16 @@ The spread rules out the obvious explanations:
 | tools | 205 – 221 |
 | elapsed before the empty turn | 0s – 57s |
 
-Not budget (no `incomplete`), not context size, not one model, not one tool. Two replays of the
-exact failing request rebuilt from the session transcript — 263 messages / ~162k tokens, once
-with no tools and once with 215 — both **succeeded** (46s and 14s, with content). So it is
-intermittent and transport-level, not a property of the conversation.
+and two replays of the exact failing request, rebuilt from the session transcript — 263
+messages / ~162k tokens, once with no tools and once with 215 — both **succeeded** (46s and
+14s, with content).
+
+The **10** are a different bug in the same clothing, and they were the biggest group. A turn
+whose budget is entirely consumed by reasoning has no content, so the continue-on-truncation
+loop had nothing to continue from and spent two more starved calls trying — visible in the log
+as `continue-on-truncation 1/2`, `2/2`, then the same empty notice. That loop now requires
+something to resume from (`textLen > 0 || hasTool`), and starvation is routed to the retry
+instead, which drops reasoning and is therefore the actual cure.
 
 ### Three fixes
 
@@ -829,13 +843,19 @@ reasoning** — a turn that burned 40s and returned nothing was almost certainly
 reasoning phase, which is exactly the window that gets cut, so asking for the same hidden
 reasoning again reproduces the failure.
 
-Retrying is skipped in the three cases where it is wrong, each with a test:
+Retrying is skipped where it is wrong, each with a test:
 
 | case | why not |
 |---|---|
 | refusal | the refusal *is* the answer; asking again just refuses again |
 | `error` / `response.failed` | a hard upstream failure; the message is the useful output |
-| `incomplete` | the truncation loop owns it, and it **resumes** rather than restarting |
+| `incomplete` for any reason but the output cap | e.g. `content_filter` — not something a retry fixes |
+
+`incomplete` **because of the output cap with no output at all** is deliberately still retried:
+that is the starvation group above, and dropping reasoning is the fix. The first version of this
+change vetoed on `incomplete` wholesale and so left the largest of the three groups unfixed —
+caught by an adversarial review agent that classified the log lines instead of trusting the
+summary.
 
 Classifier calls pass `allowContinue=false`, so a safety verdict is never retried ([issue #6]).
 
