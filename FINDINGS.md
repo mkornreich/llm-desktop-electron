@@ -205,3 +205,117 @@ Worth stating, because a host list on its own invites the wrong conclusion:
 - **No raw chain-of-thought from OpenAI**, for the proxy path: `reasoning.summary`
   accepts only `concise|detailed|auto`, and the sole reasoning-related `include` value
   is `reasoning.encrypted_content`, a Fernet-style ciphertext only OpenAI can decrypt.
+
+## The app auto-approves eleven of its own tools ([issue #9])
+
+Every launch, our build's Electron **main process** prints:
+
+```
+(node:31528) [CLAUDE_SDK_CAN_USE_TOOL_SHADOWED] Warning: canUseTool will not be invoked for:
+mcp__computer-use, mcp__ccd_session__spawn_task, mcp__ccd_session__dismiss_task,
+mcp__ccd_session__mark_chapter, mcp__ccd_session_mgmt__list_sessions, …
+```
+
+PID 31528 was confirmed as ours from its full argv (`--user-data-dir=…/llm-desktop-electron/
+user-data` plus our `--host-resolver-rules`), and `boot7.log` carries it twice — once per session
+spawned.
+
+**Who emits it.** The Agent SDK bundled at `app/.vite/build/index.chunk-41sTXhtI.js`:
+
+```js
+function vte(mode, allowedTools) {
+  if (mode === "bypassPermissions") return "…auto-approves every tool call…";
+  let bare = allowedTools.filter(n => n.length > 0 && !n.includes("("));
+  if (bare.length !== 0) return `canUseTool will not be invoked for: ${bare.join(", ")}. …`;
+}
+function _te(hasCallback, mode, allowedTools) {
+  if (!hasCallback) return;                    // silent unless a callback was actually supplied
+  const msg = vte(mode, allowedTools);
+  if (msg !== undefined) process.emitWarning(msg, { code: "CLAUDE_SDK_CAN_USE_TOOL_SHADOWED" });
+}
+```
+
+"Bare" means an `allowedTools` entry with **no parenthesised specifier** — `Bash`, not
+`Bash(git status:*)`. A bare entry approves the whole tool, so `canUseTool` (the callback the
+desktop app uses to draw its permission UI) is never consulted for it.
+
+**Where the list comes from.** Hardcoded in Anthropic's own code, `index.chunk-DT0P6tKR.js`:
+
+```js
+e.allowedTools = [...e.allowedTools ?? [],
+  "mcp__computer-use",
+  "mcp__ccd_session__spawn_task", "mcp__ccd_session__dismiss_task", "mcp__ccd_session__mark_chapter",
+  C.MCP_CCD_LIST_SESSIONS, C.MCP_CCD_GET_SESSION, C.MCP_CCD_SET_SESSION_TITLE, C.MCP_CCD_SEND_MESSAGE,
+  ...(n.getAllowedMountRoots() ? [] : [C.MCP_CCD_SEARCH_TRANSCRIPTS, C.MCP_CCD_LIST_EVENTS]),
+  ...(be() ? [C.MCP_CCD_READ_WIDGET_CONTEXT] : []),
+];
+```
+
+Two details in the conditionals are worth reading twice. Transcript search and event listing are
+auto-approved **only when there are no mount roots** — the *less* sandboxed configuration
+auto-approves *more*. And a second, much longer list exists for agent-mode/Cowork sessions in
+`index.chunk-BLq2jXJd.js`, where `mcp__computer-use` is again conditional, and where a
+`cuOnlyMode` reduces `allowedTools` to `[...TASK_TOOL_NAMES, "ToolSearch", "mcp__computer-use"]`.
+
+**The list grows as you grant permissions.** `replaySessionPermissions` turns session grants into
+`allowedTools` entries:
+
+```js
+t.push(o.ruleContent ? `${o.toolName}(${o.ruleContent})` : o.toolName)
+```
+
+A grant with no `ruleContent` becomes a **bare** entry — so approving a tool without a specifier
+stops that tool going through `canUseTool` for the rest of the session, and lengthens this
+warning.
+
+**The documented escape hatch is used by Anthropic themselves.** Admin policy does the exact
+reverse of the auto-approve, in `index.chunk-CzaHV0Pg.js`: it strips names out of `allowedTools`
+and installs a `PreToolUse` hook returning `permissionDecision: "ask"` with the reason
+*"Organization policy requires approval for this tool."* — which is the mechanism the warning
+recommends.
+
+**It is not the dangerous branch.** The same warning has a `bypassPermissions` form, and we do
+not get it. The app also refuses to honour Bypass when policy forbids it:
+
+```js
+const L = isBypassPermissionsAllowed();
+const N = M === PermissionMode.Bypass && !L;
+const U = N ? PermissionMode.AcceptEdits : M;     // downgraded, not silently honoured
+```
+
+and `getDefaultPermissionMode` drops a settings-file `defaultMode: "auto"` when MDM has
+`autoModeEnabled: false`.
+
+**The warning's own caveat, checked.** It ends *"Allow rules from settings files can also shadow
+the callback but are not visible here."* Here they do not: `~/.claude/settings.local.json` holds
+14 allow rules and **0 of them are bare**.
+
+### Does it skip the safety classifier too?
+
+This is the part that actually matters, and the honest answer is "almost certainly yes, but not
+proven". What is established:
+
+- The CLI has exactly **two** places that log skipping the auto-mode classifier — *"would be
+  allowed in acceptEdits mode"* and *"tool is on the safe allowlist"* (`m2s`) — and only one
+  `fastPath` telemetry label, `allowlist`. Neither is "an allow rule matched", which fits a rule
+  match short-circuiting **before** the auto-mode path is entered at all.
+- Empirically, across the 30 classifier error dumps the classified action is Bash ×23, Agent ×2,
+  `mcp__Claude_Browser__preview_start` ×2, WebFetch ×1, user ×2. An MCP tool that is *not*
+  auto-approved does get classified; **none of the eleven ever appears as the classified action.**
+
+The caveat that stops this being proof: those dumps only exist for classifications that
+**failed**, so absence is suggestive rather than conclusive.
+
+### Verdict
+
+Benign, but not nothing. Nine of the eleven are UI bookkeeping — chapter marks, task chips,
+session titles, widget context. Two deserve a second look, and this write-up does not settle
+them: **`mcp__computer-use`** and **`mcp__ccd_session_mgmt__send_message`**. Their tool
+definitions were not located in the local bundle, so what they can reach is stated here as
+unknown rather than guessed.
+
+Nothing was changed. The warning is Anthropic's own configuration of Anthropic's own app, this
+repo only patches that bundle minimally, and silencing a warning that accurately describes the
+permission model would be the wrong trade.
+
+[issue #9]: https://github.com/mkornreich/llm-desktop-electron/issues/9
