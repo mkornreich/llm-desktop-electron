@@ -945,28 +945,36 @@ test("issue #6: the two classifier families are told apart", () => {
   assert.equal(classifierFamily({ system: "You are Claude Code.", messages: [] }), null);
 });
 
-test("issue #6: only PREFIX detection is downgraded to the small model", () => {
-  // Measured on a real classifier request replayed from the CLI's own error dump:
-  // gpt-5.3-codex said <block>yes</block> (Production Reads) for `ssh backend-prod …`,
-  // gpt-4.1-mini said <block>no</block>. The safety verdict must not be downgraded by
-  // default, and latency was ~2s either way, so there was nothing to buy.
+test("issue #6: the two classifier families get separately chosen models", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /family === "prefix" && OPENAI_CLASSIFIER_MODEL/);
   assert.match(src, /family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL/,
-    "the safety model must be a separate, explicit opt-in");
-  // the default for that opt-in is empty, i.e. keep the main model
-  assert.match(src, /OPENAI_CLASSIFIER_SAFETY_MODEL \|\|\s*\n?\s*PROJECT\.OPENAI_CLASSIFIER_SAFETY_MODEL \|\| ""/);
+    "the safety verdict must never inherit the prefix-detection model");
   // and no classifier call may ever be continued: a verdict is one turn
   assert.match(src, /const mayContinue = !isCls && !!payload\.tools\?\.length/);
 });
 
-test("issue #6: the safety verdict keeps the main model, prefix detection does not", () => {
+test("issue #6/#11: the safety verdict never uses a model measured to be more permissive", () => {
+  // The invariant that survived both rounds of measurement. gpt-4.1-mini allowed an
+  // `ssh backend-prod` command that gpt-5.3-codex blocked, and emitted no verdict at all on
+  // another prompt; gpt-4.1 allowed a Production Reads block too. Neither may be the default
+  // here, however fast they are. (Speed alone is settled separately, in the #11 test.)
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const m = src.match(/PROJECT\.OPENAI_CLASSIFIER_SAFETY_MODEL \|\| "([^"]*)"/);
+  assert.ok(m, "safety model default not found");
+  assert.ok(!/^gpt-4\.1/.test(m[1]),
+    `the safety default must not be a gpt-4.1 variant (found ${m[1]})`);
+});
+
+test("issue #6: safety and prefix resolve to different models from the main one", () => {
   const main = pickModel({ system: "You are Claude Code.", messages: [] });
-  assert.equal(pickModel({ system: AUTO_MODE_SYS, messages: [] }), main,
-    "a safety verdict must not silently get a weaker model");
-  // prefix detection is downgraded only when a classifier model is configured
+  const safety = pickModel({ system: AUTO_MODE_SYS, messages: [] });
   const prefix = pickModel({ system: PREFIX_SYS, messages: [] });
-  assert.ok(prefix === "gpt-4.1-mini" || prefix === main, `unexpected prefix model ${prefix}`);
+  // a safety verdict must never land on the prefix-detection model
+  assert.notEqual(safety, prefix, "safety must not inherit the small prefix model");
+  assert.ok(!/^gpt-4\.1/.test(safety), `safety must not be a gpt-4.1 variant (got ${safety})`);
+  // blank config falls back to the main model; the shipped default is faster than it
+  assert.ok(safety === main || safety === "gpt-5.4", `unexpected safety model ${safety}`);
 });
 
 test("issue #6: the verdict is never fabricated by the proxy", () => {
@@ -1322,4 +1330,22 @@ test("issue #11: log lines carry a date, so latency cannot be measured across a 
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /toISOString\(\)\.slice\(5, 19\)\.replace\("T", " "\)/);
   assert.ok(!/toISOString\(\)\.slice\(11, 19\)/.test(src), "time-of-day only is ambiguous");
+});
+
+test("issue #11: the safety verdict uses a model that fits the CLI's deadline", () => {
+  // The CLI aborts its classifier at 60s and then DENIES the action. Measured over 27 live
+  // verdicts on gpt-5.3-codex: median 12.2s, p90 54s, max 287s, 2 past the cliff. gpt-5.4
+  // answered the four largest real prompts in 1.4-3.5s and was never more permissive.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /PROJECT\.OPENAI_CLASSIFIER_SAFETY_MODEL \|\| "gpt-5\.4"/,
+    "the safety model must default to something that answers inside the deadline");
+  // and the measurement that justifies it must stay next to the decision
+  assert.match(src, /b6e29189\s+YES \/ 37667ms/);
+  assert.match(src, /4\.1 too permissive/);
+});
+
+test("issue #11: the safety model is still overridable, and prefix stays separate", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL/);
+  assert.match(src, /family === "prefix" && OPENAI_CLASSIFIER_MODEL/);
 });

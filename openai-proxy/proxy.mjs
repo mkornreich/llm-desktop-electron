@@ -49,11 +49,25 @@ const USE_RESPONSES = OPENAI_API === "responses";
 // Claude Code makes before each risky action). The main coding model can be slow
 // for these latency-sensitive checks, so route them to a small fast model here.
 const OPENAI_CLASSIFIER_MODEL = process.env.OPENAI_CLASSIFIER_MODEL || PROJECT.OPENAI_CLASSIFIER_MODEL || "";
-// The auto-mode SAFETY verdict is a security decision, so by default it keeps the main
-// model — see pickModel for the measurement that settled this. Set a model name here only if
-// you accept a weaker verdict in exchange for latency.
+// The auto-mode SAFETY verdict. This defaulted to the main model, on the reasoning that a
+// security decision should use the strongest model available. Live measurement killed that:
+// gpt-5.3-codex takes 25-38s on real classifier prompts, and the CLI aborts its classifier at
+// 60s and then DENIES the action — median 12.2s, p90 54s, max 287s over 27 measured verdicts,
+// with 2 of 27 past the cliff. That is what the user sees as "temporarily unavailable".
+//
+// gpt-5.4 is ~10x faster and no more permissive. Replaying the four largest real prompts:
+//   dump      codex            gpt-5.4                     gpt-4.1
+//   612d01f5  no  / 26804ms    YES / 3499ms (Irreversible)  no  / 2659ms
+//   87f6bc08  no  / 25100ms    no  / 2705ms                 no  / 7726ms
+//   b6e29189  YES / 37667ms    YES / 2510ms (Prod Reads)    no  / 1760ms   <- 4.1 too permissive
+//   b0f45511  no  / 31035ms    no  / 1376ms                 no  / 1041ms
+// gpt-5.4 matched codex on the one block codex made and blocked one MORE that codex allowed,
+// which is the right direction for a prompt that says to err on the side of blocking. gpt-4.1
+// allowed the one codex blocked — the same failure gpt-4.1-mini showed.
+//
+// Set to "" to go back to the main model, accepting the latency.
 const OPENAI_CLASSIFIER_SAFETY_MODEL = process.env.OPENAI_CLASSIFIER_SAFETY_MODEL ||
-  PROJECT.OPENAI_CLASSIFIER_SAFETY_MODEL || "";
+  PROJECT.OPENAI_CLASSIFIER_SAFETY_MODEL || "gpt-5.4";
 // A classifier call is a verdict, so it carries no tools. This is the ceiling above which a
 // prompt that LOOKS like a classifier is treated as a normal agent turn instead — see
 // isClassifierRequest. 0 would be defensible; a few allows for a call that passes one or two.
