@@ -794,29 +794,32 @@ Four times in a row. `proxy.log` held **20** of them across ~2.5 hours.
 Classifying every `empty turn` line against the summary line that follows it — which is worth
 doing before designing a fix, and which an earlier version of this section skipped:
 
-| count | signature | what it means |
+| count | signature | cause |
 |---|---|---|
-| 9 | `end_turn`, **no usage**, 107ch notice | the stream stopped without a terminal event |
+| 9 | `end_turn`, no usage, 107ch notice | **a dropped `error` event** — see below |
 | 10 | `max_tokens`, usage present, 338–340ch notice | the whole output budget went to hidden reasoning |
 | 2 | `end_turn`, usage present | a genuine silent completion |
 
-The **9** are the ones the user reported, and all 9 are the same session. For those the status
-was **inferred**, not reported — `incomplete ? "incomplete" : "completed"` — so a stream that
-said nothing at all was described as a normal completion in which the model chose to stay
-silent. Same class of mistake as the hardcoded reason fixed in [issue #8]: asserting a cause
-the code had not observed.
+The **9** are the ones the user reported, all in one session. For those the status was
+**inferred**, not reported — `incomplete ? "incomplete" : "completed"` — so a turn that produced
+nothing was described as a normal completion in which the model chose to stay silent. Same class
+of mistake as the hardcoded reason fixed in [issue #8]: asserting a cause the code had not
+observed.
 
-They are also intermittent, not a property of the conversation. The spread:
+Their cause is now known, and it is not exotic: an **unhandled `error` event**. With no
+`case "error"` in the switch, such an event set nothing at all — no content, no usage,
+`incomplete` still false — which is exactly the 107ch / `out_tokens=?` signature. Once the event
+was handled the session said what it had been saying all along:
+*"Your input exceeds the context window of this model."* See the section below.
 
-| | range |
-|---|---|
-| input items | 10 – 273 |
-| tools | 205 – 221 |
-| elapsed before the empty turn | 0s – 57s |
-
-and two replays of the exact failing request, rebuilt from the session transcript — 263
-messages / ~162k tokens, once with no tools and once with 215 — both **succeeded** (46s and
-14s, with content).
+**A correction worth recording.** An earlier version of this section read that signature as
+proof the stream had ended *without a terminal event*, and called it a transport failure. That
+inference was unsound: `out_tokens=?` only means usage was absent, and usage is routinely absent
+from perfectly ordinary **successful** turns — the log has plenty, e.g.
+`stop_reason=end_turn out_tokens=? text=2291ch`. Since the explicit
+`upstream stream ended with NO terminal event` instrumentation was added, it has fired **zero**
+times. The retry for that case is kept because it is cheap and correct if it ever happens, but
+no instance of it has actually been observed.
 
 The **10** are a different bug in the same clothing, and they were the biggest group. A turn
 whose budget is entirely consumed by reasoning has no content, so the continue-on-truncation
@@ -838,10 +841,12 @@ Benign bookkeeping events (`response.created`, `response.in_progress`,
 `unhandled_events` in the notice only ever reports something genuinely unexpected — without
 that it said `unhandled_events=response.created` on every failure, which points at nothing.
 
-**2. The truth, and a measurement.** The notice now reports `status=no terminal event` when
-that is what happened, says plainly that this is *"a transport failure rather than the model
-declining to answer"*, and the log records how long the stream ran and how many bytes it
-carried before dying — turning an anecdote into something measurable.
+**2. The truth, and a measurement.** The notice reports the status the stream actually reached —
+`failed` with the upstream's own message when there was an error, `no terminal event` when the
+stream really did just stop — instead of inferring "completed". The log records how long the
+stream ran and how many bytes it carried, so a future occurrence is measurable rather than
+anecdotal. (That instrumentation is also what proved the *no terminal event* case has never
+actually happened here.)
 
 **3. It retries.** Up to `OPENAI_MAX_EMPTY_RETRIES` (default 2), and the retry **drops
 reasoning** — a turn that burned 40s and returned nothing was almost certainly in a long silent
