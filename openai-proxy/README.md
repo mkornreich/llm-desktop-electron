@@ -1064,10 +1064,36 @@ effort and unsupported-parameter memos.
 weaker coding model than `gpt-5.3-codex`, so it is a genuine trade, not a free upgrade — which
 is why the default is unchanged and this is written down rather than decided for you.
 
-There is also an unexplored lever: the CLI reads `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (sources:
-`env`, `settings`, `clientdata`, `experiment`, `model-default`). Setting it to the real window
-would let Claude Code compact *itself* before overflowing, which is strictly better than the
-proxy truncating afterwards. Its units and exact semantics were not confirmed, so it is not set
-— determining that is the obvious next step here.
+### Telling the CLI the truth: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+
+Now set to **272000** in `.openai-model`, which `run.sh` exports in openai mode only (in
+anthropic mode the real Claude genuinely has a 1M window and forcing this would shrink it).
+
+Semantics, read out of the CLI's own resolver (`R7`):
+
+```
+window = Math.min(<the model's own window>, Math.max(100000, value))    value capped at 1e6
+usable = window - Math.min(maxOutputTokens, 20000)                      a 20k output reserve
+```
+
+So 272000 leaves **252,000 usable** — just under the 253,339 tokens the API demonstrably
+accepts for this model. Below 100000 the value is ignored; above 1000000 it is capped, not
+rejected.
+
+**Honest status: set and correct by construction, but not yet shown to help.** The A/B I ran
+was inconclusive and the reason is worth recording — I fed a ~300k-token document as a single
+user message, and *neither* compactor can do anything with that. Both the CLI's and this
+proxy's compaction work on conversation history and tool results, so a single oversized
+message just produces:
+
+```
+! context exceeded mid-stream and nothing left to compact (keep=96)
+```
+
+That is a real gap in its own right: **an oversized single message cannot be compacted by
+anything here.** The setting targets the actual failure mode — long multi-turn sessions with
+many tool results, which is what all 173 logged overflows were — so measuring it needs real
+use over time rather than one synthetic prompt. The number to watch is the count of
+`context exceeded` lines in `proxy.log`.
 
 [issue #14]: https://github.com/mkornreich/llm-desktop-electron/issues/14
