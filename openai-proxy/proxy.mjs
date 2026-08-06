@@ -1086,9 +1086,56 @@ function mapFinish(reason, hasTools) {
   }
 }
 
+// If the model cannot accept images, drop them and say so in the text rather than failing the
+// whole turn. Losing the picture is bad; losing the user's question with it is worse.
+function stripImages(payload) {
+  const note = { chat: "[image omitted: this model does not accept images]",
+                 resp: "[image omitted: this model does not accept images]" };
+  const out = { ...payload };
+  if (Array.isArray(out.messages)) {
+    out.messages = out.messages.map((m) => {
+      if (!Array.isArray(m.content)) return m;
+      const kept = m.content.filter((c) => c.type !== "image_url");
+      if (kept.length === m.content.length) return m;
+      return { ...m, content: [...kept, { type: "text", text: note.chat }] };
+    });
+  }
+  if (Array.isArray(out.input)) {
+    out.input = out.input.map((it) => {
+      if (!Array.isArray(it.content)) return it;
+      const kept = it.content.filter((c) => c.type !== "input_image");
+      if (kept.length === it.content.length) return it;
+      return { ...it, content: [...kept, { type: "input_text", text: note.resp }] };
+    });
+  }
+  return out;
+}
+
+// ---- images (issue #13) ----
+//
+// Both translators used to replace every image with the literal text
+// "[image omitted by proxy]", so pasting a screenshot into a session produced a model that
+// confidently discussed an image it had never seen. Anthropic carries images as
+//   {type:"image", source:{type:"base64", media_type, data}}   or   {..., source:{type:"url", url}}
+// and both OpenAI surfaces accept the same content as a data: URL, just under different keys:
+//   chat      -> {type:"image_url",   image_url:{url}}
+//   responses -> {type:"input_image", image_url:url}
+//
+// Returns null for a block that carries no usable source, so a malformed image degrades to
+// being skipped rather than sending `undefined` upstream.
+function imageUrl(blk) {
+  const src = blk?.source;
+  if (!src) return null;
+  if (src.type === "url" && src.url) return String(src.url);
+  if (src.data) return `data:${src.media_type || "image/png"};base64,${src.data}`;
+  return null;
+}
+const IMAGE_REJECTED_RE = /image|vision|multimodal|input_image|image_url/i;
+
 // ---------- request translation: Anthropic -> OpenAI ----------
 function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
   const messages = [];
+  let imagesSent = 0;
   if (body.system) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
@@ -1099,22 +1146,31 @@ function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
     const content = m.content;
     if (typeof content === "string") { messages.push({ role: m.role, content }); continue; }
     if (!Array.isArray(content)) continue;
-    const text = [], toolCalls = [], toolResults = [];
+    const text = [], toolCalls = [], toolResults = [], images = [];
     for (const blk of content) {
       if (blk.type === "text") text.push(blk.text);
       else if (blk.type === "tool_use")
         toolCalls.push({ id: blk.id, type: "function", function: { name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) } });
       else if (blk.type === "tool_result")
         toolResults.push({ tool_call_id: blk.tool_use_id, content: toolResultText(blk) });
-      else if (blk.type === "image") text.push("[image omitted by proxy]");
+      else if (blk.type === "image") {
+        const url = imageUrl(blk);
+        if (url) images.push({ type: "image_url", image_url: { url } });
+      }
     }
     if (m.role === "assistant") {
+      // Only user turns may carry images on this surface.
       const msg = { role: "assistant", content: text.join("\n") || null };
       if (toolCalls.length) msg.tool_calls = toolCalls;
       messages.push(msg);
     } else {
       for (const tr of toolResults) messages.push({ role: "tool", tool_call_id: tr.tool_call_id, content: tr.content });
-      if (text.length) messages.push({ role: "user", content: text.join("\n") });
+      if (images.length) {
+        imagesSent += images.length;
+        messages.push({ role: "user", content: [...text.map((t) => ({ type: "text", text: t })), ...images] });
+      } else if (text.length) {
+        messages.push({ role: "user", content: text.join("\n") });
+      }
     }
   }
   const outTokens = Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS);
@@ -1148,7 +1204,7 @@ function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
     else if (tc.type === "tool") out.tool_choice = { type: "function", function: { name: sanitizeToolName(tc.name) } };
   }
   if (out.stream) out.stream_options = { include_usage: true };
-  return { payload: out, nameMap, schemas };
+  return { payload: out, nameMap, schemas, imagesSent };
 }
 
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
@@ -1197,6 +1253,11 @@ async function callOpenAI(payload) {
     if (/temperature/i.test(txt)) { // some models allow only the default temperature
       retry = { ...(retry || payload) };
       delete retry.temperature;
+    }
+    // A model without vision rejects the image parts; keep the question, lose the picture.
+    if (IMAGE_REJECTED_RE.test(txt) && JSON.stringify(payload).includes("image_url")) {
+      log(`  ! ${payload.model} rejected the image(s) — retrying with them removed`);
+      retry = stripImages(retry || payload);
     }
     // Generic: the API names the offending parameter, so drop exactly that one and retry.
     // Found by pointing the stock `claude` CLI at the proxy — the CLI sends stop_sequences,
@@ -1324,6 +1385,7 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null)
 // Anthropic Messages -> Responses request
 function toResponses(body, model, isCls = isClassifierRequest(body)) {
   const input = [];
+  let imagesSent = 0;
   for (const m of body.messages || []) {
     const content = m.content;
     if (typeof content === "string") {
@@ -1331,19 +1393,28 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
       continue;
     }
     if (!Array.isArray(content)) continue;
-    const text = [], toolCalls = [], toolResults = [];
+    const text = [], toolCalls = [], toolResults = [], images = [];
     for (const blk of content) {
       if (blk.type === "text") text.push(blk.text);
       else if (blk.type === "tool_use") toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
       else if (blk.type === "tool_result") toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id, output: toolResultText(blk) });
-      else if (blk.type === "image") text.push("[image omitted by proxy]");
+      else if (blk.type === "image") {
+        const url = imageUrl(blk);
+        if (url) images.push({ type: "input_image", image_url: url });
+      }
     }
     if (m.role === "assistant") {
       if (text.length) input.push({ role: "assistant", content: [{ type: "output_text", text: text.join("\n") }] });
       for (const tc of toolCalls) input.push(tc);
     } else {
       for (const tr of toolResults) input.push(tr); // tool results are top-level items, not user content
-      if (text.length) input.push({ role: "user", content: [{ type: "input_text", text: text.join("\n") }] });
+      if (text.length || images.length) {
+        imagesSent += images.length;
+        input.push({ role: "user", content: [
+          ...(text.length ? [{ type: "input_text", text: text.join("\n") }] : []),
+          ...images,
+        ] });
+      }
     }
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
@@ -1380,7 +1451,7 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
     else if (tc.type === "tool") out.tool_choice = { type: "function", name: sanitizeToolName(tc.name) };
   }
   // temperature intentionally omitted — codex/reasoning models only accept the default.
-  return { payload: out, nameMap, schemas };
+  return { payload: out, nameMap, schemas, imagesSent };
 }
 
 async function callResponses(payload) {
@@ -1390,6 +1461,11 @@ async function callResponses(payload) {
     const txt = await res.clone().text();
     const cap = txt.match(/at most (\d+)/);
     if (cap && payload.max_output_tokens != null) res = await doFetch({ ...payload, max_output_tokens: Math.min(payload.max_output_tokens, parseInt(cap[1], 10)) });
+    // A model without vision rejects the image parts; keep the question, lose the picture.
+    else if (IMAGE_REJECTED_RE.test(txt) && JSON.stringify(payload).includes("input_image")) {
+      log(`  ! ${payload.model} rejected the image(s) — retrying with them removed`);
+      res = await doFetch(stripImages(payload));
+    }
     // Same generic unsupported-parameter recovery as the chat surface above.
     else if (/unsupported_parameter|Unsupported parameter/i.test(txt) && /"param":\s*"([^"]+)"/.test(txt)) {
       const bad = txt.match(/"param":\s*"([^"]+)"/)[1];
@@ -1843,9 +1919,9 @@ const server = http.createServer(async (req, res) => {
     dumpTools(body.tools);
 
     if (useResp) {
-      const { payload, nameMap, schemas } = toResponses(body, model, isCls);
+      const { payload, nameMap, schemas, imagesSent } = toResponses(body, model, isCls);
       const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
-      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""} hints=${hintOn ? "on" : "off"}${isCls ? ` classifier=${family} reasoning=off` : ""}`);
+      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}${isCls ? ` classifier=${family} reasoning=off` : ""}`);
       let upstream;
       const startedAt = Date.now();
       try { upstream = await callResponses(payload); }
@@ -1892,8 +1968,8 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, msg); }
     }
 
-    const { payload, nameMap, schemas } = toOpenAI(body, model, isCls);
-    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${isCls ? ` classifier=${family}` : ""}`);
+    const { payload, nameMap, schemas, imagesSent } = toOpenAI(body, model, isCls);
+    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${imagesSent ? " images=" + imagesSent : ""}${isCls ? ` classifier=${family}` : ""}`);
     let upstream;
     try { upstream = await callOpenAI(payload); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }

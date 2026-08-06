@@ -1394,3 +1394,80 @@ test("the memo is applied on the way out, on both surfaces", () => {
   assert.equal((src.match(/rememberUnsupported\(payload\.model, bad/g) || []).length, 2,
     "both 400 handlers must record the rejection");
 });
+
+// ---------- images (issue #13) ----------
+//
+// Both translators used to replace every image with "[image omitted by proxy]", so pasting a
+// screenshot produced a model that confidently discussed a picture it had never seen.
+
+const PNG = { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } };
+const imgBody = (extra = {}) => ({
+  model: "claude-opus-4-8", max_tokens: 300,
+  messages: [{ role: "user", content: [{ type: "text", text: "what colour is it?" }, PNG] }],
+  ...extra,
+});
+
+test("issue #13: an image reaches the chat surface as a data URL", () => {
+  const { payload, imagesSent } = toOpenAI(imgBody(), "gpt-4.1");
+  assert.equal(imagesSent, 1);
+  const user = payload.messages.find((m) => m.role === "user");
+  assert.ok(Array.isArray(user.content), "a user turn with an image must use the array form");
+  const img = user.content.find((c) => c.type === "image_url");
+  assert.equal(img.image_url.url, "data:image/png;base64,iVBORw0KGgo=");
+  assert.deepEqual(user.content.filter((c) => c.type === "text").map((c) => c.text), ["what colour is it?"],
+    "the question travels with the picture");
+});
+
+test("issue #13: an image reaches the responses surface as input_image", () => {
+  const { payload, imagesSent } = toResponses(imgBody(), "gpt-5.3-codex");
+  assert.equal(imagesSent, 1);
+  const user = payload.input.find((i) => i.role === "user");
+  const img = user.content.find((c) => c.type === "input_image");
+  assert.equal(img.image_url, "data:image/png;base64,iVBORw0KGgo=");
+  assert.ok(user.content.some((c) => c.type === "input_text"), "text part still present");
+});
+
+test("issue #13: a url source is passed through unchanged", () => {
+  const body = { model: "m", max_tokens: 10, messages: [{ role: "user", content: [
+    { type: "image", source: { type: "url", url: "https://example.com/a.png" } }] }] };
+  assert.equal(toOpenAI(body, "gpt-4.1").payload.messages[0].content[0].image_url.url,
+    "https://example.com/a.png");
+  assert.equal(toResponses(body, "gpt-5.3-codex").payload.input[0].content[0].image_url,
+    "https://example.com/a.png");
+});
+
+test("issue #13: a malformed image is skipped, never sent as undefined", () => {
+  const body = { model: "m", max_tokens: 10, messages: [{ role: "user", content: [
+    { type: "text", text: "hi" }, { type: "image" }, { type: "image", source: {} }] }] };
+  const chat = toOpenAI(body, "gpt-4.1");
+  assert.equal(chat.imagesSent, 0);
+  assert.equal(chat.payload.messages[0].content, "hi", "falls back to the plain string form");
+  const resp = toResponses(body, "gpt-5.3-codex");
+  assert.equal(resp.imagesSent, 0);
+  assert.ok(!JSON.stringify(resp.payload).includes("undefined"));
+});
+
+test("issue #13: a text-only turn is unchanged by the image work", () => {
+  const body = { model: "m", max_tokens: 10, messages: [{ role: "user", content: [{ type: "text", text: "plain" }] }] };
+  assert.equal(toOpenAI(body, "gpt-4.1").payload.messages[0].content, "plain",
+    "still the cheap string form when there is no image");
+  assert.equal(toOpenAI(body, "gpt-4.1").imagesSent, 0);
+});
+
+test("issue #13: a model without vision loses the picture, not the question", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /rejected the image\(s\) — retrying with them removed/);
+  assert.equal((src.match(/IMAGE_REJECTED_RE\.test\(txt\)/g) || []).length, 2, "both surfaces recover");
+  // and the stripped payload keeps the user's words plus an honest note
+  assert.match(src, /image omitted: this model does not accept images/);
+});
+
+test("issue #13: the old drop-the-image path is gone from the code", () => {
+  // The phrase survives in the comment explaining what changed; what must not survive is a
+  // translator that still emits it.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const code = src.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+  assert.ok(!code.includes("[image omitted by proxy]"),
+    "no translator may still substitute the placeholder");
+  assert.ok(!/text\.push\("\[image/.test(code), "images must not be flattened into text");
+});

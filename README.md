@@ -106,9 +106,17 @@ fixes for behaviour differences between the two model families:
 - **Thinking** — OpenAI reasoning *summaries* are mapped to Anthropic thinking
   blocks. Raw chain-of-thought is not available from the API at any setting.
 
-Known gaps: images are dropped (`[image omitted by proxy]`) and
-`/v1/messages/count_tokens` is estimated. Cost figures the CLI prints are computed
-from Anthropic's price list and are meaningless when proxied.
+**Images work** ([issue #13]). Anthropic `{type:"image", source:{…}}` blocks — base64 or
+url — become `image_url` on Chat Completions and `input_image` on Responses, so a pasted
+screenshot actually reaches the model. Verified end to end on both surfaces with a generated
+PNG: *"The middle square is blue, and the background is red."* If the configured model has no
+vision the picture is dropped and the question kept, with an honest note in its place, rather
+than failing the turn.
+
+Known gaps: `/v1/messages/count_tokens` is estimated, and the cost figures the CLI prints are
+computed from Anthropic's price list and are meaningless when proxied.
+
+[issue #13]: https://github.com/mkornreich/llm-desktop-electron/issues/13
 
 ### Tests
 
