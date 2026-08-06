@@ -41,7 +41,8 @@ child's env are the ground truth; both say OpenAI.
   *(An earlier version of this file called the 128 cap "not fixable by changing
   models" — that was wrong: it is fixable by changing API surface.)*
 - Translation covers text (streaming + non-streaming) and tool calls. Images are
-  dropped (`[image omitted by proxy]`); `/v1/messages/count_tokens` is estimated.
+  passed through as `image_url` / `input_image` (issue #13); `/v1/messages/count_tokens`
+  is estimated.
 
 ## Output shaping: math and SVG
 
