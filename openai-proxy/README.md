@@ -1030,3 +1030,44 @@ decision was made to avoid a *weaker* verdict, and `gpt-5.4` is not weaker. Veri
 
 The invariant kept from both rounds, with a test: the safety default may never be a `gpt-4.1`
 variant, because both were measured allowing something codex blocked.
+
+## Why the context window feels small ([issue #14])
+
+Measured by bisection against the live API with `max_output_tokens=16`:
+
+| model | result |
+|---|---|
+| `gpt-5.3-codex` | **253,339 accepted**, ~284k rejected → a **272k** window |
+| `gpt-4.1` | **618k accepted** → ~1M |
+
+Claude Code packs its prompt for the model it *believes* it is talking to — a 1M-context
+Claude — so on a 272k model overflow is routine rather than exceptional. The log shows **173**
+context-overflow events.
+
+### The proxy was making it worse
+
+The compaction ladder was `[12, 6, 2]`: on the first overflow it cut straight to the last **12**
+tool results. Across **168** logged compactions the first step succeeded *every single time* and
+the 6 and 2 steps were never reached — so every overflow was resolved with far more cutting than
+it needed. One logged example reclaimed **~112k tokens** to clear an overflow that a gentle trim
+would have fixed, and that discarded history is exactly what surfaces as the model having lost
+the thread.
+
+The ladder is now `[96, 48, 24, 12, 6, 2]` — gentlest first. Starting gentle costs an extra
+round trip when a large cut really is needed, so the level that worked is remembered for the
+rest of the process and reused as the starting point, the same shape as the per-model reasoning
+effort and unsupported-parameter memos.
+
+### If you want a bigger window
+
+`OPENAI_MODEL=gpt-4.1` has roughly four times the context and would make overflow rare. It is a
+weaker coding model than `gpt-5.3-codex`, so it is a genuine trade, not a free upgrade — which
+is why the default is unchanged and this is written down rather than decided for you.
+
+There is also an unexplored lever: the CLI reads `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (sources:
+`env`, `settings`, `clientdata`, `experiment`, `model-default`). Setting it to the real window
+would let Claude Code compact *itself* before overflowing, which is strictly better than the
+proxy truncating afterwards. Its units and exact semantics were not confirmed, so it is not set
+— determining that is the obvious next step here.
+
+[issue #14]: https://github.com/mkornreich/llm-desktop-electron/issues/14

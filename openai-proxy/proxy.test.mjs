@@ -1471,3 +1471,41 @@ test("issue #13: the old drop-the-image path is gone from the code", () => {
     "no translator may still substitute the placeholder");
   assert.ok(!/text\.push\("\[image/.test(code), "images must not be flattened into text");
 });
+
+// ---------- the compaction ladder (issue #14) ----------
+//
+// "Why is the context window so low?" — because the app packs for a 1M-context Claude and
+// the configured model has 272k, so overflow is routine. Measured by bisection against the
+// live API: gpt-5.3-codex accepted 253,339 tokens and rejected ~284k; gpt-4.1 accepted 618k.
+// The old ladder then made it worse by over-trimming.
+
+test("issue #14: the ladder starts gently instead of jumping to 12", () => {
+  // Evidence: across 168 logged compactions the first step succeeded EVERY time and the
+  // 6 and 2 steps were never reached — so the old first step of 12 was always more cutting
+  // than the situation needed.
+  assert.ok(COMPACT_STEPS[0] >= 48, `first step should be gentle, got ${COMPACT_STEPS[0]}`);
+  assert.deepEqual([...COMPACT_STEPS].sort((a, b) => b - a), COMPACT_STEPS,
+    "the ladder must descend, gentlest first");
+  assert.ok(COMPACT_STEPS.includes(12), "the level that was known to work is still on the ladder");
+  assert.ok(COMPACT_STEPS.at(-1) <= 2, "and it still ends somewhere drastic enough to always fit");
+});
+
+test("issue #14: the working level is remembered so gentleness is not paid for repeatedly", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /let compactStartIndex = 0/);
+  assert.match(src, /remembering keep=\$\{keep\} as the working compaction level/);
+  // every ladder walk must honour it, including the mid-stream one
+  assert.equal((src.match(/COMPACT_STEPS\.slice\(compactStartIndex\)/g) || []).length, 2);
+  assert.match(src, /COMPACT_STEPS\[compactStartIndex \+ ctxCompacted\+\+\]/);
+  // and the memo is only set on an actual success
+  assert.equal((src.match(/\{ rememberCompact\(keep\); break; \}/g) || []).length, 2);
+});
+
+test("issue #14: the measured context limits are recorded next to the ladder", () => {
+  // The numbers are the justification for the ladder; losing them turns a measured decision
+  // back into a guess.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /253,339 accepted/);
+  assert.match(src, /272k window/);
+  assert.match(src, /gpt-4\.1\s+618k accepted/);
+});

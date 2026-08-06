@@ -560,7 +560,33 @@ function compactChatMessages(messages, keepRecent) {
 }
 
 // Escalation ladder: keep 12 recent items, then 6, then 2. Each pass reclaims more.
-const COMPACT_STEPS = [12, 6, 2];
+// The compaction ladder: how many recent tool results to keep when the context overflows.
+//
+// This used to be [12, 6, 2], which threw away far more than necessary. The log settles it:
+// across 168 compactions the FIRST step succeeded every single time and steps 6 and 2 were
+// never reached — so every overflow was resolved by cutting to 12 tool results, whether it
+// needed to be or not. One logged example reclaimed ~112k tokens to fix an overflow that a
+// much gentler trim would have cleared, and that lost history is exactly what shows up as
+// the model having forgotten what it was doing (issue #14).
+//
+// Starting gentle costs an extra round trip when a big cut really is needed, so the index of
+// whatever last worked is remembered and reused (compactStartIndex below) — the same shape as
+// the per-model effort and unsupported-parameter memos.
+//
+// Measured limits behind this, by bisection against the live API with max_output_tokens=16:
+//   gpt-5.3-codex  253,339 accepted / ~284k rejected  -> a 272k window
+//   gpt-4.1        618k accepted                      -> ~1M
+// The app believes it is talking to a 1M-context Claude and packs accordingly, so on codex
+// the overflow is routine rather than exceptional.
+const COMPACT_STEPS = [96, 48, 24, 12, 6, 2];
+let compactStartIndex = 0;
+const rememberCompact = (keep) => {
+  const i = COMPACT_STEPS.indexOf(keep);
+  if (i > -1 && i !== compactStartIndex) {
+    compactStartIndex = i;
+    log(`  ! remembering keep=${keep} as the working compaction level for this session`);
+  }
+};
 
 // Caps on what the summariser itself is fed, so the compaction call cannot blow its own
 // context: at most this much of each result, and this much in total.
@@ -1283,13 +1309,13 @@ async function callOpenAI(payload) {
       const t1 = await res.clone().text();
       if (CONTEXT_ERROR_RE.test(t1)) {
         let body = retry || payload;
-        for (const keep of COMPACT_STEPS) {
+        for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
           const { messages, trimmed, reclaimed } = compactChatMessages(body.messages, keep);
           if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
           log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} messages); retrying`);
           body = { ...body, messages };
           res = await doFetch(body);
-          if (res.status !== 400) break;
+          if (res.status !== 400) { rememberCompact(keep); break; }
           const t2 = await res.clone().text();
           if (!CONTEXT_ERROR_RE.test(t2)) break;
         }
@@ -1479,13 +1505,13 @@ async function callResponses(payload) {
     // Context window exceeded -> compact the conversation and retry (issue #4).
     else if (CONTEXT_ERROR_RE.test(txt)) {
       let body = payload;
-      for (const keep of COMPACT_STEPS) {
+      for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
         const { input, trimmed, reclaimed, summarised } = await compactResponsesInputSummarised(body.input, keep);
         if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
         log(`  ! context exceeded — compacted ${trimmed} tool result(s)${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
         body = { ...body, input };
         res = await doFetch(body);
-        if (res.status !== 400) break;
+        if (res.status !== 400) { rememberCompact(keep); break; }
         const t2 = await res.clone().text();
         if (!CONTEXT_ERROR_RE.test(t2)) break;
       }
@@ -1802,8 +1828,8 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   // judged on a silently shortened transcript (issue #6).
   let ctxCompacted = 0;
   while (payload && allowContinue && streamError && CONTEXT_ERROR_RE.test(streamError) &&
-         !hasTool && textLen === 0 && ctxCompacted < COMPACT_STEPS.length) {
-    const keep = COMPACT_STEPS[ctxCompacted++];
+         !hasTool && textLen === 0 && compactStartIndex + ctxCompacted < COMPACT_STEPS.length) {
+    const keep = COMPACT_STEPS[compactStartIndex + ctxCompacted++];
     const { input, trimmed, reclaimed, summarised } =
       await compactResponsesInputSummarised(payload.input, keep);
     if (!trimmed) { log(`  ! context exceeded mid-stream and nothing left to compact (keep=${keep})`); break; }
