@@ -7,6 +7,46 @@ evidence base for [issue #3](https://github.com/mkornreich/llm-desktop-electron/
 Applies to the **desktop build** only. The standalone proxy has nothing to do with any
 of this.
 
+## Update: the session store is now SHARED, not copied
+
+Everything below this section describes the **old** one-way copy, and is kept because the
+evidence in it still stands. What changed (issue #3):
+
+`user-data/claude-code-sessions` is now a **symlink** to
+`~/Library/Application Support/Claude/claude-code-sessions`. There is one directory, so a
+session created or renamed in either app is immediately the other's. Nothing is copied,
+nothing merges, nothing goes stale.
+
+**Why the copy had to go.** One-way meant sessions created *here* had nowhere to go, so the
+two stores drifted apart in both directions. When this was changed the split was 13 sessions
+only in the real install, 64 only in this build, and 15 present in both with different
+contents — so a naive symlink would have abandoned 64 sessions. `scripts/merge-sessions.mjs`
+took the union first (newest `lastActivityAt` wins, ties to the real install), backing both
+trees up to `user-data/claude-code-sessions.premerge`. It wrote 67 files and brought the
+shared store to 506.
+
+**Verified in both directions**, at the filesystem level: a file written under
+`user-data/claude-code-sessions/` appears at the real install path, and one written at the
+real install path appears under `user-data/`. The app relaunched clean afterwards —
+`isLoggedOut: false`, `my-access] loaded`.
+
+**Two consequences, both accepted deliberately:**
+
+1. This build now **writes into the real install's data**. That was previously a stated
+   safety property and no longer holds for this one directory; everything else in
+   `user-data/` is still private.
+2. **Deletion is global.** `isArchived` is `0` across every session file on both sides, so
+   the UI removes a session by deleting its file — and there is now one file, not two.
+
+**Local Storage is deliberately still a copy**, not a share, and cannot be made one: LevelDB
+allows a single process at a time, and both databases hold an exclusive `fcntl(F_WRLCK)` on
+their `LOCK` file while their app runs (verified with `F_GETLK`). Point both apps at one
+directory and the second to start cannot open its UI state at all — a native binding does not
+help, because it takes the same lock on the same inode. Reads are unaffected, so the only
+shapes available there are pull-before-launch and push-after-quit.
+
+---
+
 ## Sessions and memory
 
 ### Memory and config — already shared, nothing to sync

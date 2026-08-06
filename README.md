@@ -224,8 +224,17 @@ None contains a secret.
 | [`.privacy`](.privacy) | `DISABLE_TELEMETRY` | `1` | Turns off first-party telemetry and Sentry, and sinkholes the analytics hosts |
 | [`.sync`](.sync) | `SYNC_CLAUDE_SESSIONS` | `1` | Copies Claude Desktop's session list into this build's isolated profile on launch |
 
-`user-data/` is an isolated profile: this build never writes to your real Claude
-install's data. It does *read* from it, to copy sessions in.
+`user-data/` is an isolated profile with **one deliberate exception**:
+`claude-code-sessions` is a symlink to the real install's store, so sessions are genuinely
+shared and written in both directions ([issue #3]). A session created or renamed in either
+app is immediately the other's — and, for the same reason, deleting one deletes it for both.
+Everything else in `user-data/` (cookies, caches, Local Storage) stays private to this build.
+
+Local Storage deliberately is **not** shared: LevelDB permits one process at a time, and both
+databases hold an exclusive `fcntl(F_WRLCK)` while their app runs, so a shared directory would
+stop the second app to start from opening its own UI state at all.
+
+[issue #3]: https://github.com/mkornreich/llm-desktop-electron/issues/3
 
 The app runs unpackaged (`app.isPackaged === false`), which is its own dev layout.
 

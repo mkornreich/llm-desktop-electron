@@ -112,9 +112,12 @@ const SCHEMA = [
     label: "Disable all telemetry",
     help: "Three levers at once: env vars for the agent, PRIVACY_DISABLE_TELEMETRY plus bundle patches for the desktop shell (whose gates are otherwise MDM-only), and DNS sinkholing for the renderer's Datadog/Sentry and the first-party-proxied analytics hosts. Verified 0 bytes egress." },
 
-  { group: "Sessions", file: ".sync", key: "SYNC_CLAUDE_SESSIONS", type: "bool", default: "1",
-    label: "Sync Claude Desktop's sessions on launch",
-    help: "Copies ~/Library/Application Support/Claude/claude-code-sessions into this build's isolated profile. One-way and additive (rsync --update, no --delete): sessions created here are never removed." },
+  { group: "Sessions", file: ".sync", key: "SYNC_CLAUDE_SESSIONS", type: "bool",
+    default: "1", label: "Share the session store with Claude Desktop",
+    help: "Makes user-data/claude-code-sessions a symlink to Claude Desktop's store, so sessions are one set of files and travel both ways instantly (issue #3). This replaced a one-way copy that let the two stores drift apart — 13 sessions existed only in the real install and 64 only here. Two consequences: this build now writes into the real install's data, and deleting a session deletes it for both apps. Unmerged sessions block the link; run scripts/merge-sessions.mjs first." },
+  { group: "Sessions", file: ".sync", key: "SYNC_CLAUDE_UI_STATE", type: "bool",
+    default: "0", label: "Copy claude.ai UI state on launch",
+    help: "Off by default. Copies Claude Desktop's Local Storage (sidebar prefs, grouping definitions, composer drafts) over this build's. It is a whole-directory COPY, not a share, because LevelDB allows one process at a time — both databases hold an exclusive fcntl(F_WRLCK) while their app runs, so a shared directory would stop the second app opening its UI state at all. It also replaces this build's own drafts, and Local Storage holds bootstrap state whose loss previously caused 401s. Skipped while Claude Desktop is running; the previous state is kept at Local Storage.bak." },
 ];
 
 // Parse `KEY=value` lines, ignoring comments and blanks.

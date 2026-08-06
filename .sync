@@ -1,31 +1,63 @@
-# Session sync settings for this build (read by run.sh, so it covers run-openai.sh too).
+# Session sharing settings for this build (read by run.sh, so it covers run-openai.sh too).
 #
-# SYNC_CLAUDE_SESSIONS=1 -> on every launch, copy Claude Desktop's Claude Code sessions
-# into this build's isolated profile:
+# SYNC_CLAUDE_SESSIONS=1 -> the session store is SHARED with Claude Desktop, as a symlink:
 #
-#   ~/Library/Application Support/Claude/claude-code-sessions/<user>/<org>/local_*.json
-#     -> <repo>/user-data/claude-code-sessions/<user>/<org>/
+#   <repo>/user-data/claude-code-sessions
+#     -> ~/Library/Application Support/Claude/claude-code-sessions
 #
 # Each local_<uuid>.json is one session's metadata — sessionId, cliSessionId, cwd, title,
 # titleSource, isArchived, model, effort, permissionMode, enabledMcpTools, lastActivityAt.
-# There is no group field: the sidebar derives grouping from `cwd`, so copying these files
-# brings the sessions across with their titles AND their grouping intact.
 #
-# The copy is one-way and additive (rsync --update, no --delete): files that are newer in
-# this build are left alone, and sessions created here are never removed. Nothing is
-# written back to Claude Desktop.
+# This used to be a one-way `rsync --update` copy, which is why issue #3 existed: sessions
+# created or renamed HERE had nowhere to go, so the two stores drifted apart in both
+# directions. By the time it was changed there were 13 sessions only in the real install,
+# 64 only in this build, and 15 that differed. Sharing removes the whole problem — there is
+# one directory, so nothing to copy, nothing to merge, and nothing to go stale.
 #
-# NOT copied, because it does not need to be: the agent's config and memory are ALREADY
-# shared. Both apps resolve CLAUDE_CONFIG_DIR to $HOME/.claude, so this build reads the
+# Safe to share because these are plain per-session JSON files: no lock, no database, and
+# both sides already use the identical <user>/<org> path so the link needs no translation.
+# Local Storage canNOT be shared the same way — see SYNC_CLAUDE_UI_STATE below for why.
+#
+# TWO CONSEQUENCES, both deliberate:
+#
+#  1. This build now WRITES into the real install's data. Everything else in user-data/ is
+#     still isolated; this one directory is not. Verified in both directions: a file created
+#     under user-data/claude-code-sessions/ appears at the real install path and vice versa.
+#
+#  2. Deletion is GLOBAL. `isArchived` is 0 across every session file on both sides, so the
+#     UI removes a session by deleting its file — and it is now one file, not two. Removing
+#     a session in either app removes it from both.
+#
+# Before the symlink can be created, anything unique to this build has to be merged into the
+# shared store, or it would be abandoned. run.sh refuses to link while that is true and tells
+# you to run `node scripts/merge-sessions.mjs` (use --dry-run first; it backs both trees up
+# to user-data/claude-code-sessions.premerge and prints a per-file decision table).
+#
+# NOT shared, because it does not need to be: the agent's config and memory are ALREADY
+# common. Both apps resolve CLAUDE_CONFIG_DIR to $HOME/.claude, so this build reads the
 # same ~/.claude/projects/*/memory/*.md, MEMORY.md, CLAUDE.md, settings and session
 # transcripts. Verified: a session created in this build wrote its transcript to
 # ~/.claude/projects/<slug>/<cliSessionId>.jsonl, and its child processes carry
 # HOME=$HOME with no CLAUDE_CONFIG_DIR override.
 #
-# Set to 0 to launch without syncing.
+# Set to 0 to launch without touching the session store at all. An existing symlink is left
+# in place — remove it by hand if you want the profiles separate again, and note that doing
+# so leaves this build with NO sessions until you copy some back.
 SYNC_CLAUDE_SESSIONS=1
 
 # SYNC_CLAUDE_UI_STATE -> copy claude.ai's Local Storage from Claude Desktop.
+#
+# WHY THIS IS A COPY AND NOT A SYMLINK, unlike the sessions above. LevelDB allows exactly
+# one process at a time. Both databases hold an exclusive whole-file fcntl(F_WRLCK) on their
+# LOCK file for as long as their app runs — verified directly with F_GETLK:
+#
+#   .../Claude/Local Storage/leveldb/LOCK      F_WRLCK  (Claude Desktop)
+#   .../user-data/Local Storage/leveldb/LOCK   F_WRLCK  (this build)
+#
+# Point both apps at one directory and the second to start cannot open its Local Storage at
+# all. A native LevelDB binding does not help: it takes the same lock on the same inode.
+# Reads are unaffected (parsing the files never touches LOCK), so the only shapes available
+# for this store are pull-before-launch and push-after-quit.
 #
 # DEFAULT 0, and the reason matters. This was added to make session GROUPING sync, on the
 # evidence that Local Storage holds LSS-persisted.dframe-group-scopes. Capturing the network
