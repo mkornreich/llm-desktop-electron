@@ -12,6 +12,7 @@
 //
 //   node scripts/merge-sessions.mjs --dry-run     # decide, print, change nothing
 //   node scripts/merge-sessions.mjs               # do it, after taking a backup
+//   node scripts/merge-sessions.mjs --store local-agent-mode-sessions [--dry-run]
 //
 // Deliberately additive: a file missing from one side is never deleted from the other. There
 // is no deletion timestamp to reason with, so "absent" cannot be distinguished from "deleted"
@@ -22,16 +23,41 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-const REAL = path.join(os.homedir(), "Library/Application Support/Claude/claude-code-sessions");
+// Two stores get shared, and they hold different things:
+//
+//   claude-code-sessions       one local_<uuid>.json per session, nothing else that matters
+//   local-agent-mode-sessions  the same per-session json PLUS a local_<uuid>/ workspace
+//                              directory per session, the skills-plugin payload, and
+//                              server-refreshed cowork-*-cache.json files
+//
+// So the second one has to consider every file, not just the session json.
+const STORES = {
+  "claude-code-sessions": { onlySessionJson: true },
+  "local-agent-mode-sessions": { onlySessionJson: false },
+};
+const storeArg = (() => {
+  const i = process.argv.indexOf("--store");
+  return i > -1 ? process.argv[i + 1] : "claude-code-sessions";
+})();
+if (!STORES[storeArg]) {
+  console.error(`unknown --store '${storeArg}'. known: ${Object.keys(STORES).join(", ")}`);
+  process.exit(1);
+}
+const STORE = storeArg;
+const ONLY_SESSION_JSON = STORES[STORE].onlySessionJson;
+
+const REAL = path.join(os.homedir(), "Library/Application Support/Claude", STORE);
 const REPO = path.resolve(new URL("..", import.meta.url).pathname);
-const BUILD = path.join(REPO, "user-data/claude-code-sessions");
-const BACKUP = path.join(REPO, "user-data/claude-code-sessions.premerge");
+const BUILD = path.join(REPO, "user-data", STORE);
+const BACKUP = path.join(REPO, `user-data/${STORE}.premerge`);
 
 const DRY = process.argv.includes("--dry-run");
 const FORCE = process.argv.includes("--force");
 
-// Every `<user>/<org>/local_*.json` under a root, as paths relative to that root.
-export function sessionFiles(root) {
+// Files under a root, relative to it. `onlySessionJson` restricts to the per-session
+// metadata; the agent-mode store needs everything, because a session there is a whole
+// workspace directory rather than a single json file.
+export function sessionFiles(root, onlySessionJson = true) {
   const out = [];
   const walk = (dir, rel) => {
     let entries;
@@ -40,7 +66,7 @@ export function sessionFiles(root) {
       const p = path.join(dir, e.name);
       const r = rel ? path.join(rel, e.name) : e.name;
       if (e.isDirectory()) walk(p, r);
-      else if (e.isFile() && e.name.startsWith("local_") && e.name.endsWith(".json")) out.push(r);
+      else if (e.isFile() && (!onlySessionJson || (e.name.startsWith("local_") && e.name.endsWith(".json")))) out.push(r);
     }
   };
   walk(root, "");
@@ -70,9 +96,9 @@ const running = (pattern) => {
 // A tie on the clock resolves to the REAL install. That matters: 9 of the 15 conflicts seen
 // in practice had identical lastActivityAt and differed only in incidental fields, and a
 // deterministic tie-break avoids flapping between the two on repeated runs.
-export function planMerge(realRoot, buildRoot) {
-  const realFiles = new Set(sessionFiles(realRoot));
-  const buildFiles = new Set(sessionFiles(buildRoot));
+export function planMerge(realRoot, buildRoot, onlySessionJson = true) {
+  const realFiles = new Set(sessionFiles(realRoot, onlySessionJson));
+  const buildFiles = new Set(sessionFiles(buildRoot, onlySessionJson));
   const all = [...new Set([...realFiles, ...buildFiles])].sort();
   const plan = { keep: [], add: [], same: [], realWins: [], buildWins: [] };
   for (const rel of all) {
@@ -91,7 +117,7 @@ function main() {
   if (!fs.existsSync(REAL)) { console.error(`no session store at ${REAL}`); process.exit(1); }
   if (!fs.existsSync(BUILD)) { console.error(`no session store at ${BUILD}`); process.exit(1); }
   if (fs.lstatSync(BUILD).isSymbolicLink()) {
-    console.log("user-data/claude-code-sessions is already a symlink — the merge has been done. Nothing to do.");
+    console.log(`user-data/${STORE} is already a symlink — the merge has been done. Nothing to do.`);
     return;
   }
 
@@ -108,14 +134,17 @@ function main() {
   }
   if (live.length) console.log(`! ${live.join(" and ")} running — ${DRY ? "dry run, fine" : "forced"}\n`);
 
-  const realFiles = new Set(sessionFiles(REAL));
-  const buildFiles = new Set(sessionFiles(BUILD));
+  const realFiles = new Set(sessionFiles(REAL, ONLY_SESSION_JSON));
+  const buildFiles = new Set(sessionFiles(BUILD, ONLY_SESSION_JSON));
   const all = [...new Set([...realFiles, ...buildFiles])].sort();
-  const plan = planMerge(REAL, BUILD);
+  const plan = planMerge(REAL, BUILD, ONLY_SESSION_JSON);
 
-  const short = (rel) => rel.split("/").pop().replace(/^local_/, "").slice(0, 8);
+  const short = (rel) => (ONLY_SESSION_JSON
+    ? rel.split("/").pop().replace(/^local_/, "").slice(0, 8)
+    : rel.length > 58 ? `…${rel.slice(-57)}` : rel);
   const when = (s) => `${new Date(s.at).toISOString().slice(0, 19).replace("T", " ")} (${s.from})`;
 
+  console.log(`store : ${STORE}${ONLY_SESSION_JSON ? " (session json only)" : " (all files)"}`);
   console.log(`real  : ${realFiles.size} files   ${REAL}`);
   console.log(`build : ${buildFiles.size} files   ${BUILD}`);
   console.log(`union : ${all.length} files\n`);

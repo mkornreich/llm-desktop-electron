@@ -40,7 +40,19 @@
 # ~/.claude/projects/<slug>/<cliSessionId>.jsonl, and its child processes carry
 # HOME=$HOME with no CLAUDE_CONFIG_DIR override.
 #
-# Set to 0 to launch without touching the session store at all. An existing symlink is left
+# TWO stores are shared, both through the same share_store() helper in run.sh:
+#
+#   claude-code-sessions        one local_<uuid>.json per session
+#   local-agent-mode-sessions   the cowork / agent-mode store: the same per-session json PLUS
+#                               a local_<uuid>/ workspace directory each, the skills-plugin
+#                               payload, and server-refreshed cowork-*-cache.json files
+#
+# The second was checked before being shared: 373 files on both sides with identical file
+# lists, and exactly 2 files differing — the skills and rpm manifest.json, and only in their
+# `lastUpdated` refresh timestamp. So there was nothing to merge. Its .lock files are per-task
+# files inside session workspaces, not a database lock, so sharing is safe the same way.
+#
+# Set to 0 to launch without touching either store. An existing symlink is left
 # in place — remove it by hand if you want the profiles separate again, and note that doing
 # so leaves this build with NO sessions until you copy some back.
 SYNC_CLAUDE_SESSIONS=1

@@ -188,43 +188,58 @@ fi
 #
 # The agent's memory/config needs no sync at all: both apps resolve CLAUDE_CONFIG_DIR to
 # $HOME/.claude and already share it. See .sync for the evidence.
-SYNC_VAL=$(sed -n 's/^SYNC_CLAUDE_SESSIONS=//p' .sync 2>/dev/null | head -1)
-if [ "${SYNC_VAL:-1}" != "0" ]; then
-  SRC="$HOME/Library/Application Support/Claude/claude-code-sessions"
-  DST="$PWD/user-data/claude-code-sessions"
-  if [ ! -d "$SRC" ]; then
-    echo "[run] NOTE: no Claude Desktop session store at $SRC — leaving this build's own sessions alone"
-  elif [ -L "$DST" ]; then
+# share_store <dir-name> <find-pattern> <label>
+#   <find-pattern> is what counts as "content unique to this build" when deciding whether the
+#   private directory can safely be replaced by a link. For the agent-mode store a session is
+#   a whole workspace directory, not one json, so it matches every file.
+share_store() {
+  local name="$1" pattern="$2" label="$3"
+  local src="$HOME/Library/Application Support/Claude/$name"
+  local dst="$PWD/user-data/$name"
+  if [ ! -d "$src" ]; then
+    echo "[run] NOTE: no Claude Desktop $label store at $src — leaving this build's own alone"
+  elif [ -L "$dst" ]; then
     # Already shared. Re-point if the target moved, the same way the app.asar symlink self-heals.
-    if [ "$(readlink "$DST")" != "$SRC" ]; then
-      ln -sfn "$SRC" "$DST"
-      echo "[run] re-pointed the shared session store at $SRC"
+    if [ "$(readlink "$dst")" != "$src" ]; then
+      ln -sfn "$src" "$dst"
+      echo "[run] re-pointed the shared $label store at $src"
     fi
-    shared=$(find -L "$DST" -name 'local_*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
-    echo "[run] sessions: SHARED with Claude Desktop (${shared} sessions, one copy, writes both ways)"
-  elif [ -d "$DST" ]; then
+    local n; n=$(find -L "$dst" -name "$pattern" -type f 2>/dev/null | wc -l | tr -d ' ')
+    echo "[run] ${label}: SHARED with Claude Desktop (${n} files, one copy, writes both ways)"
+  elif [ -d "$dst" ]; then
     # A real directory. Replacing it with a link discards whatever it holds, so only do that
     # once nothing here is missing from the target. Never rm -rf a directory with unique data.
+    local only_here
     only_here=$( { comm -23 \
-        <(cd "$DST" && find . -name 'local_*.json' -type f 2>/dev/null | sort) \
-        <(cd "$SRC" && find . -name 'local_*.json' -type f 2>/dev/null | sort) \
+        <(cd "$dst" && find . -name "$pattern" -type f 2>/dev/null | sort) \
+        <(cd "$src" && find . -name "$pattern" -type f 2>/dev/null | sort) \
         | wc -l | tr -d ' '; } || echo "?" )
     if [ "$only_here" != "0" ]; then
-      echo "[run] WARN: user-data/claude-code-sessions still holds ${only_here} session(s) the shared store does not have."
+      echo "[run] WARN: user-data/$name still holds ${only_here} file(s) the shared store does not have."
       echo "[run]       Merge them first, then relaunch:"
-      echo "[run]         node scripts/merge-sessions.mjs --dry-run   # inspect"
-      echo "[run]         node scripts/merge-sessions.mjs             # apply"
+      echo "[run]         node scripts/merge-sessions.mjs --store $name --dry-run   # inspect"
+      echo "[run]         node scripts/merge-sessions.mjs --store $name             # apply"
       echo "[run]       Launching with the private copy for now — nothing was changed."
     else
-      keep="$DST.replaced-$(date +%Y%m%d%H%M%S)"
-      mv "$DST" "$keep"
-      ln -s "$SRC" "$DST"
-      echo "[run] sessions: now SHARED with Claude Desktop; the old private copy is at $(basename "$keep")"
+      local keep="$dst.replaced-$(date +%Y%m%d%H%M%S)"
+      mv "$dst" "$keep"
+      ln -s "$src" "$dst"
+      echo "[run] ${label}: now SHARED with Claude Desktop; the old private copy is at $(basename "$keep")"
     fi
   else
-    ln -s "$SRC" "$DST"
-    echo "[run] sessions: SHARED with Claude Desktop"
+    ln -s "$src" "$dst"
+    echo "[run] ${label}: SHARED with Claude Desktop"
   fi
+}
+
+SYNC_VAL=$(sed -n 's/^SYNC_CLAUDE_SESSIONS=//p' .sync 2>/dev/null | head -1)
+if [ "${SYNC_VAL:-1}" != "0" ]; then
+  share_store "claude-code-sessions" "local_*.json" "sessions"
+  # The cowork / agent-mode store: same <user>/<org> layout, but a session is a whole
+  # local_<uuid>/ workspace directory alongside its json, plus the skills-plugin payload and
+  # server-refreshed cowork-*-cache.json files. Its .lock files are per-task files inside
+  # those workspaces, not a database lock, so sharing is safe the same way.
+  share_store "local-agent-mode-sessions" "*" "agent-mode sessions"
 fi
 
   # ---- claude.ai UI state, which is where GROUPING lives (issue #3) ----
