@@ -257,9 +257,14 @@ anything gated on macOS entitlements the stock Electron binary does not carry (t
 VM/"virtualization" features, which the app itself reports as unavailable).
 `--remote-debugging-port` is refused by the app's own signed CDP gate.
 
-**Scheduled tasks and wake scheduling do not work**, and the app says so:
-`[wake-scheduler] DEV BUILD — daemon registration will fail`. Anything needing the
-machine woken on a timer is inert. Everything interactive is unaffected.
+**Scheduled tasks run; waking a sleeping machine does not.** An earlier version of this
+section said scheduled tasks were dead, which the logs disprove — this build reports
+`[wake-scheduler] registered claim id=scheduled-tasks` and then
+`[CCDScheduledTasks] Confirmed task run for: daily-frontpage-audit`. What genuinely fails is
+the daemon registration the app warns about, `[wake-scheduler] DEV BUILD — daemon registration
+will fail. The dev Electron bundle has no Contents/Library/LaunchDaemons/ plist`: a stock
+Electron bundle has no LaunchDaemon, so nothing can wake the Mac from sleep for a timer. Tasks
+fire while the app is running; they are missed while the machine sleeps.
 
 ### Startup noise that is not a problem
 
