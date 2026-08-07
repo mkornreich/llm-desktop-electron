@@ -1099,7 +1099,20 @@ function pickModel(body, family = classifierFamily(body)) {
   if (family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL) return OPENAI_CLASSIFIER_SAFETY_MODEL;
   return OPENAI_MODEL;
 }
-const apiForModel = (model) => (/codex/i.test(model) ? "responses" : "chat");
+// Which API surface a model is served on. OPENAI_API overrides it, and that override used to
+// be dead config: USE_RESPONSES was computed at startup and never read, so the documented
+// "responses|chat" knob did nothing and every non-codex model was forced onto Chat Completions.
+//
+// That matters far more than it looks. The app sends 236 tools; Chat Completions caps at 128,
+// so being stuck there silently drops 108 of them. It is also the only way to use a model like
+// gpt-5.6-sol at all — on Chat Completions it answers
+//   "Function tools with reasoning_effort are not supported for gpt-5.6-sol in
+//    /v1/chat/completions"
+// and fails every tool-using turn outright.
+const apiForModel = (model) =>
+  (OPENAI_API === "responses" || OPENAI_API === "chat")
+    ? OPENAI_API
+    : (/codex/i.test(model) ? "responses" : "chat");
 
 function mapFinish(reason, hasTools) {
   if (hasTools) return "tool_use";
