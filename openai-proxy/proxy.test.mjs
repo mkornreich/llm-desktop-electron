@@ -15,7 +15,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported,
-        compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS } =
+        compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
+        mapUsage } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1632,4 +1633,47 @@ test("turn latency is measured, not inferred from interleaved log lines", () => 
   assert.match(src, /const turnStart = Date\.now\(\)/);
   assert.match(src, /responses stream \$\{Date\.now\(\) - turnStart\}ms/);
   assert.match(src, /function logTurnEnd\(surface, resp, toolCount, textLen, ms = null\)/);
+});
+
+// ---------- token usage, which is what the context-window indicator is computed from ----------
+
+test("mapUsage reports input tokens, which streamed turns previously reported as 0", () => {
+  assert.deepEqual(mapUsage({ input_tokens: 120000, output_tokens: 500 }, "responses"),
+    { input_tokens: 120000, output_tokens: 500 });
+  assert.deepEqual(mapUsage({ prompt_tokens: 900, completion_tokens: 12 }, "chat"),
+    { input_tokens: 900, output_tokens: 12 });
+});
+
+test("mapUsage subtracts cached tokens, because the two APIs count them oppositely", () => {
+  // OpenAI: input_tokens INCLUDES cached. Anthropic: input_tokens EXCLUDES cache_read, and the
+  // client sums the two. Passing 100000 through alongside cache_read 80000 would count 180000
+  // and show the context filling at nearly double the true rate.
+  const u = mapUsage({ input_tokens: 100000, output_tokens: 10, input_tokens_details: { cached_tokens: 80000 } }, "responses");
+  assert.deepEqual(u, { input_tokens: 20000, output_tokens: 10, cache_read_input_tokens: 80000 });
+  assert.equal(u.input_tokens + u.cache_read_input_tokens, 100000, "the sum must equal the true total");
+
+  const c = mapUsage({ prompt_tokens: 5000, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 4000 } }, "chat");
+  assert.deepEqual(c, { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 4000 });
+});
+
+test("mapUsage omits the cache field when nothing was cached, and never goes negative", () => {
+  const u = mapUsage({ input_tokens: 10, output_tokens: 1, input_tokens_details: { cached_tokens: 0 } }, "responses");
+  assert.ok(!("cache_read_input_tokens" in u));
+  assert.equal(
+    mapUsage({ input_tokens: 5, output_tokens: 0, input_tokens_details: { cached_tokens: 9 } }, "responses").input_tokens,
+    0, "a cached count above the total must not produce a negative input count");
+});
+
+test("mapUsage handles missing usage without throwing", () => {
+  assert.deepEqual(mapUsage(null, "responses"), { input_tokens: 0, output_tokens: 0 });
+  assert.deepEqual(mapUsage(undefined, "chat"), { input_tokens: 0, output_tokens: 0 });
+});
+
+test("every streamed message_delta reports full usage, not output_tokens alone", () => {
+  // The regression this guards: the final delta used to send { output_tokens } by itself, so on a
+  // streamed turn the client was never told the input size and could not compute context left.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const deltas = src.match(/sse\(res, "message_delta"[^;]*/g) || [];
+  assert.ok(deltas.length >= 2, `expected both surfaces to emit message_delta, found ${deltas.length}`);
+  for (const d of deltas) assert.match(d, /usage: mapUsage\(/, `message_delta must report full usage: ${d.slice(0, 80)}`);
 });

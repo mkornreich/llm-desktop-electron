@@ -104,14 +104,33 @@ OPENAI_MAX_TURN_OUTPUT_TOKENS=56000
 # Semantics, read out of the CLI (function R7):
 #   window   = Math.min(<model's own window>, max(100000, value))   value capped at 1e6
 #   usable   = window - min(maxOutputTokens, 20000)                 i.e. a 20k output reserve
-# so 600000 leaves 580,000 usable, under the 622,229 tokens gpt-5.6-sol demonstrably accepts.
-# It was 272000 while the main model was gpt-5.3-codex, whose window is 272k (bisected:
-# 253,339 ok, ~284k rejected). Change this whenever OPENAI_MODEL changes — too high and the
-# CLI never compacts and the proxy has to truncate; too low and it compacts for no reason.
+#
+# So this value IS the context window the app shows you, and a wrong one makes the "context left"
+# indicator lie in whichever direction it is wrong. It was 600000, set from the 622,229 tokens
+# gpt-5.6-sol had been shown to accept — which was only ever a lower bound from one probe, and it
+# understated the real window by about a third.
+#
+# MEASURED PROPERLY, by bisecting real /v1/responses calls until they 400 with "Your input exceeds
+# the context window of this model" (each probe built from " token", one token apiece, and
+# confirmed against the usage.input_tokens the API reported back):
+#
+#   gpt-5.6-sol    800,011 ok   900,011 ok   920,011 ok   |   930,000 REJECTED   950,000  1,000,000
+#   gpt-5.3-codex  253,339 ok                             |   ~284,000 REJECTED
+#   gpt-4.1        618,000 ok
+#
+# So sol's true ceiling is between 920,012 and 930,000 — 921,600 would be the round number in
+# that gap, but nothing here depends on guessing which.
+#
+# 900000 is set rather than 920000 for the output reserve. The CLI only holds back
+# min(maxOutputTokens, 20000) = 20,000, while CLAUDE_CODE_MAX_OUTPUT_TOKENS is 64000, so a turn
+# that generates a full-length answer needs ~44k more room than the CLI has accounted for. At
+# 900000 the usable figure is 880,000, which leaves that margin below the 920,011 that is known to
+# be accepted — auto-compact fires before the hard wall rather than after it. The proxy's
+# mid-stream compaction is the backstop, not the plan.
+#
+# Change this whenever OPENAI_MODEL changes; the numbers above are per-model and not
+# interchangeable. Values below 100000 are ignored, above 1000000 are capped.
 #
 # Only exported in openai mode, which is what we want: in anthropic mode the real Claude
 # genuinely has a 1M window and forcing this would shrink it for no reason.
-#
-# Raise it if you switch OPENAI_MODEL to something bigger — gpt-4.1 accepted 618k, so ~1000000
-# is right there. Values below 100000 are ignored; above 1000000 are capped.
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=600000
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000

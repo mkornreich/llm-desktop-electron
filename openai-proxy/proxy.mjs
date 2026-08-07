@@ -77,7 +77,10 @@ const CLASSIFIER_MAX_TOOLS = parseInt(process.env.OPENAI_CLASSIFIER_MAX_TOOLS ||
 // makes the agent request that id, which the proxy passes straight through.
 // Comma-separated "id:Display Name" pairs; override via OPENAI_PICKER_MODELS.
 const PICKER_MODELS = (process.env.OPENAI_PICKER_MODELS || PROJECT.OPENAI_PICKER_MODELS ||
-  "gpt-5.3-codex:GPT-5.3 Codex,gpt-5.4:GPT-5.4,gpt-4.1:GPT-4.1,gpt-4.1-mini:GPT-4.1 mini,gpt-4o:GPT-4o")
+  // The default model has to be in here or the picker cannot offer what the proxy is actually
+// running — gpt-5.6-sol was missing from this list while being the default, so /v1/models
+// advertised five models, none of them the one answering.
+  "gpt-5.6-sol:GPT-5.6 Sol,gpt-5.5:GPT-5.5,gpt-5.3-codex:GPT-5.3 Codex,gpt-5.4:GPT-5.4,gpt-4.1:GPT-4.1,gpt-4.1-mini:GPT-4.1 mini,gpt-4o:GPT-4o")
   .split(",").map((s) => { const [id, ...n] = s.split(":"); return { id: (id || "").trim(), name: (n.join(":").trim() || (id || "").trim()) }; })
   .filter((m) => m.id);
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -1187,6 +1190,32 @@ const apiForModel = (model) =>
     ? OPENAI_API
     : (/codex/i.test(model) ? "responses" : "chat");
 
+// Token usage, mapped into the shape the Anthropic client expects. This is what drives the
+// "context left" indicator, and it was reporting nothing usable: on a STREAMED turn — which is
+// every real turn — message_start carried input_tokens: 0 and message_delta carried only
+// output_tokens, so the client was never told how much context the turn actually used. The
+// client never calls /v1/messages/count_tokens either (0 hits across the whole proxy log), so
+// there was no second source for it to fall back on.
+//
+// The one subtlety worth getting right is caching, because the two APIs count it oppositely:
+//
+//   OpenAI     usage.input_tokens INCLUDES input_tokens_details.cached_tokens
+//   Anthropic  input_tokens EXCLUDES cache_read_input_tokens; they are meant to be summed
+//
+// So the cached portion has to be subtracted out rather than reported twice. A client that adds
+// the two together — which is what a context meter does — would otherwise count every cached
+// token twice and show the context filling at roughly double the true rate.
+function mapUsage(u, surface) {
+  if (!u) return { input_tokens: 0, output_tokens: 0 };
+  const total = (surface === "chat" ? u.prompt_tokens : u.input_tokens) || 0;
+  const out = (surface === "chat" ? u.completion_tokens : u.output_tokens) || 0;
+  const cached =
+    (surface === "chat" ? u.prompt_tokens_details?.cached_tokens : u.input_tokens_details?.cached_tokens) || 0;
+  const usage = { input_tokens: Math.max(0, total - cached), output_tokens: out };
+  if (cached > 0) usage.cache_read_input_tokens = cached;
+  return usage;
+}
+
 function mapFinish(reason, hasTools) {
   if (hasTools) return "tool_use";
   switch (reason) {
@@ -1335,7 +1364,7 @@ function toAnthropic(oai, reqModel, nameMap, schemas) {
     content,
     stop_reason: mapFinish(choice.finish_reason, (msg.tool_calls || []).length > 0),
     stop_sequence: null,
-    usage: { input_tokens: oai.usage?.prompt_tokens || 0, output_tokens: oai.usage?.completion_tokens || 0 },
+    usage: mapUsage(oai.usage, "chat"),
   };
 }
 
@@ -1493,7 +1522,10 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null)
     sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
   }
   recordUsage(reqModel, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens);
-  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: { output_tokens: usage?.completion_tokens || 0 } });
+  // input_tokens goes in the FINAL delta, not message_start: at message_start the upstream has
+  // not reported usage yet, and a placeholder there would be double counted by any client that
+  // sums the two events. 0 + the truth is the truth either way.
+  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: mapUsage(usage, "chat") });
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
 }
@@ -1665,7 +1697,7 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel, content,
     stop_reason: respStopReason(resp, hasTool), stop_sequence: null,
-    usage: { input_tokens: resp.usage?.input_tokens || 0, output_tokens: resp.usage?.output_tokens || 0 },
+    usage: mapUsage(resp.usage, "responses"),
   };
 }
 
@@ -2003,7 +2035,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
       (toolCount ? `${toolCount} tool call(s)` :
        stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :
        textLen ? "TEXT ONLY, no tool call — turn ends here and the agent waits for the user" : "EMPTY response"));
-  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: usage?.output_tokens || 0 } });
+  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: stop, stop_sequence: null }, usage: mapUsage(usage, "responses") });
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
 }
@@ -2123,7 +2155,7 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
+export { mapUsage, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice,

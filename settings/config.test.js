@@ -107,6 +107,18 @@ test("the schema covers every parameter the proxy and launcher read", () => {
   assert.deepEqual(missing, [], `proxy reads settings the GUI does not expose: ${missing}`);
   for (const k of ["PROVIDER", "DISABLE_TELEMETRY", "SYNC_CLAUDE_SESSIONS"])
     assert.ok(run.includes(k) && keys.has(k), `${k} must be read by run.sh and exposed`);
+
+  // The check above only sees what the PROXY reads (PROJECT.X). Anything run.sh reads straight
+  // out of a dot file slipped past it — which is how CLAUDE_CODE_AUTO_COMPACT_WINDOW, the knob
+  // that decides the context window the app displays, stayed invisible in the GUI. So assert
+  // against the dot files themselves: if a setting is persisted, it is exposed.
+  for (const f of [".provider", ".privacy", ".sync", ".openai-model"]) {
+    const txt = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+    const persisted = [...txt.matchAll(/^([A-Z][A-Z0-9_]+)=/gm)].map((m) => m[1]);
+    assert.ok(persisted.length, `${f} should define at least one setting`);
+    const absent = persisted.filter((k) => !keys.has(k));
+    assert.deepEqual(absent, [], `${f} persists settings the GUI does not expose: ${absent}`);
+  }
 });
 
 test("every schema entry is well formed", () => {

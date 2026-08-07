@@ -116,6 +116,10 @@ const SCHEMA = [
     label: "Disable all telemetry",
     help: "Three levers at once: env vars for the agent, PRIVACY_DISABLE_TELEMETRY plus bundle patches for the desktop shell (whose gates are otherwise MDM-only), and DNS sinkholing for the renderer's Datadog/Sentry and the first-party-proxied analytics hosts. Verified 0 bytes egress." },
 
+  { group: "Reasoning", file: ".openai-model", key: "CLAUDE_CODE_AUTO_COMPACT_WINDOW", type: "int",
+    default: "900000", label: "Context window shown to the app (tokens)",
+    help: "This IS the context window the app displays and auto-compacts against: it resolves to window = min(model's own window, max(100000, this)), capped at 1e6, and usable = window - min(maxOutputTokens, 20000). Set it wrong and the \"context left\" indicator lies. Measured by bisecting real calls until they 400 on the context window: gpt-5.6-sol accepted 920,011 input tokens and was rejected at 930,000; gpt-5.3-codex accepted 253,339 and was rejected near 284,000; gpt-4.1 accepted 618,000. 900000 rather than 920000 because CLAUDE_CODE_MAX_OUTPUT_TOKENS is 64000 while the CLI only reserves 20,000, so a full-length answer needs about 44k more room than it has accounted for. Change this whenever the model changes — the numbers are not interchangeable. Only applied in openai mode; real Claude genuinely has 1M." },
+
   { group: "Sessions", file: ".sync", key: "SYNC_CLAUDE_SESSIONS", type: "bool",
     default: "1", label: "Share the session store with Claude Desktop",
     help: "Makes user-data/claude-code-sessions a symlink to Claude Desktop's store, so sessions are one set of files and travel both ways instantly (issue #3). This replaced a one-way copy that let the two stores drift apart — 13 sessions existed only in the real install and 64 only here. Two consequences: this build now writes into the real install's data, and deleting a session deletes it for both apps. Unmerged sessions block the link; run scripts/merge-sessions.mjs first." },
