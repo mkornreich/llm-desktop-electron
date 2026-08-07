@@ -426,6 +426,33 @@ const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 // classifier aborts (a "median 34s" and then a "median 483s", both artefacts) before the
 // ambiguity was noticed. UTC, matching the ISO timestamps the rest of the pipeline uses.
 const log = (...a) => console.log(`[proxy ${new Date().toISOString().slice(5, 19).replace("T", " ")}]`, ...a);
+
+// ---- connection pooling (the real cause of classifier timeouts) ----
+//
+// Measured: an identical tiny request took 1,322ms straight to OpenAI and 33,093ms through this
+// proxy while the app was busy, with 26 requests in flight. It is not CPU — parsing and
+// re-serialising a 0.64 MB, 236-tool payload costs 0.6ms. It is socket queueing: agent turns
+// hold connections for 15-60s each, and a small request waits behind them.
+//
+// That is what makes the auto-mode classifier fail. Its verdict is ~11 output tokens and the
+// model answers a tiny prompt in ~1.1s, but queued behind live turns it measured a median of
+// 78s against the CLI's 60s deadline — after which the CLI DENIES the action, which is the
+// "temporarily unavailable" the user sees.
+//
+// So: a generous shared pool, plus a SEPARATE pool reserved for classifier calls, so a verdict
+// can never be starved by agent traffic. Guarded — if undici is unavailable the proxy keeps
+// working on the global fetch, just without the isolation.
+let classifierFetch = fetch;
+try {
+  const { Agent, setGlobalDispatcher, fetch: undiciFetch } = await import("undici");
+  setGlobalDispatcher(new Agent({ connections: 64, pipelining: 0, keepAliveTimeout: 30_000 }));
+  const classifierAgent = new Agent({ connections: 8, pipelining: 0, keepAliveTimeout: 30_000 });
+  classifierFetch = (url, opts) => undiciFetch(url, { ...opts, dispatcher: classifierAgent });
+  log("connection pools: 64 shared, 8 reserved for classifier verdicts");
+} catch (e) {
+  log(`! undici unavailable (${e.code || e.message}) — using the default pool for everything`);
+}
+
 const sanitizeToolName = (n) => String(n || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
 // Flatten an Anthropic tool_result's content to text. Neither OpenAI surface has an
 // error flag on tool output, so is_error is marked inline — without it a failed command
@@ -1313,8 +1340,9 @@ function toAnthropic(oai, reqModel, nameMap, schemas) {
 }
 
 // ---------- OpenAI call with a max_tokens/param fallback ----------
-async function callOpenAI(payload) {
-  const doFetch = (body) => fetch(`${OPENAI_BASE}/chat/completions`, {
+async function callOpenAI(payload, isClassifier = false) {
+  const f = isClassifier ? classifierFetch : fetch;
+  const doFetch = (body) => f(`${OPENAI_BASE}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify(stripUnsupported(body)),
@@ -1543,8 +1571,9 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
   return { payload: out, nameMap, schemas, imagesSent };
 }
 
-async function callResponses(payload) {
-  const doFetch = (b) => fetch(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) });
+async function callResponses(payload, isClassifier = false) {
+  const f = isClassifier ? classifierFetch : fetch;
+  const doFetch = (b) => f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) });
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();
@@ -1599,12 +1628,12 @@ async function callResponses(payload) {
   return res;
 }
 
-function logTurnEnd(surface, resp, toolCount, textLen) {
+function logTurnEnd(surface, resp, toolCount, textLen, ms = null) {
   const status = resp?.status || "completed";
   const reason = resp?.incomplete_details?.reason;
   const out = resp?.usage?.output_tokens ?? "?";
   const verdict = toolCount ? `${toolCount} tool call(s)` : (textLen ? "text only — TURN ENDS, agent waits for user" : "EMPTY");
-  log(`  <- ${surface} status=${status}${reason ? "/" + reason : ""} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
+  log(`  <- ${surface}${ms != null ? " " + ms + "ms" : ""} status=${status}${reason ? "/" + reason : ""} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
 }
 
 function respStopReason(resp, hasTool) {
@@ -1642,6 +1671,10 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
 
 // Responses SSE -> Anthropic SSE
 async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null, taskState = null) {
+  // Measured, not inferred. Pairing a request line with a completion line in this log is
+  // unreliable because turns overlap — two earlier attempts to answer "how slow is a turn"
+  // from the log produced confidently wrong medians (34s, then 483s) before that was noticed.
+  const turnStart = Date.now();
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -1965,7 +1998,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   }
   recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
-  log(`  <- responses stream stop_reason=${stop} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
+  log(`  <- responses stream ${Date.now() - turnStart}ms stop_reason=${stop} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
       (thinkLen ? ` thinking=${thinkLen}ch` : "") + ` -> ` +
       (toolCount ? `${toolCount} tool call(s)` :
        stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :
@@ -2021,7 +2054,7 @@ const server = http.createServer(async (req, res) => {
       log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}${isCls ? ` classifier=${family} reasoning=off` : ""}`);
       let upstream;
       const startedAt = Date.now();
-      try { upstream = await callResponses(payload); }
+      try { upstream = await callResponses(payload, isCls); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
       if (!upstream.ok) {
         const errTxt = await upstream.text();
@@ -2061,14 +2094,15 @@ const server = http.createServer(async (req, res) => {
                 : ""));
         }
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
-                   msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0));
+                   msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0),
+                   Date.now() - startedAt);
         return sendJSON(res, 200, msg); }
     }
 
     const { payload, nameMap, schemas, imagesSent } = toOpenAI(body, model, isCls);
     log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${imagesSent ? " images=" + imagesSent : ""}${isCls ? ` classifier=${family}` : ""}`);
     let upstream;
-    try { upstream = await callOpenAI(payload); }
+    try { upstream = await callOpenAI(payload, isCls); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
     if (!upstream.ok) {
       const errTxt = await upstream.text();

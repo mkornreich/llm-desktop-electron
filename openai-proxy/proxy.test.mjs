@@ -1592,3 +1592,44 @@ test("OPENAI_API is no longer computed-and-ignored", () => {
   const code = src.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
   assert.ok(!/const USE_RESPONSES/.test(code), "the dead startup constant is gone");
 });
+
+// ---------- connection pooling: the real cause of classifier timeouts ----------
+//
+// The "temporarily unavailable, so auto mode cannot determine the safety of Bash" denials were
+// never about the model. Measured: an identical tiny request took 1,322ms straight to OpenAI and
+// 33,093ms through this proxy while the app was busy, with 26 requests in flight. Not CPU —
+// parse+stringify of a 0.64 MB 236-tool payload is 0.6ms. Socket queueing: agent turns hold
+// connections for 15-60s and a small request waits behind them, so verdicts measured a median of
+// 78s against the CLI's 60s deadline, after which it DENIES the action.
+
+test("classifier calls get a reserved connection pool", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /setGlobalDispatcher\(new Agent\(\{ connections: 64/, "generous shared pool");
+  assert.match(src, /classifierAgent = new Agent\(\{ connections: 8/, "and a reserved one");
+  assert.match(src, /classifierFetch = \(url, opts\) => undiciFetch\(url, \{ \.\.\.opts, dispatcher: classifierAgent \}\)/);
+});
+
+test("both call paths route classifier traffic to the reserved pool", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /async function callResponses\(payload, isClassifier = false\)/);
+  assert.match(src, /async function callOpenAI\(payload, isClassifier = false\)/);
+  assert.equal((src.match(/const f = isClassifier \? classifierFetch : fetch;/g) || []).length, 2);
+  // and the handler actually passes the flag, or the pool would never be used
+  assert.match(src, /callResponses\(payload, isCls\)/);
+  assert.match(src, /callOpenAI\(payload, isCls\)/);
+});
+
+test("a missing undici degrades instead of breaking the proxy", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /let classifierFetch = fetch;/, "defaults to the global fetch");
+  assert.match(src, /undici unavailable/, "and says so rather than failing");
+});
+
+test("turn latency is measured, not inferred from interleaved log lines", () => {
+  // Two earlier attempts to answer "how slow is a turn" from this log produced confidently
+  // wrong medians — 34s, then 483s — because turns overlap and the timestamps had no date.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /const turnStart = Date\.now\(\)/);
+  assert.match(src, /responses stream \$\{Date\.now\(\) - turnStart\}ms/);
+  assert.match(src, /function logTurnEnd\(surface, resp, toolCount, textLen, ms = null\)/);
+});
