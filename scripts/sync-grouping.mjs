@@ -248,27 +248,24 @@ export function planMerge(realText, buildText) {
   const groupBy = mergeGroupBy(rStore, bStore, realNewer);
   const stamp = Math.max(clock(rScopes), clock(bScopes), clock(rStar), clock(bStar));
 
-  // Same payload + same tabId + same stamp => nothing to do. Comparing the payload rather than
-  // the raw text is what stops every run from rewriting all three keys forever.
   const wrapped = (wrap, value) => JSON.stringify({ value, tabId: wrap?.tabId ?? null, timestamp: stamp });
 
   // A key absent from a profile is only created when the merge actually has something to put in
   // it. Otherwise a pair of profiles that never starred a group would each gain an empty starred
   // key on the first run — a write that changes nothing and invents state neither app wrote.
   const changed = (own, mergedValue, empty) =>
-    own ? wrapped(own, mergedValue) !== wrapped(own, own.value) : !empty;
+    own ? JSON.stringify(mergedValue) !== JSON.stringify(own.value) : !empty;
 
   const forSide = (ownScopes, ownStar, ownStore) => {
     const out = {};
-    if (scopes && changed(ownScopes, scopes, Object.keys(scopes).length === 0)) {
-      out[SCOPES_KEY] = wrapped(ownScopes, scopes);
-    }
+    const mirrorDiffers = ownScopes ? canonicalScopes(ownScopes.value) !== canonicalScopes(scopes) : !!scopes;
+    if (scopes && mirrorDiffers) out[SCOPES_KEY] = wrapped(ownScopes, scopes);
     if (changed(ownStar, starred, starred.length === 0)) out[STARRED_KEY] = wrapped(ownStar, starred);
     // The store is the one that matters, so it is rewritten whenever either grouping field in it
     // differs — and only those two fields change. sidebarWidth, collapsedGroups, the pinned order
     // and everything else are carried through from this profile untouched.
     if (ownStore?.state) {
-      const sameScopes = JSON.stringify(ownStore.state.customGroupsByScope || null) === JSON.stringify(scopes);
+      const sameScopes = canonicalScopes(ownStore.state.customGroupsByScope) === canonicalScopes(scopes);
       const sameGroupBy = JSON.stringify(ownStore.state.groupByByMode || {}) === JSON.stringify(groupBy);
       if (!sameScopes || !sameGroupBy) {
         out[STORE_KEY] = JSON.stringify({
@@ -285,6 +282,32 @@ export function planMerge(realText, buildText) {
     real: forSide(rScopes, rStar, rStore),
     build: forSide(bScopes, bStar, bStore),
   };
+}
+
+// Compare two scope maps by MEANING, not by byte layout. JSON.stringify is key-order sensitive
+// and the merge necessarily reorders: mergeAssignments spreads one side over the other, so the
+// keys come out in a different sequence from the one the app wrote even when every entry is
+// identical. Comparing raw text therefore reported "differs" forever and rewrote both profiles on
+// every single run. Group ORDER is display state and stays significant; assignment and order-map
+// KEY order is not, so it is normalised away.
+export function canonicalScopes(value) {
+  if (!value) return "null";
+  const sortKeys = (o) =>
+    Object.fromEntries(
+      Object.entries(o || {})
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([k, v]) => [k, v]),
+    );
+  const scopes = {};
+  for (const scope of Object.keys(value).sort()) {
+    const s = value[scope] || {};
+    scopes[scope] = {
+      groups: (s.groups || []).map((g) => [g.id, g.name]), // array order is meaningful
+      assignments: sortKeys(s.assignments),
+      order: sortKeys(s.order),
+    };
+  }
+  return JSON.stringify(scopes);
 }
 
 // For the report: how many groups / assignments a parsed scopes value describes.
