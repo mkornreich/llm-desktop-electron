@@ -40,6 +40,41 @@ if [ ! -x "$HELPERS/disclaimer" ]; then
   chmod +x "$HELPERS/disclaimer"
 fi
 
+# Two of the app's bundled helper binaries live in Contents/Helpers of the signed Claude.app
+# and simply are not present in a stock Electron bundle, so the features that need them fail
+# quietly. Both are already on this machine inside the real install, so link them into the
+# paths this build actually looks in. Verified paths, taken from the bundle's own resolvers:
+#
+#   chrome-native-host  isPackaged ? <exe>/../Helpers/chrome-native-host
+#                                  : <appPath>/../../packages/desktop/chrome-native-host/artifacts/
+#   claude-ios-sim      isPackaged ? <resources>/../Helpers/Claude iOS Sim.app/...
+#                                  : <appPath>/../../packages/desktop/claude-ios-sim/build/bin/...
+#
+# getAppPath() here is <electron>/Contents/Resources/app.asar, so ../../ is Contents/ — which is
+# exactly the path the log complained about:
+#   [Chrome Extension MCP] Skipping native host setup: binary not found at …/Contents/packages/…
+REAL_HELPERS="$HOME/Applications/Claude.app/Contents/Helpers"
+[ -d "$REAL_HELPERS" ] || REAL_HELPERS="/Applications/Claude.app/Contents/Helpers"
+if [ -d "$REAL_HELPERS" ]; then
+  CONTENTS="node_modules/electron/dist/Electron.app/Contents"
+  if [ -x "$REAL_HELPERS/chrome-native-host" ]; then
+    CNH_DIR="$CONTENTS/packages/desktop/chrome-native-host/artifacts"
+    if [ ! -e "$CNH_DIR/chrome-native-host" ]; then
+      mkdir -p "$CNH_DIR"
+      ln -sfn "$REAL_HELPERS/chrome-native-host" "$CNH_DIR/chrome-native-host"
+      echo "[run] linked chrome-native-host from the real install (Chrome extension bridge)"
+    fi
+  fi
+  if [ -d "$REAL_HELPERS/Claude iOS Sim.app" ]; then
+    SIM_DIR="$CONTENTS/packages/desktop/claude-ios-sim/build/bin"
+    if [ ! -e "$SIM_DIR/Claude iOS Sim.app" ]; then
+      mkdir -p "$SIM_DIR"
+      ln -sfn "$REAL_HELPERS/Claude iOS Sim.app" "$SIM_DIR/Claude iOS Sim.app"
+      echo "[run] linked Claude iOS Sim.app from the real install (iOS Simulator support)"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------------------
 # Provider selection (.provider dot file, or PROVIDER=… for one launch).
 #
