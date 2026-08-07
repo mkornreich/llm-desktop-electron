@@ -319,3 +319,44 @@ repo only patches that bundle minimally, and silencing a warning that accurately
 permission model would be the wrong trade.
 
 [issue #9]: https://github.com/mkornreich/llm-desktop-electron/issues/9
+
+## Claude Desktop vs this build, with Anthropic models
+
+What you actually lose by running the unpacked app under stock Electron with
+`PROVIDER=anthropic`, i.e. Claude answering exactly as shipped. Ranked, with the evidence, and
+whether it is fixable here or inherent to running unsigned.
+
+Three of these were **fixed while writing this section** — see the ✅ rows.
+
+| Feature | State | Evidence | Fixable here? |
+|---|---|---|---|
+| Chrome extension bridge | ✅ **fixed** | was `Skipping native host setup: binary not found`; now `Installed native host manifest for Chrome` / `Watching Chrome for extension changes` | Yes — `chrome-native-host` is in the real install's `Contents/Helpers`; `run.sh` links it |
+| Installed extensions | ✅ **fixed** | was `Extensions: No extensions directory found`, `0 extensions`; now `Checking for updates for 1 extensions … AWS API MCP Server` | Yes — nothing blocked it (`isDesktopExtensionEnabled: true`, signature not required); the directory was simply never shared |
+| iOS Simulator | ✅ **path fixed**, function unverified | `Claude iOS Sim.app` absent from Helpers; unpackaged the resolver looks at `<appPath>/../../packages/desktop/claude-ios-sim/build/bin/` | Yes — linked from the real install. Lazy, so nothing exercises it at startup |
+| Touch ID / passkeys | **BROKEN** | `FIDO: touch_id_context.mm:89 Touch ID authenticator unavailable because keychain-access-group…` | No — the keychain access group is bound to the signed bundle identity |
+| Device attestation | **BROKEN** | `DeviceRegistry_$_signCreateSessionBind` IPC errors; `ant-device-registry.json` is `none:1786038606585` here vs `pk1:e885537b…` in the real install | No — attestation signs with the app's own identity |
+| Buddy companion hardware | **BROKEN** | 8 × `claude.buddy_$_BuddyBleTransport_$_reportState` handler errors | Unlikely — BLE needs a Bluetooth entitlement the stock binary lacks |
+| Cowork VM / virtualization | **BROKEN** | the bundle's own status enum includes `virtualization_entitlement_missing` and `virtualization_not_available`; `vm_bundles` (11 GB) and `claude-code-vm` (242 MB) exist only in the real install | No — the entitlement cannot be self-granted |
+| Waking a sleeping Mac for a timer | **BROKEN** | `[wake-scheduler] DEV BUILD — daemon registration will fail. The dev Electron bundle has no Contents/Library/LaunchDaemons/ plist` | No — needs a LaunchDaemon in a signed bundle |
+| Auto-update | **BROKEN** | `[updater] App is not installed, not enabling auto-updates`; `AutoUpdater_$_updaterState` IPC error | No, and not wanted — this build is pinned deliberately |
+| `claude://` deep links | **BROKEN** | one `setAsDefaultProtocolClient` call site; OS registration belongs to the signed bundle | No |
+| Remote debugging | **BROKEN by design** | the app's own signed CDP gate refuses `--remote-debugging-port` | No |
+| Global hotkey | **DEGRADED** | `No accessibility permissions, using basic hotkey detection` | Partly — granting Accessibility to the Electron binary would restore full detection |
+| Scheduled tasks | **WORKS** | `[wake-scheduler] registered claim id=scheduled-tasks`, `[CCDScheduledTasks] Confirmed task run for: daily-frontpage-audit` | n/a — only the sleeping-machine case fails |
+| Notifications | **WORKS** | `NotificationService initialized with UNUserNotificationCenter (macOS)`, and a live `Showed Swift permission notification` | n/a |
+| Sessions, memory, transcripts | **WORKS, shared** | `~/.claude` is common to both apps; both session stores are now symlinked | n/a |
+| `MISSING_TRANSLATION` warnings | **COSMETIC** | `resources/i18n` was not in the asar, so menu strings use embedded English | Yes, by supplying the locale files |
+
+### The pattern worth remembering
+
+Everything in the ✅ rows had the same shape: **a file that was simply never copied**, not a
+capability the OS refused. The signed app ships three binaries in `Contents/Helpers` —
+`chrome-native-host`, `Claude iOS Sim.app`, `disclaimer` — and a stock Electron bundle has none
+of them. `run.sh` had been faking only the third with a passthrough shim; the other two were
+silently disabling their features.
+
+Everything in the BROKEN rows had the other shape: **identity**. Touch ID, device attestation,
+BLE, virtualization, LaunchDaemons and protocol registration all key off the code signature or an
+entitlement, and none of those can be reproduced by an unsigned binary running someone else's
+JavaScript. That line — copied-file problems are fixable, identity problems are not — predicts
+the outcome better than any list of features does.

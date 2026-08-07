@@ -43,6 +43,10 @@
 # TWO stores are shared, both through the same share_store() helper in run.sh:
 #
 #   claude-code-sessions        one local_<uuid>.json per session
+#   Claude Extensions           installed DXT / MCP extensions, plus their settings. Nothing
+#                               blocked them here (isDesktopExtensionEnabled: true, signature
+#                               not required) — the directory was simply never copied, so the
+#                               real install's extensions were invisible to this build.
 #   local-agent-mode-sessions   the cowork / agent-mode store: the same per-session json PLUS
 #                               a local_<uuid>/ workspace directory each, the skills-plugin
 #                               payload, and server-refreshed cowork-*-cache.json files

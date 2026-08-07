@@ -275,6 +275,13 @@ if [ "${SYNC_VAL:-1}" != "0" ]; then
   # server-refreshed cowork-*-cache.json files. Its .lock files are per-task files inside
   # those workspaces, not a database lock, so sharing is safe the same way.
   share_store "local-agent-mode-sessions" "*" "agent-mode sessions"
+  # Installed extensions (DXT / MCP servers). This build reports
+  #   isDesktopExtensionEnabled: true, isDesktopExtensionSignatureRequired: false
+  #   Extensions: No extensions directory found
+  # so nothing blocks them here — the directory simply was never copied, and the install the
+  # real app has was invisible. Plain files, so sharing works the same way.
+  share_store "Claude Extensions" "*" "extensions"
+  share_store "Claude Extensions Settings" "*" "extension settings"
 fi
 
   # ---- claude.ai UI state, which is where GROUPING lives (issue #3) ----
