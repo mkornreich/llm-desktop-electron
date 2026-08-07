@@ -127,12 +127,22 @@ test("the script refuses to re-run once the store is shared", () => {
   assert.match(src, /already a symlink — the merge has been done/);
 });
 
-test("it refuses to merge under a running app unless forced", () => {
+test("it refuses to merge under a running app unless forced", async () => {
   const src = fs.readFileSync(new URL("./merge-sessions.mjs", import.meta.url), "utf8");
   assert.match(src, /refusing to merge while/);
-  assert.match(src, /--user-data-dir=\$\{path\.join\(REPO, "user-data"\)\}/,
-    "must detect THIS build, not only Claude Desktop");
-  assert.match(src, /\/Claude\.app\/Contents\/MacOS\/Claude/);
+
+  // The detection itself lives in lib/procs.mjs, so test the behaviour rather than the text.
+  // It must name BOTH apps: an earlier version looked only for Claude Desktop, and a later one
+  // used pgrep -f, which on macOS cannot see the Claude Desktop process at all and silently
+  // reported nothing running. Both failures made this guard a no-op.
+  const { liveApps } = await import("./lib/procs.mjs");
+  const ps = [
+    "26468 /Users/mk/Applications/Claude.app/Contents/MacOS/Claude",
+    "31873 /repo/electron/dist/Electron.app/Contents/MacOS/Electron --user-data-dir=/repo/user-data",
+  ].join("\n");
+  assert.deepEqual(liveApps("/repo", ps), ["Claude Desktop", "this build"]);
+  assert.deepEqual(liveApps("/repo", ps.split("\n")[1]), ["this build"], "detects THIS build on its own");
+  assert.deepEqual(liveApps("/repo", ps.split("\n")[0]), ["Claude Desktop"]);
 });
 
 test("writes are atomic and backed up", () => {

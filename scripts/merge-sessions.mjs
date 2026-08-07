@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
+import { liveApps } from "./lib/procs.mjs";
 import { pathToFileURL } from "node:url";
 
 // Two stores get shared, and they hold different things:
@@ -86,9 +87,6 @@ export function stamp(file) {
   try { return { at: fs.statSync(file).mtimeMs, from: "mtime" }; } catch { return { at: 0, from: "none" }; }
 }
 
-const running = (pattern) => {
-  try { execFileSync("pgrep", ["-f", pattern], { stdio: "pipe" }); return true; } catch { return false; }
-};
 
 // Decide, for every file in the union, what happens to it. Pure apart from reading the two
 // trees, so the resolution rules can be tested without touching a real profile.
@@ -123,10 +121,7 @@ function main() {
 
   // Both apps hold these files open and rewrite them as sessions change. Merging underneath a
   // running app can lose whichever write lands after we read.
-  const live = [
-    ["Claude Desktop", "/Claude.app/Contents/MacOS/Claude"],
-    ["this build", `--user-data-dir=${path.join(REPO, "user-data")}`],
-  ].filter(([, pat]) => running(pat)).map(([name]) => name);
+  const live = liveApps(REPO);
   if (live.length && !DRY && !FORCE) {
     console.error(`refusing to merge while ${live.join(" and ")} ${live.length > 1 ? "are" : "is"} running.`);
     console.error("quit them first, or pass --force if you know the sessions are idle.");

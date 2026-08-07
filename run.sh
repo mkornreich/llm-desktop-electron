@@ -284,53 +284,28 @@ if [ "${SYNC_VAL:-1}" != "0" ]; then
   share_store "Claude Extensions Settings" "*" "extension settings"
 fi
 
-  # ---- claude.ai UI state, which is where GROUPING lives (issue #3) ----
-  # Sessions alone are not enough to make the sidebar look like Claude Desktop's. Group
-  # definitions live in the claude.ai origin's Local Storage under
-  # LSS-persisted.dframe-group-scopes (ids like cg-<uuid> with names, e.g. "App Analysis"),
-  # alongside the groupBy mode ("custom"). None of that is in the session files — their 555
-  # distinct key paths contain no group field at all, only chromeTabGroupId, which is
-  # unrelated. So sessions were being refreshed every launch while the state that groups them
-  # was copied once by hand and then went stale.
-  #
-  # This is a whole-directory copy because there is no way to write individual keys into a
-  # Chromium LevelDB without a LevelDB library. That makes the guards below load-bearing.
-  #
-  # And it is a COPY rather than a symlink — unlike the sessions above — because LevelDB
-  # allows exactly one process at a time. Both databases hold an exclusive whole-file
-  # fcntl(F_WRLCK) on their LOCK file while their app runs, verified with F_GETLK. Point two
-  # apps at one directory and the second to start cannot open its Local Storage at all. A
-  # native binding does not help: it takes the same lock on the same inode.
-  #
-  # NOTE this block is deliberately OUTSIDE the session gate. It used to be nested inside it,
-  # so SYNC_CLAUDE_UI_STATE=1 silently did nothing whenever SYNC_CLAUDE_SESSIONS was 0.
-  SYNC_UI_VAL=$(sed -n 's/^SYNC_CLAUDE_UI_STATE=//p' .sync 2>/dev/null | head -1)
-  if [ -n "${SYNC_UI_VAL:-}" ] && [ "${SYNC_UI_VAL}" != "0" ]; then
-    SRC_LS="$HOME/Library/Application Support/Claude/Local Storage"
-    DST_LS="$PWD/user-data/Local Storage"
-    if pgrep -f "/Claude.app/Contents/MacOS/Claude" >/dev/null 2>&1; then
-      # Copying an open LevelDB can capture a torn write and leave the destination unreadable,
-      # which would lose this build's own UI state for no gain.
-      echo "[run] NOTE: Claude Desktop is running — skipping UI-state sync. Quit it and relaunch to pick up grouping changes."
-    elif [ -d "$SRC_LS" ]; then
-      if [ -d "$DST_LS" ]; then
-        rm -rf "$DST_LS.bak"
-        cp -R "$DST_LS" "$DST_LS.bak"
-      fi
-      if rsync -a --delete "$SRC_LS/" "$DST_LS/" 2>/dev/null; then
-        # Verify the copy actually carries the grouping keys; restore the backup if not.
-        if grep -raq "dframe-group-scopes" "$DST_LS" 2>/dev/null; then
-          groups=$(grep -raoh "cg-[0-9a-f-]\{36\}" "$DST_LS" 2>/dev/null | sort -u | wc -l | tr -d ' ')
-          echo "[run] synced claude.ai UI state (grouping): ${groups} group definition(s); previous state kept at Local Storage.bak"
-        else
-          echo "[run] WARN: copied UI state has no grouping keys — restoring the previous state"
-          rm -rf "$DST_LS"; [ -d "$DST_LS.bak" ] && cp -R "$DST_LS.bak" "$DST_LS"
-        fi
-      else
-        echo "[run] WARN: UI-state sync failed — leaving this build's state untouched"
-      fi
-    fi
-  fi
+# ---- claude.ai SIDEBAR GROUPING, merged both ways (issue #3) ----
+# Sessions alone are not enough to make the sidebar look like Claude Desktop's. The groups, and
+# which session belongs to which group, live in the claude.ai origin's Local Storage under
+# LSS-persisted.dframe-group-scopes — ids like cg-<uuid> with names, an `assignments` map and a
+# per-group `order`, alongside the groupBy mode in dframe-store. None of that is in the session
+# files: their 555 distinct key paths contain no group field at all, only the unrelated
+# chromeTabGroupId. So sessions were shared while the state that groups them was not.
+#
+# Local Storage cannot be symlinked the way the session store above is: LevelDB allows exactly
+# one process at a time (each app holds an exclusive fcntl(F_WRLCK) on its LOCK file while it
+# runs, verified with F_GETLK), so the second app to start could not open it at all.
+#
+# This used to be a whole-directory copy, which was wrong twice over. It replaced all ~371 of the
+# destination's claude.ai keys to fix 3 — hence its default-off knob — and being one-way it threw
+# away whatever the destination had done itself; both profiles held groups and assignments the
+# other lacked. scripts/sync-grouping.mjs instead merges the union of the two, key by key, and
+# writes only the profiles whose app is closed. At this point in the launch that is always at
+# least this build, and Claude Desktop too if it happens to be shut.
+SYNC_GROUPING=$(sed -n 's/^SYNC_CLAUDE_GROUPING=//p' .sync 2>/dev/null | head -1)
+if [ "${SYNC_GROUPING:-1}" != "0" ] && command -v node >/dev/null 2>&1; then
+  node scripts/sync-grouping.mjs --launch 2>&1 | sed 's/^/[run] /'
+fi
 
 # Not `exec`. Replacing the shell would leave no way to do anything after the app quits, and
 # the one moment a Local Storage write-back is possible is exactly when the app has released
@@ -341,6 +316,14 @@ fi
   "${EXTRA[@]+"${EXTRA[@]}"}" \
   "$@"
 STATUS=$?
+
+# Push grouping changes made in this session back out. This is the reason the launch does not
+# `exec`: the build's LevelDB lock is only free once the app has quit, so this is the one moment
+# a write to it is possible — and the merge is symmetric, so if Claude Desktop is closed too it
+# receives everything done here. If it is open, the write is skipped and the next launch does it.
+if [ "${SYNC_GROUPING:-1}" != "0" ] && command -v node >/dev/null 2>&1; then
+  node scripts/sync-grouping.mjs --launch 2>&1 | sed 's/^/[run] /'
+fi
 
 echo "[run] app exited (status ${STATUS})"
 exit "$STATUS"
