@@ -1097,3 +1097,34 @@ use over time rather than one synthetic prompt. The number to watch is the count
 `context exceeded` lines in `proxy.log`.
 
 [issue #14]: https://github.com/mkornreich/llm-desktop-electron/issues/14
+
+## Switching the main model to gpt-5.6-sol
+
+Measured on the identical 236-tool request this app really sends, four samples each:
+
+| | gpt-5.3-codex | gpt-5.6-sol |
+|---|---|---|
+| latency | 105.5s / 77.5s / 54.2s / 63.8s | **4.2s / 5.4s / 7.1s / 4.9s** |
+| context | 272k (253,339 ok, ~284k rejected) | **≥622,229 accepted** |
+| `reasoning.effort: max` | steps down to `xhigh` | **accepted** |
+| tool call | ✓ correct, out=19 | ✓ correct, out=19 |
+
+~14× faster at the median with more than twice the window. What these numbers say nothing
+about is **output quality on real coding work**, which is the axis that matters most and is not
+measured here.
+
+`OPENAI_API=responses` is **mandatory** alongside it. The surface heuristic is "does the name
+contain codex", so sol would otherwise land on Chat Completions where the 128-tool cap drops
+108 of 236 tools, and where the API refuses the request outright:
+
+```
+400 Function tools with reasoning_effort are not supported for gpt-5.6-sol
+    in /v1/chat/completions
+```
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` moved 272000 → 600000 to match. Change it whenever the model
+changes: too high and the CLI never compacts and the proxy truncates instead, too low and it
+compacts for nothing.
+
+Verified live after the switch — `model=gpt-5.6-sol api=responses`, real turns at `tools=236`
+with **zero** tool-cap drops, zero context overflows, zero effort fallbacks and zero empty turns.

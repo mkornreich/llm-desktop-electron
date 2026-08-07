@@ -14,7 +14,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
-        rememberUnsupported, stripUnsupported } =
+        rememberUnsupported, stripUnsupported,
+        compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1532,4 +1533,62 @@ test("the tool caps that make the surface choice matter are unchanged", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /MAX_TOOLS_CHAT = parseInt\(process\.env\.OPENAI_MAX_TOOLS \|\| "128"/);
   assert.match(src, /MAX_TOOLS_RESPONSES = parseInt\([^)]*\) \|\| Infinity/);
+});
+
+// ---------- an oversized single message is now compactable ----------
+//
+// Both ladder compactors only touch tool results, so one giant message — a pasted log, a 300k
+// document — was untouchable and the whole ladder gave up with "nothing left to compact",
+// failing the turn with no content. Found while A/B testing the compact window.
+
+test("the largest oversized message is truncated when no tool result can be trimmed", () => {
+  const big = "x".repeat(MAX_TEXT_CHARS + 50_000);
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: big }] },
+    { role: "user", content: [{ type: "input_text", text: "the recent turn" }] },
+  ];
+  const r = compactOversizedResponsesText(input);
+  assert.equal(r.trimmed, 1);
+  assert.equal(r.reclaimed, 50_000);
+  const kept = r.input[0].content[0].text;
+  assert.ok(kept.length < big.length);
+  assert.match(kept, /characters trimmed by the proxy/, "the cut is stated, not silent");
+  assert.equal(r.input[1].content[0].text, "the recent turn", "the most recent item is untouched");
+});
+
+test("it never touches the most recent item, even if that is the big one", () => {
+  const big = "y".repeat(MAX_TEXT_CHARS + 1000);
+  const r = compactOversizedResponsesText([{ role: "user", content: [{ type: "input_text", text: big }] }]);
+  assert.equal(r.trimmed, 0, "a single item is always the most recent one");
+});
+
+test("nothing under the threshold is touched", () => {
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: "small" }] },
+    { role: "user", content: [{ type: "input_text", text: "also small" }] },
+  ];
+  assert.equal(compactOversizedResponsesText(input).trimmed, 0);
+  assert.equal(compactOversizedChatText([{ role: "user", content: "small" }, { role: "user", content: "x" }]).trimmed, 0);
+});
+
+test("the chat surface truncates its string content the same way", () => {
+  const big = "z".repeat(MAX_TEXT_CHARS + 20_000);
+  const r = compactOversizedChatText([{ role: "user", content: big }, { role: "user", content: "recent" }]);
+  assert.equal(r.trimmed, 1);
+  assert.equal(r.reclaimed, 20_000);
+  assert.match(r.messages[0].content, /characters trimmed by the proxy/);
+  assert.equal(r.messages[1].content, "recent");
+});
+
+test("all three ladder walks fall back to it", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.equal((src.match(/compactOversized(Responses|Chat)Text\((body|payload)\./g) || []).length, 3,
+    "chat ladder, responses ladder and the mid-stream loop");
+  assert.equal((src.match(/no tool results left to trim/g) || []).length, 3, "and each says so");
+});
+
+test("OPENAI_API is no longer computed-and-ignored", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const code = src.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+  assert.ok(!/const USE_RESPONSES/.test(code), "the dead startup constant is gone");
 });

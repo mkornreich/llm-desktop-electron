@@ -44,7 +44,6 @@ const OPENAI_MODEL =
 // everything else uses Chat Completions. Override with OPENAI_API=responses|chat.
 const OPENAI_API = (process.env.OPENAI_API || PROJECT.OPENAI_API ||
   (/codex/i.test(OPENAI_MODEL) ? "responses" : "chat")).toLowerCase();
-const USE_RESPONSES = OPENAI_API === "responses";
 // A faster/cheaper model for the auto-mode safety classifier (a separate LLM call
 // Claude Code makes before each risky action). The main coding model can be slow
 // for these latency-sensitive checks, so route them to a small fast model here.
@@ -523,6 +522,53 @@ const CONTEXT_ERROR_RE = /exceeds the context window|context[_ ]length[_ ]exceed
 // dropping one side breaks the pairing and OpenAI rejects the request. Truncating content
 // keeps the structure exactly intact.
 const TRIMMED = "[earlier tool output trimmed by the proxy to fit the model's context window]";
+
+// Last resort, when the ladder above finds nothing to trim.
+//
+// Both compactors only touch TOOL RESULTS, so a single oversized message — a pasted log, a
+// 300k-token document — is untouchable and the whole ladder reports
+//   ! context exceeded mid-stream and nothing left to compact (keep=96)
+// leaving the turn to fail with no content. Found while A/B testing the compact window.
+//
+// So: cut the single largest oversized text payload down to OPENAI_MAX_TEXT_CHARS, oldest
+// first, leaving the most recent item alone. One per call, so successive ladder steps shrink
+// successively smaller offenders instead of mangling everything at once.
+const MAX_TEXT_CHARS = parseInt(process.env.OPENAI_MAX_TEXT_CHARS ||
+  PROJECT.OPENAI_MAX_TEXT_CHARS || "400000", 10) || 400000;
+const textCut = (n) => `\n\n[… ${n} characters trimmed by the proxy to fit the context window …]`;
+
+function truncateLargestText(items, getText, setText) {
+  let best = -1, bestLen = 0;
+  for (let i = 0; i < items.length - 1; i++) {           // never the most recent item
+    const t = getText(items[i]);
+    if (typeof t === "string" && t.length > MAX_TEXT_CHARS && t.length > bestLen) {
+      best = i; bestLen = t.length;
+    }
+  }
+  if (best < 0) return { items, trimmed: 0, reclaimed: 0 };
+  const cut = bestLen - MAX_TEXT_CHARS;
+  const out = items.slice();
+  out[best] = setText(out[best], getText(out[best]).slice(0, MAX_TEXT_CHARS) + textCut(cut));
+  return { items: out, trimmed: 1, reclaimed: cut };
+}
+
+// Responses items carry text in content[].text; chat messages in .content (string or parts).
+function compactOversizedResponsesText(input) {
+  if (!Array.isArray(input)) return { input, trimmed: 0, reclaimed: 0 };
+  const get = (it) => (Array.isArray(it?.content)
+    ? it.content.filter((c) => typeof c?.text === "string").map((c) => c.text).join("")
+    : undefined);
+  const set = (it, text) => ({ ...it, content: [{ type: it.role === "assistant" ? "output_text" : "input_text", text }] });
+  const r = truncateLargestText(input, get, set);
+  return { input: r.items, trimmed: r.trimmed, reclaimed: r.reclaimed };
+}
+function compactOversizedChatText(messages) {
+  if (!Array.isArray(messages)) return { messages, trimmed: 0, reclaimed: 0 };
+  const get = (m) => (typeof m?.content === "string" ? m.content : undefined);
+  const set = (m, content) => ({ ...m, content });
+  const r = truncateLargestText(messages, get, set);
+  return { messages: r.items, trimmed: r.trimmed, reclaimed: r.reclaimed };
+}
 
 function compactResponsesInput(input, keepRecent) {
   if (!Array.isArray(input)) return { input, trimmed: 0, reclaimed: 0 };
@@ -1323,7 +1369,11 @@ async function callOpenAI(payload) {
       if (CONTEXT_ERROR_RE.test(t1)) {
         let body = retry || payload;
         for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
-          const { messages, trimmed, reclaimed } = compactChatMessages(body.messages, keep);
+          let { messages, trimmed, reclaimed } = compactChatMessages(body.messages, keep);
+          if (!trimmed) {
+            ({ messages, trimmed, reclaimed } = compactOversizedChatText(body.messages));
+            if (trimmed) log(`  ! no tool results left to trim — truncated an oversized message by ~${Math.round(reclaimed / 4000)}k tokens`);
+          }
           if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
           log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} messages); retrying`);
           body = { ...body, messages };
@@ -1519,7 +1569,11 @@ async function callResponses(payload) {
     else if (CONTEXT_ERROR_RE.test(txt)) {
       let body = payload;
       for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
-        const { input, trimmed, reclaimed, summarised } = await compactResponsesInputSummarised(body.input, keep);
+        let { input, trimmed, reclaimed, summarised } = await compactResponsesInputSummarised(body.input, keep);
+        if (!trimmed) {
+          ({ input, trimmed, reclaimed } = compactOversizedResponsesText(body.input));
+          if (trimmed) log(`  ! no tool results left to trim — truncated an oversized message by ~${Math.round(reclaimed / 4000)}k tokens`);
+        }
         if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
         log(`  ! context exceeded — compacted ${trimmed} tool result(s)${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
         body = { ...body, input };
@@ -1843,8 +1897,12 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   while (payload && allowContinue && streamError && CONTEXT_ERROR_RE.test(streamError) &&
          !hasTool && textLen === 0 && compactStartIndex + ctxCompacted < COMPACT_STEPS.length) {
     const keep = COMPACT_STEPS[compactStartIndex + ctxCompacted++];
-    const { input, trimmed, reclaimed, summarised } =
+    let { input, trimmed, reclaimed, summarised } =
       await compactResponsesInputSummarised(payload.input, keep);
+    if (!trimmed) {
+      ({ input, trimmed, reclaimed } = compactOversizedResponsesText(payload.input));
+      if (trimmed) log(`  ! no tool results left to trim — truncated an oversized message by ~${Math.round(reclaimed / 4000)}k tokens`);
+    }
     if (!trimmed) { log(`  ! context exceeded mid-stream and nothing left to compact (keep=${keep})`); break; }
     log(`  -> context exceeded mid-stream — compacted ${trimmed} tool result(s)` +
         `${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens` +
@@ -2037,6 +2095,7 @@ export { makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, b
          pruneToolArgs, emptyTurnNotice,
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
          compactResponsesInputSummarised, summariseDropped,
+         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
          toResponses, toOpenAI, pickModel,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,

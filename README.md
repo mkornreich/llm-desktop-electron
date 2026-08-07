@@ -55,10 +55,10 @@ Everything has a default; set only what you want to change.
 | Variable | Default | What it does |
 |---|---|---|
 | `OPENAI_API_KEY` | — | Required. Also readable from a `KEY=VALUE` dot file (see below). |
-| `OPENAI_MODEL` | `gpt-5.3-codex` | Any OpenAI model id. Names containing `codex` are routed to the **Responses** API automatically. |
+| `OPENAI_MODEL` | `gpt-5.6-sol` | Any OpenAI model id. Names containing `codex` route to **Responses** automatically; anything else needs `OPENAI_API=responses` set explicitly, or it lands on Chat Completions and its 128-tool cap. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint. |
 | `PORT` | `8123` | |
-| `OPENAI_API` | auto | `responses` or `chat`, to override the automatic choice. |
+| `OPENAI_API` | `responses` | `responses` or `chat`, overriding the name heuristic. **Required for any non-codex model**: this app sends 236 tools and Chat Completions caps at 128. |
 | `OPENAI_REASONING_EFFORT` | `max` | The proxy steps down to the highest value your model accepts. |
 | `OPENAI_CLASSIFIER_SAFETY_MODEL` | `gpt-5.4` | Model for Claude Code's auto-mode safety verdict. It has a 60-second deadline and **denies the action** when it expires, so this wants a fast model — see [openai-proxy/README.md](openai-proxy/README.md#is-the-classifier-still-calling-anthropic-issue-11) for the measurements. |
 

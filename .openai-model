@@ -2,9 +2,31 @@
 # The API key stays in ~/.dbeaver-ai-complete; only model choices live here.
 # Precedence: OPENAI_MODEL env var > this file > ~/.dbeaver-ai-complete > default (gpt-4.1).
 
-# Main coding model. gpt-5.3-codex is OpenAI's SOTA coding model, served only via
-# the Responses API — the proxy auto-routes codex models there.
-OPENAI_MODEL=gpt-5.3-codex
+# Main coding model.
+#
+# gpt-5.6-sol, measured against gpt-5.3-codex on the identical 236-tool request this app
+# actually sends, four samples each:
+#
+#   latency   codex 105.5s / 77.5s / 54.2s / 63.8s      sol 4.2s / 5.4s / 7.1s / 4.9s
+#   context   codex 272k (253,339 ok, ~284k rejected)   sol >=622,229 accepted
+#   effort    codex steps down to xhigh                 sol accepts max
+#   tool call both correct, identical output tokens
+#
+# ~14x faster at the median with a >2x context window, which is also why the 173 logged
+# context-overflow events should largely stop. Output QUALITY on real coding tasks is not
+# measured — that is the one axis these numbers say nothing about.
+OPENAI_MODEL=gpt-5.6-sol
+
+# REQUIRED with a non-codex model, and not optional.
+#
+# The proxy's surface heuristic is "does the name contain codex", so gpt-5.6-sol would
+# otherwise land on Chat Completions, where two things go wrong:
+#   * the 128-tool cap bites — this app sends 236, so 108 get dropped
+#   * with tools present the API refuses outright:
+#       400 Function tools with reasoning_effort are not supported for gpt-5.6-sol
+#           in /v1/chat/completions
+# Forcing the Responses API gives all 236 tools and correct tool calls.
+OPENAI_API=responses
 
 # Fast model for Claude Code's auto-mode SAFETY CLASSIFIER — a separate, latency-
 # sensitive LLM call made before each risky action. Routing it to a small fast
@@ -82,12 +104,14 @@ OPENAI_MAX_TURN_OUTPUT_TOKENS=56000
 # Semantics, read out of the CLI (function R7):
 #   window   = Math.min(<model's own window>, max(100000, value))   value capped at 1e6
 #   usable   = window - min(maxOutputTokens, 20000)                 i.e. a 20k output reserve
-# so 272000 leaves 252,000 usable — just under the 253,339 tokens the API demonstrably
-# accepts for this model (bisected: 253,339 ok, ~284k rejected -> a 272k window).
+# so 600000 leaves 580,000 usable, under the 622,229 tokens gpt-5.6-sol demonstrably accepts.
+# It was 272000 while the main model was gpt-5.3-codex, whose window is 272k (bisected:
+# 253,339 ok, ~284k rejected). Change this whenever OPENAI_MODEL changes — too high and the
+# CLI never compacts and the proxy has to truncate; too low and it compacts for no reason.
 #
 # Only exported in openai mode, which is what we want: in anthropic mode the real Claude
 # genuinely has a 1M window and forcing this would shrink it for no reason.
 #
 # Raise it if you switch OPENAI_MODEL to something bigger — gpt-4.1 accepted 618k, so ~1000000
 # is right there. Values below 100000 are ignored; above 1000000 are capped.
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=600000
