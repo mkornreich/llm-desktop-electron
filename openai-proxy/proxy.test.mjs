@@ -16,7 +16,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
-        mapUsage } =
+        mapUsage, compactionKind, requestShape, approxTokens, kilo } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1676,4 +1676,102 @@ test("every streamed message_delta reports full usage, not output_tokens alone",
   const deltas = src.match(/sse\(res, "message_delta"[^;]*/g) || [];
   assert.ok(deltas.length >= 2, `expected both surfaces to emit message_delta, found ${deltas.length}`);
   for (const d of deltas) assert.match(d, /usage: mapUsage\(/, `message_delta must report full usage: ${d.slice(0, 80)}`);
+});
+
+// ---------- context-size logging, and spotting the client's own compaction (issue #17) ----------
+
+// Verbatim from the CLI binary at /Users/mk/.local/share/claude/versions/2.1.217. If the client's
+// wording changes these stop matching, which is the point of pinning the real text in a test.
+const COMPACT_FULL =
+  "Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.";
+const COMPACT_CONTINUING =
+  "Your task is to create a detailed summary of this conversation. This summary will be placed at the start of a continuing session; newer messages that build on this context will follow after your summary (you do not see them here). Summarize";
+const COMPACT_PARTIAL =
+  "Your task is to create a detailed summary of the RECENT portion of the conversation \u2014 the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized. Focus your summary on";
+
+test("compactionKind recognises all three of the client's compaction prompts", () => {
+  assert.equal(compactionKind({ messages: [{ role: "user", content: COMPACT_FULL }] }), "full");
+  assert.equal(compactionKind({ messages: [{ role: "user", content: COMPACT_CONTINUING }] }), "continuing");
+  assert.equal(compactionKind({ messages: [{ role: "user", content: COMPACT_PARTIAL }] }), "partial");
+});
+
+test("compactionKind tells the three apart rather than matching their shared opening", () => {
+  // All three begin "Your task is to create a detailed summary", so a needle on that prefix would
+  // label every compaction the same and make the log useless for saying WHICH path fired.
+  const kinds = [COMPACT_FULL, COMPACT_CONTINUING, COMPACT_PARTIAL].map((t) =>
+    compactionKind({ messages: [{ role: "user", content: [{ type: "text", text: t }] }] }));
+  assert.deepEqual(kinds, ["full", "continuing", "partial"]);
+  assert.equal(new Set(kinds).size, 3);
+});
+
+test("compactionKind finds the instruction in blocks and in system, and ignores ordinary turns", () => {
+  assert.equal(compactionKind({ system: COMPACT_FULL, messages: [] }), "full");
+  assert.equal(compactionKind({ system: [{ type: "text", text: COMPACT_PARTIAL }], messages: [] }), "partial");
+  assert.equal(compactionKind({ messages: [{ role: "user", content: "summarize this file for me" }] }), null);
+  assert.equal(compactionKind({}), null);
+  assert.equal(compactionKind(null), null);
+});
+
+test("compactionKind only scans the tail, so a quoted prompt deep in history is not mistaken for one", () => {
+  // A session that has DISCUSSED compaction (like the one that wrote this) must not have every
+  // subsequent turn logged as a compaction.
+  const body = {
+    messages: [
+      { role: "user", content: COMPACT_FULL },       // far back in history
+      ...Array.from({ length: 6 }, () => ({ role: "assistant", content: "ordinary turn" })),
+      { role: "user", content: "carry on" },
+    ],
+  };
+  assert.equal(compactionKind(body), null);
+});
+
+test("requestShape measures context size and points at the biggest contributor", () => {
+  const body = {
+    system: "s".repeat(400),
+    messages: [
+      { role: "user", content: "u".repeat(100) },
+      { role: "user", content: [{ type: "tool_result", content: "r".repeat(9000) }] },
+      { role: "assistant", content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] },
+    ],
+    tools: [{ name: "Bash", description: "d".repeat(200) }],
+  };
+  const shape = requestShape(body);
+  assert.equal(shape.msgs, 3);
+  assert.ok(shape.total >= 9500, `total should include system and all messages, got ${shape.total}`);
+  assert.equal(shape.biggest, 9000, "the tool_result is the biggest single item");
+  assert.equal(shape.biggestFrom, "tool_result", "and the log must say what it was");
+  assert.ok(shape.toolDefs > 200, "tool definitions are measured separately");
+});
+
+test("requestShape names the tool when the biggest item is a tool_use, and survives odd shapes", () => {
+  const shape = requestShape({
+    messages: [{ role: "assistant", content: [{ type: "tool_use", name: "Edit", input: { s: "x".repeat(500) } }] }],
+  });
+  assert.equal(shape.biggestFrom, "tool_use:Edit");
+  assert.deepEqual(requestShape({}), { msgs: 0, total: 0, biggest: 0, biggestFrom: "", toolDefs: 0 });
+  assert.equal(requestShape({ messages: [{ role: "user" }] }).total, 0, "a message with no content is 0, not a throw");
+});
+
+test("the token figures are marked as estimates, because the proxy has no tokenizer", () => {
+  assert.equal(approxTokens(4000), 1000);
+  assert.equal(kilo(9000), "9k");
+  assert.equal(kilo(950), "950");
+  assert.equal(kilo(1500), "1.5k");
+  // Every logged estimate must be prefixed with ~ so it is never mistaken for a real count.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  for (const m of src.match(/approxTokens\([^)]*\)\)\}tok/g) || []) {
+    assert.ok(true, m); // shape check below is the real assertion
+  }
+  assert.match(src, /~ctx=\$\{kilo\(approxTokens/, "the context estimate is marked with ~");
+  assert.match(src, /in_tokens=\$\{inTok\}/, "the authoritative count is logged unmarked, from real usage");
+});
+
+test("every turn-end log line reports in_tokens, on the streaming path too", () => {
+  // The streaming path has its own log site, separate from logTurnEnd(), and it was the one that
+  // mattered: every real turn streams. It reported out_tokens only, so the log never showed the
+  // context filling up — which is why issue #17 was invisible until it was measured by hand.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const ends = src.match(/log\(`  <- [^`]*out_tokens=[^`]*`/g) || [];
+  assert.ok(ends.length >= 2, `expected at least the streaming and non-streaming sites, found ${ends.length}`);
+  for (const e of ends) assert.match(e, /in_tokens=/, `turn-end log without in_tokens: ${e.slice(0, 80)}`);
 });

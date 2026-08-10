@@ -1660,12 +1660,103 @@ async function callResponses(payload, isClassifier = false) {
   return res;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Context-size visibility (github issue #17).
+//
+// The log used to say `input=53`, which is the number of MESSAGES, and out_tokens for the reply. So
+// nothing recorded how big a turn's context actually was, and the one thing under investigation —
+// why the client compacts so early — was invisible. Worse, `input=` reads like a token count, which
+// is actively misleading when the question is "how many tokens are we at".
+//
+// Everything here is character-based and marked with ~ in the log, because the proxy has no
+// tokenizer. chars/4 is a rough estimate and undercounts code and JSON; the authoritative number
+// arrives with the response and is logged separately as in_tokens=.
+const CHARS_PER_TOKEN_ESTIMATE = 4;
+const approxTokens = (chars) => Math.round(chars / CHARS_PER_TOKEN_ESTIMATE);
+const kilo = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
+
+// The CLI's own compaction calls. It asks the model to summarise the conversation so it can throw
+// the transcript away, and there are THREE distinct prompts — worth telling apart, because they mean
+// different things about what the client is doing. Taken verbatim from the CLI binary at
+// /Users/mk/.local/share/claude/versions/2.1.217:
+//
+//   full        "...detailed summary of the conversation so far, paying close attention to the
+//                user's explicit requests and your previous actions."
+//   continuing  "...detailed summary of this conversation. This summary will be placed at the start
+//                of a continuing session..."
+//   partial     "...detailed summary of the RECENT portion of the conversation — the messages that
+//                follow earlier retained context. The earlier messages are being kept intact..."
+//
+// Keyed on the distinguishing clause of each rather than the shared opening, so the three do not
+// collide. These are recognised for LOGGING ONLY — a compaction call is a normal turn and is routed
+// and answered exactly like any other.
+const COMPACTION_KINDS = [
+  ["partial", /detailed summary of the RECENT portion of the conversation/i],
+  ["continuing", /summary will be placed at the start of a continuing session/i],
+  ["full", /detailed summary of the conversation so far, paying close attention/i],
+];
+
+function compactionKind(body) {
+  const parts = [];
+  const push = (v) => {
+    if (typeof v === "string") parts.push(v);
+    else if (Array.isArray(v)) for (const b of v) if (typeof b?.text === "string") parts.push(b.text);
+  };
+  push(body?.system);
+  // The instruction arrives as the last user message, so scanning the tail is enough and avoids
+  // walking a 200k-character transcript on every single request.
+  const msgs = Array.isArray(body?.messages) ? body.messages.slice(-2) : [];
+  for (const m of msgs) push(m?.content);
+  const text = parts.join("\n");
+  for (const [kind, re] of COMPACTION_KINDS) if (re.test(text)) return kind;
+  return null;
+}
+
+// Size of a request, and where the bulk of it is. `biggest` is the point: an early compaction is
+// usually one or two enormous tool results rather than a long conversation, and those look identical
+// in a message count.
+function requestShape(body) {
+  const sizeOf = (v) => {
+    if (typeof v === "string") return v.length;
+    if (Array.isArray(v)) return v.reduce((n, b) => n + sizeOf(b), 0);
+    if (v && typeof v === "object") {
+      if (typeof v.text === "string") return v.text.length;
+      if (typeof v.content === "string") return v.content.length;
+      if (v.content) return sizeOf(v.content);
+      return JSON.stringify(v).length;
+    }
+    return 0;
+  };
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  let total = sizeOf(body?.system);
+  let biggest = 0;
+  let biggestFrom = "";
+  for (const m of msgs) {
+    const n = sizeOf(m?.content);
+    total += n;
+    if (n > biggest) {
+      biggest = n;
+      const blocks = Array.isArray(m?.content) ? m.content : [];
+      const tr = blocks.find((b) => b?.type === "tool_result");
+      const tu = blocks.find((b) => b?.type === "tool_use");
+      biggestFrom = tr ? "tool_result" : tu ? `tool_use:${tu.name || "?"}` : m?.role || "?";
+    }
+  }
+  const toolDefs = (body?.tools || []).reduce((n, t) => n + JSON.stringify(t).length, 0);
+  return { msgs: msgs.length, total, biggest, biggestFrom, toolDefs };
+}
+
 function logTurnEnd(surface, resp, toolCount, textLen, ms = null) {
   const status = resp?.status || "completed";
   const reason = resp?.incomplete_details?.reason;
   const out = resp?.usage?.output_tokens ?? "?";
   const verdict = toolCount ? `${toolCount} tool call(s)` : (textLen ? "text only — TURN ENDS, agent waits for user" : "EMPTY");
-  log(`  <- ${surface}${ms != null ? " " + ms + "ms" : ""} status=${status}${reason ? "/" + reason : ""} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
+  // The real input size, straight from the upstream. This is the number the client's context meter
+  // works from, so it is the only trustworthy measure of how full the context is.
+  const u = resp?.usage || {};
+  const cached = u.input_tokens_details?.cached_tokens || 0;
+  const inTok = u.input_tokens != null ? `${u.input_tokens}${cached ? ` (${cached} cached)` : ""}` : "?";
+  log(`  <- ${surface}${ms != null ? " " + ms + "ms" : ""} status=${status}${reason ? "/" + reason : ""} in_tokens=${inTok} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
 }
 
 function respStopReason(resp, hasTool) {
@@ -2030,7 +2121,13 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   }
   recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
-  log(`  <- responses stream ${Date.now() - turnStart}ms stop_reason=${stop} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
+  // in_tokens is the authoritative context size for this turn — the same number the client's context
+  // meter uses. Logged on the STREAMING path too, which is every real turn; without it the log
+  // recorded only how much was written back, never how full the context was getting.
+  const inTok = usage?.input_tokens != null
+    ? `${usage.input_tokens}${usage.input_tokens_details?.cached_tokens ? ` (${usage.input_tokens_details.cached_tokens} cached)` : ""}`
+    : "?";
+  log(`  <- responses stream ${Date.now() - turnStart}ms stop_reason=${stop} in_tokens=${inTok} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
       (thinkLen ? ` thinking=${thinkLen}ch` : "") + ` -> ` +
       (toolCount ? `${toolCount} tool call(s)` :
        stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :
@@ -2083,7 +2180,22 @@ const server = http.createServer(async (req, res) => {
     if (useResp) {
       const { payload, nameMap, schemas, imagesSent } = toResponses(body, model, isCls);
       const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
-      log(`/v1/messages [responses] model=${reqModel}->${model} input=${payload.input.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}${isCls ? ` classifier=${family} reasoning=off` : ""}`);
+      // `msgs=`, not `input=`: the old name read like a token count and was a message count.
+      // ~ctx is the estimated context size, biggest= is where the bulk of it is, and compaction=
+      // fires when the client is asking us to summarise the conversation so it can discard it.
+      const shape = requestShape(body);
+      const compacting = compactionKind(body);
+      log(`/v1/messages [responses] model=${reqModel}->${model} msgs=${shape.msgs} ~ctx=${kilo(approxTokens(shape.total))}tok` +
+        `${shape.biggest ? ` biggest=${kilo(approxTokens(shape.biggest))}tok/${shape.biggestFrom}` : ""}` +
+        ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}/~${kilo(approxTokens(shape.toolDefs))}tok` : ""}` +
+        `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
+        `${isCls ? ` classifier=${family} reasoning=off` : ""}`);
+      if (compacting) {
+        log(`  !! the CLIENT is COMPACTING (${compacting}): it is summarising ${shape.msgs} message(s), ` +
+          `~${kilo(approxTokens(shape.total))} tokens, and will then discard the transcript. ` +
+          `If this fires early in a session, the client's context window is set too low — see ` +
+          `CLAUDE_CODE_AUTO_COMPACT_WINDOW in .openai-model.`);
+      }
       let upstream;
       const startedAt = Date.now();
       try { upstream = await callResponses(payload, isCls); }
@@ -2132,7 +2244,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     const { payload, nameMap, schemas, imagesSent } = toOpenAI(body, model, isCls);
-    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} stream=${!!payload.stream}${payload.tools ? " tools=" + payload.tools.length : ""}${imagesSent ? " images=" + imagesSent : ""}${isCls ? ` classifier=${family}` : ""}`);
+    const shape = requestShape(body);
+    const compacting = compactionKind(body);
+    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} ~ctx=${kilo(approxTokens(shape.total))}tok` +
+      `${shape.biggest ? ` biggest=${kilo(approxTokens(shape.biggest))}tok/${shape.biggestFrom}` : ""}` +
+      ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}/~${kilo(approxTokens(shape.toolDefs))}tok` : ""}` +
+      `${imagesSent ? " images=" + imagesSent : ""}${isCls ? ` classifier=${family}` : ""}`);
+    if (compacting) log(`  !! the CLIENT is COMPACTING (${compacting}): summarising ${shape.msgs} message(s), ~${kilo(approxTokens(shape.total))} tokens`);
     let upstream;
     try { upstream = await callOpenAI(payload, isCls); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
@@ -2155,7 +2273,7 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { mapUsage, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
+export { mapUsage, compactionKind, requestShape, approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice,
