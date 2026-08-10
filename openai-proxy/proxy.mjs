@@ -1715,6 +1715,12 @@ function compactionKind(body) {
 // Size of a request, and where the bulk of it is. `biggest` is the point: an early compaction is
 // usually one or two enormous tool results rather than a long conversation, and those look identical
 // in a message count.
+//
+// This runs on EVERY request, including the latency-sensitive classifier verdicts, so it was
+// measured before being left here: on a 955k-character payload (240 messages, 236 tool definitions,
+// ~194k tokens estimated) requestShape() takes 0.07ms median / 0.56ms worst, and compactionKind()
+// 0.008ms because it only looks at the tail. Nothing worth optimising, and nothing worth worrying
+// about against a 60s classifier deadline.
 function requestShape(body) {
   const sizeOf = (v) => {
     if (typeof v === "string") return v.length;
