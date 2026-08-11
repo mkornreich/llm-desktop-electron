@@ -223,7 +223,7 @@ single `$`, which silently turned display math into inline math.
 ```
 
 `run-openai.sh` starts the proxy and launches the app with
-`PROXY_ANTHROPIC_BASE_URL` + `CLAUDE_CODE_LOCAL_BINARY` set. Then open Claude Code
+`PROXY_ANTHROPIC_BASE_URL` set. Then open Claude Code
 in the app and use it — its traffic flows to the proxy. (Quit the real
 `~/Applications/Claude.app` first so you don't confuse its identical window with
 this one.)
@@ -242,12 +242,19 @@ with `PROXY_ANTHROPIC_BASE_URL` unset the app behaves normally):
 
 Plus two non-code fixes handled by `run.sh` / `run-openai.sh`:
 
-- **`disclaimer` shim** — the app spawns every subprocess through
-  `Contents/Helpers/disclaimer` (a macOS TCC wrapper absent from stock Electron);
-  `run.sh` drops in a `exec "$@"` passthrough.
-- **`CLAUDE_CODE_LOCAL_BINARY`** — the app pins an un-fetchable RC Claude Code
-  build; `run-openai.sh` points it at a locally-installed `claude`. (The app's
-  own downloaded 2.1.219 binary also works once the disclaimer shim exists.)
+- **`disclaimer` helper** — the app spawns every subprocess through
+  `Contents/Helpers/disclaimer` (a macOS TCC wrapper absent from stock Electron).
+  `run.sh` installs `scripts/claude-code-disclaimer.sh` there as an absolute symlink.
+  It is a passthrough in Anthropic mode; in OpenAI mode it additionally selects the
+  agent's internal model identity (see below). It never modifies the Claude Code
+  executable or the app bundle.
+- **The agent executable is the bundled one.** `CLAUDE_CODE_LOCAL_BINARY` used to be
+  set here, pointing at a `claude` on `PATH` — that was **ineffective**: in this
+  packaged build the initializer that would honour it is never called (`initLocalBinary`
+  has no caller and `getLocalBinaryPath()` always returns `null`), so resolution falls
+  through to app resources and `user-data/claude-code/<version>`. It was reporting a
+  standalone 2.1.217 while Electron actually launched the bundled **2.1.219**. `run.sh`
+  now unsets it and prints the real cache location instead.
 
 ## Run standalone
 
@@ -1066,19 +1073,20 @@ is why the default is unchanged and this is written down rather than decided for
 
 ### Telling the CLI the truth: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
 
-Now set to **272000** in `.openai-model`, which `run.sh` exports in openai mode only (in
-anthropic mode the real Claude genuinely has a 1M window and forcing this would shrink it).
+Set in `.openai-model` and exported by `run.sh` in openai mode only (in anthropic mode the real
+Claude genuinely has a 1M window and forcing this would shrink it).
 
-Semantics, read out of the CLI's own resolver (`R7`):
+Semantics, read out of the CLI's own resolver:
 
 ```
 window = Math.min(<the model's own window>, Math.max(100000, value))    value capped at 1e6
 usable = window - Math.min(maxOutputTokens, 20000)                      a 20k output reserve
 ```
 
-So 272000 leaves **252,000 usable** — just under the 253,339 tokens the API demonstrably
-accepts for this model. Below 100000 the value is ignored; above 1000000 it is capped, not
-rejected.
+The critical word is **`Math.min`**: this value is an *upper bound*, not an override. If the
+CLI resolves its own model's window to something smaller, the smaller number wins and this
+setting does nothing. That is exactly what [issue #17] turned out to be — see below. Below
+100000 the value is ignored; above 1000000 it is capped, not rejected.
 
 **Honest status: set and correct by construction, but not yet shown to help.** The A/B I ran
 was inconclusive and the reason is worth recording — I fed a ~300k-token document as a single
@@ -1128,3 +1136,111 @@ compacts for nothing.
 
 Verified live after the switch — `model=gpt-5.6-sol api=responses`, real turns at `tools=236`
 with **zero** tool-cap drops, zero context overflows, zero effort fallbacks and zero empty turns.
+
+## Compacting immediately on a new chat ([issue #17])
+
+> *"i sometimes see it compact the conversation immediately when i start a chat"*
+
+Two separate faults, one visible symptom.
+
+### The recurring cluster at 157k–175k
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000` was set and being exported, yet across 14 non-subagent
+sessions there were **59** `compact_boundary` records, all but one with
+`compactMetadata.trigger="auto"`, clustering at a minimum of **157,287** and a median of
+**174,634** `preTokens`. A 900k window cannot compact at 167k, so the setting was not in force.
+
+It was being clamped. Reading the resolver out of the **bundled** Claude Code — 2.1.219, the one
+under `user-data/claude-code/`, *not* a standalone `claude` on `PATH` — the 1M window for
+`claude-opus-4-8` requires one of three things, and this configuration had none of them:
+
+| gate | state here |
+|---|---|
+| `[1m]` model suffix | absent — the app launches plain `claude-opus-4-8` |
+| `context-1m-2025-08-07` beta header | not sent |
+| native first-party provider | fails: `ANTHROPIC_BASE_URL` is `127.0.0.1` |
+
+The registry entry does say `window: 1e6, native_1m: true, supports_1m_suffix: true` — the model
+is *recognised* and *capable*. Recognition is not activation. With all three gates shut it fell
+to the **200,000** fallback, and 900000 was then clamped to it:
+
+```
+200,000 - 20,000 (output reserve) - 13,000 (auto-compaction reserve) = 167,000
+```
+
+Which is the cluster, arithmetically.
+
+**Confirmed by A/B**, not by inference — the bundled 2.1.219 driven against a localhost stub
+with a dummy key, one session id reused across two turns, synthetic context just over the
+threshold:
+
+| `--model` | init identity | what happened |
+|---|---|---|
+| `claude-opus-4-8` | `claude-opus-4-8` | `status="compacting"`, then `compact_error="too_few_groups"` |
+| `claude-opus-4-8[1m]` | `claude-opus-4-8[1m]` | no compaction |
+
+Both arms sent `"model": "claude-opus-4-8"` on the wire. The suffix is a **client-internal**
+capability marker that Claude Code strips before calling `/v1/messages`, which is why fixing
+this in the proxy is impossible: by the time a request arrives, the window is already resolved.
+
+### The fix, and where it had to go
+
+The internal identity has to be right *at spawn*. Four surfaces were ruled out first:
+`CLAUDE_CODE_LOCAL_BINARY` (dead code in this build), proxy-side model rewriting (too late),
+patching the Claude Code binary (proprietary, and out of bounds), and wrapping the cached
+executable path (fails the CLI's own Mach-O validation and gets the version directory purged).
+
+What remains is the `disclaimer` boundary the app already spawns everything through.
+`scripts/claude-code-disclaimer.sh` rewrites `--model claude-opus-4-8` →
+`--model claude-opus-4-8[1m]` for the bundled/cached Claude executable *only*, then `exec`s, so
+pid, signals and exit status are unchanged. It is gated on a private OpenAI-mode variable, so
+Anthropic mode is byte-identical argv passthrough, and it matches
+`user-data/claude-code/*/claude.app/Contents/MacOS/claude` so a future pinned version keeps
+working.
+
+Three identities, deliberately distinct:
+
+```
+claude-opus-4-8[1m]   Claude Code's internal identity   -> decides the context window
+claude-opus-4-8       what reaches /v1/messages         -> the CLI strips the suffix
+gpt-5.6-sol           what the proxy calls              -> OPENAI_MODEL, unchanged
+```
+
+With `[1m]` active, the 900k bound applies: **~880,000** shown as available (after the 20k
+output reserve) and ordinary auto-compaction near **~867,000** (after the additional 13k). Those
+two figures are different on purpose; reactive/precompute thresholds are different again.
+
+### The two that looked instant
+
+`preTokens=317980` and `preTokens=268862`, both ~112 seconds after session creation. Neither was
+an empty chat: both had reached **record 20**, and were genuinely that large — this app sends
+~236 tool schemas, about **121.8k estimated tokens** of fixed overhead present on turn one,
+before any conversation. A bare CLI first turn measures 21,815 input tokens with 27 tools; the
+comparison is not close.
+
+They are the same bug: 167k arrives quickly when 121.8k of it is spent before you type. But the
+log actively hid it, because `~ctx` summed system + messages and **excluded the tool schemas** —
+understating every Desktop request by more than its entire conversation. The accounting now
+reports each part, and names the largest single item (`tool_schema:<name>` included):
+
+```
+/v1/messages [responses] model=claude-opus-4-8->gpt-5.6-sol msgs=41 \
+  ~system+messages=64.2ktok ~tools=121.8ktok ~total=186ktok biggest=~24.1ktok/tool_result
+```
+
+### What the compaction line does and does not claim
+
+Every `~` figure is `chars/4` — the proxy has no tokenizer, and `in_tokens=` from the response is
+the only authoritative count. The warning names which of the three prompt families fired and what
+that family actually retains ("discards the transcript" was true of the full path only), and then
+stops:
+
+- **Automatic or manual `/compact`?** Not knowable here — both send the identical prompt. Only
+  the transcript's `compactMetadata.trigger` settles it.
+- **The effective window?** Not knowable here either. It resolves inside the client from the
+  internal suffix, beta headers, base URL, registry and disable flags. The proxy reports the
+  *configured* identity and the *configured upper bound*, labelled as such.
+- **Not the proxy's own compaction.** That is a separate fallback that runs only after an
+  upstream context error and logs `context exceeded`.
+
+[issue #17]: https://github.com/mkornreich/llm-desktop-electron/issues/17

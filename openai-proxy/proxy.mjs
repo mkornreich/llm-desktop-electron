@@ -1675,10 +1675,20 @@ const CHARS_PER_TOKEN_ESTIMATE = 4;
 const approxTokens = (chars) => Math.round(chars / CHARS_PER_TOKEN_ESTIMATE);
 const kilo = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
 
-// The CLI's own compaction calls. It asks the model to summarise the conversation so it can throw
-// the transcript away, and there are THREE distinct prompts — worth telling apart, because they mean
-// different things about what the client is doing. Taken verbatim from the CLI binary at
-// /Users/mk/.local/share/claude/versions/2.1.217:
+// What the LAUNCHER configured, for logging only (issue #17). These are reported so a compaction
+// line says which client identity and upper bound were in force, and they are deliberately NOT
+// used to assert the client's effective window: that resolution happens inside the client from its
+// internal suffix, beta headers, base URL, model registry and disable flags, none of which are
+// visible in a /v1/messages request.
+const CLAUDE_CODE_INTERNAL_MODEL =
+  process.env.OPENAI_CLAUDE_CODE_MODEL || PROJECT.OPENAI_CLAUDE_CODE_MODEL || "";
+const CLAUDE_CODE_CONTEXT_BOUND = parseInt(
+  process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || PROJECT.CLAUDE_CODE_AUTO_COMPACT_WINDOW || "0", 10) || 0;
+
+// The CLI's own compaction calls. It asks the model to summarise the conversation, and there are
+// THREE distinct prompts — worth telling apart, because they mean different things about what the
+// client keeps afterwards. Taken verbatim from the bundled CLI this app launches, Claude Code
+// 2.1.219 under user-data/claude-code/:
 //
 //   full        "...detailed summary of the conversation so far, paying close attention to the
 //                user's explicit requests and your previous actions."
@@ -1713,8 +1723,19 @@ function compactionKind(body) {
 }
 
 // Size of a request, and where the bulk of it is. `biggest` is the point: an early compaction is
-// usually one or two enormous tool results rather than a long conversation, and those look identical
-// in a message count.
+// usually one or two enormous tool results, or the fixed startup overhead, rather than a long
+// conversation — and those look identical in a message count.
+//
+// `total` counts the TOOL SCHEMAS as well as system + messages, which is the correction that made
+// issue #17 legible. This app sends ~236 tool definitions, ~121.8k estimated tokens of fixed
+// overhead that arrives on turn one, so a total that omitted them understated every Desktop
+// request by more than the entire conversation. `content` and `tools` are still reported
+// separately, because only one of them shrinks when the client compacts.
+//
+// Candidate comparison is global and per-ITEM: individual blocks and individual schemas compete
+// directly, so a single huge tool_result cannot hide inside its message and the fixed system
+// prompt can win when it genuinely is the largest thing present. Inspecting candidates never adds
+// to `total` — the aggregate counts system, message content and schemas exactly once each.
 //
 // This runs on EVERY request, including the latency-sensitive classifier verdicts, so it was
 // measured before being left here: on a 955k-character payload (240 messages, 236 tool definitions,
@@ -1733,23 +1754,84 @@ function requestShape(body) {
     }
     return 0;
   };
-  const msgs = Array.isArray(body?.messages) ? body.messages : [];
-  let total = sizeOf(body?.system);
+  // One label vocabulary for the log: system | user | assistant | tool_result | tool_use:<name> |
+  // tool_schema:<name>. Anything else would make the field unparseable by eye.
+  const blockLabel = (blk, role) => {
+    if (blk?.type === "tool_result") return "tool_result";
+    if (blk?.type === "tool_use") return `tool_use:${blk.name || "?"}`;
+    return role || "?";
+  };
   let biggest = 0;
   let biggestFrom = "";
+  const consider = (n, label) => { if (n > biggest) { biggest = n; biggestFrom = label; } };
+
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  const system = sizeOf(body?.system);
+  let content = system;
+  consider(system, "system");
   for (const m of msgs) {
-    const n = sizeOf(m?.content);
-    total += n;
-    if (n > biggest) {
-      biggest = n;
-      const blocks = Array.isArray(m?.content) ? m.content : [];
-      const tr = blocks.find((b) => b?.type === "tool_result");
-      const tu = blocks.find((b) => b?.type === "tool_use");
-      biggestFrom = tr ? "tool_result" : tu ? `tool_use:${tu.name || "?"}` : m?.role || "?";
+    content += sizeOf(m?.content);
+    // Compare the individual blocks, not the message: a message is only a container, and the
+    // whole point of this field is naming the one item that dominates.
+    if (Array.isArray(m?.content)) {
+      for (const blk of m.content) consider(sizeOf(blk), blockLabel(blk, m?.role));
+    } else {
+      consider(sizeOf(m?.content), m?.role || "?");
     }
   }
-  const toolDefs = (body?.tools || []).reduce((n, t) => n + JSON.stringify(t).length, 0);
-  return { msgs: msgs.length, total, biggest, biggestFrom, toolDefs };
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  let toolDefs = 0;
+  for (const t of tools) {
+    const n = JSON.stringify(t).length;
+    toolDefs += n;
+    consider(n, `tool_schema:${t?.name || "?"}`);
+  }
+  return {
+    msgs: msgs.length, system, content, toolDefs,
+    total: content + toolDefs, tools: tools.length, biggest, biggestFrom,
+  };
+}
+
+// One formatter for both surfaces. These two log lines were assembled independently and had already
+// drifted; a single builder is also what keeps the estimate markers consistent.
+function contextFields(shape) {
+  return `msgs=${shape.msgs} ~system+messages=${kilo(approxTokens(shape.content))}tok` +
+    `${shape.toolDefs ? ` ~tools=${kilo(approxTokens(shape.toolDefs))}tok` : ""}` +
+    ` ~total=${kilo(approxTokens(shape.total))}tok` +
+    `${shape.biggest ? ` biggest=~${kilo(approxTokens(shape.biggest))}tok/${shape.biggestFrom}` : ""}`;
+}
+
+// What each of the client's three prompts actually does with the transcript. "Discards the
+// transcript" was true only of the full path, and saying it for all three misdescribed the client.
+const COMPACTION_EFFECT = {
+  full: "replaces the conversation-so-far path with the summary",
+  continuing: "places the summary at the start of a continuing session, with newer messages after it",
+  partial: "summarises only the recent portion and keeps earlier retained context intact",
+};
+
+// The compaction warning. Deliberately narrow about what the proxy can and cannot know:
+//
+//   * WHICH prompt family this is — knowable, from the instruction text.
+//   * What that family retains — knowable, from the client's own wording.
+//   * Whether the user typed /compact or the client fired automatically — NOT knowable here. Both
+//     send the same prompt. Only the transcript's compactMetadata.trigger settles it afterwards.
+//   * The client's effective context window — NOT knowable here. The proxy reports the configured
+//     identity and upper bound, and nothing more.
+function compactionWarning(kind, shape, reqModel, model) {
+  const cfg = [
+    CLAUDE_CODE_INTERNAL_MODEL ? `configured internal identity ${CLAUDE_CODE_INTERNAL_MODEL}` : null,
+    CLAUDE_CODE_CONTEXT_BOUND ? `configured upper bound ${kilo(CLAUDE_CODE_CONTEXT_BOUND)}tok` : null,
+  ].filter(Boolean).join(", ");
+  return `  !! CLIENT-SIDE COMPACTION (${kind}): the client asked us to summarise — it ` +
+    `${COMPACTION_EFFECT[kind] || "reorganises its own transcript"}. Request as sent: ` +
+    `wire model=${reqModel}->${model} ${contextFields(shape)}. ` +
+    `Whether this was automatic or a manual /compact is not visible in the request; the ` +
+    `transcript's compactMetadata.trigger records it. ` +
+    (cfg ? `Launcher: ${cfg} — an upper bound the client clamps to whatever its internal ` +
+      `identity actually resolves to, so early compaction means that resolution came out low ` +
+      `(see .openai-model). ` : "") +
+    `This is NOT the proxy's own overflow compaction, which only runs after an upstream ` +
+    `context error and reports "context exceeded".`;
 }
 
 function logTurnEnd(surface, resp, toolCount, textLen, ms = null) {
@@ -2187,21 +2269,15 @@ const server = http.createServer(async (req, res) => {
       const { payload, nameMap, schemas, imagesSent } = toResponses(body, model, isCls);
       const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
       // `msgs=`, not `input=`: the old name read like a token count and was a message count.
-      // ~ctx is the estimated context size, biggest= is where the bulk of it is, and compaction=
-      // fires when the client is asking us to summarise the conversation so it can discard it.
+      // ~total includes the tool schemas, biggest= names the single largest item, and the
+      // compaction line below fires when the client is asking us to summarise its own transcript.
       const shape = requestShape(body);
       const compacting = compactionKind(body);
-      log(`/v1/messages [responses] model=${reqModel}->${model} msgs=${shape.msgs} ~ctx=${kilo(approxTokens(shape.total))}tok` +
-        `${shape.biggest ? ` biggest=${kilo(approxTokens(shape.biggest))}tok/${shape.biggestFrom}` : ""}` +
-        ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}/~${kilo(approxTokens(shape.toolDefs))}tok` : ""}` +
+      log(`/v1/messages [responses] model=${reqModel}->${model} ${contextFields(shape)}` +
+        ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
         `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
         `${isCls ? ` classifier=${family} reasoning=off` : ""}`);
-      if (compacting) {
-        log(`  !! the CLIENT is COMPACTING (${compacting}): it is summarising ${shape.msgs} message(s), ` +
-          `~${kilo(approxTokens(shape.total))} tokens, and will then discard the transcript. ` +
-          `If this fires early in a session, the client's context window is set too low — see ` +
-          `CLAUDE_CODE_AUTO_COMPACT_WINDOW in .openai-model.`);
-      }
+      if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
       let upstream;
       const startedAt = Date.now();
       try { upstream = await callResponses(payload, isCls); }
@@ -2252,11 +2328,10 @@ const server = http.createServer(async (req, res) => {
     const { payload, nameMap, schemas, imagesSent } = toOpenAI(body, model, isCls);
     const shape = requestShape(body);
     const compacting = compactionKind(body);
-    log(`/v1/messages [chat] model=${reqModel}->${model} msgs=${payload.messages.length} ~ctx=${kilo(approxTokens(shape.total))}tok` +
-      `${shape.biggest ? ` biggest=${kilo(approxTokens(shape.biggest))}tok/${shape.biggestFrom}` : ""}` +
-      ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}/~${kilo(approxTokens(shape.toolDefs))}tok` : ""}` +
+    log(`/v1/messages [chat] model=${reqModel}->${model} ${contextFields(shape)}` +
+      ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
       `${imagesSent ? " images=" + imagesSent : ""}${isCls ? ` classifier=${family}` : ""}`);
-    if (compacting) log(`  !! the CLIENT is COMPACTING (${compacting}): summarising ${shape.msgs} message(s), ~${kilo(approxTokens(shape.total))} tokens`);
+    if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
     let upstream;
     try { upstream = await callOpenAI(payload, isCls); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
@@ -2279,7 +2354,8 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { mapUsage, compactionKind, requestShape, approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
+export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT,
+         approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice,

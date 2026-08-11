@@ -164,8 +164,18 @@ npm install        # stock Electron 43.2.0, ~200 MB, once
 ```
 
 A window opens on the `claude.ai` login screen; sign in as usual. `Cmd+Q` quits.
-`run.sh` re-creates the `Resources/app.asar → app/` symlink and the `disclaimer` shim
-on every launch, so reinstalling `node_modules` costs nothing.
+`run.sh` re-creates the `Resources/app.asar → app/` symlink on every launch and
+reinstalls the `disclaimer` helper, so reinstalling `node_modules` costs nothing.
+
+That helper is repository-owned source ([scripts/claude-code-disclaimer.sh](scripts/claude-code-disclaimer.sh),
+installed as an absolute symlink by [scripts/install-disclaimer.mjs](scripts/install-disclaimer.mjs)).
+Stock Electron has no equivalent of Claude Desktop's TCC-attribution helper, and the app
+invokes it as `disclaimer <command> <args…>` — which makes it the one supported boundary at
+which this repo can choose the agent's *internal* model identity. In OpenAI mode it rewrites
+only the exact main-model argument of the bundled Claude Code executable; in Anthropic mode it
+is an exact argv passthrough. Nothing patches the Claude Code binary or the app bundle. The
+installer migrates only the two passthrough shims this repo generated in the past and refuses
+to overwrite anything else.
 
 Requirements: macOS (see [LINUX.md](LINUX.md) for what a port needs) and Node ≥ 22 —
 the app itself refuses to start below Electron 34 and needs Node ≥ 22. Developed against

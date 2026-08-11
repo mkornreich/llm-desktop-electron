@@ -31,14 +31,11 @@ fi
 
 # The app spawns every subprocess (shell-PATH probe, Claude Code, ...) through a
 # "disclaimer" helper (Contents/Helpers/disclaimer) — a macOS TCC-attribution
-# wrapper present in the signed Claude.app but absent from stock Electron. It is
-# invoked as `disclaimer <cmd> <args...>`, so a passthrough shim restores spawns.
-HELPERS="node_modules/electron/dist/Electron.app/Contents/Helpers"
-if [ ! -x "$HELPERS/disclaimer" ]; then
-  mkdir -p "$HELPERS"
-  printf '#!/bin/sh\nexec "$@"\n' > "$HELPERS/disclaimer"
-  chmod +x "$HELPERS/disclaimer"
-fi
+# wrapper present in the signed Claude.app but absent from stock Electron. Install an
+# absolute symlink to the repository-owned helper on every launch so npm/Electron
+# replacement self-heals. The installer migrates only this repository's two known
+# passthrough shims and refuses to overwrite anything unexpected.
+node scripts/install-disclaimer.mjs 2>&1 | sed 's/^/[run] /'
 
 # Two of the app's bundled helper binaries live in Contents/Helpers of the signed Claude.app
 # and simply are not present in a stock Electron bundle, so the features that need them fail
@@ -92,18 +89,12 @@ case "$PROVIDER" in
 esac
 echo "[run] provider: $PROVIDER"
 
-# The app pins an RC Claude Code build whose download URL is not publicly fetchable, so it
-# reports "binary missing or damaged". Point it at a locally-installed `claude`. This is
-# provider-independent — it is about fetching the binary, not about which model answers.
-if [ -z "${CLAUDE_CODE_LOCAL_BINARY:-}" ]; then
-  CLAUDE_BIN="$(command -v claude || true)"
-  [ -n "$CLAUDE_BIN" ] && export CLAUDE_CODE_LOCAL_BINARY="$CLAUDE_BIN"
-fi
-if [ -n "${CLAUDE_CODE_LOCAL_BINARY:-}" ]; then
-  echo "[run] CLAUDE_CODE_LOCAL_BINARY=${CLAUDE_CODE_LOCAL_BINARY}"
-else
-  echo "[run] WARN: no 'claude' on PATH — the app will try to download its own agent binary"
-fi
+# This packaged app resolves its pinned Claude Code executable from app resources or
+# user-data/claude-code/<version>; its dormant CLAUDE_CODE_LOCAL_BINARY initializer is never
+# called. Do not advertise a standalone `claude` that Electron will not actually launch.
+# The model-aware disclaimer helper recognizes every pinned version under this profile.
+unset CLAUDE_CODE_LOCAL_BINARY
+echo "[run] Claude Code executable: bundled/cache under $PWD/user-data/claude-code"
 
 # Maximum reasoning by default on the ANTHROPIC/Claude-CLI side. This is a different knob
 # from the proxy's OPENAI_REASONING_EFFORT: the app reads CLAUDE_CODE_EFFORT_LEVEL in its own
@@ -146,7 +137,18 @@ if [ "$PROVIDER" = "openai" ]; then
     || { echo "[run] proxy failed to start — see openai-proxy/proxy.log"; exit 1; }
   export PROXY_ANTHROPIC_BASE_URL="${PROXY_URL}"
   echo "[run] PROXY_ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
-  # OpenAI-only agent settings (classifier model, gateway model discovery for the picker).
+  # Claude Code resolves context capacity from its INTERNAL model identity before it
+  # normalizes that identity for /v1/messages. The repository helper rewrites only the
+  # bundled/cache Claude main-model argv to this supported [1m] identity. Claude Code then
+  # sends claude-opus-4-8 on the wire, which the proxy continues to map to OPENAI_MODEL.
+  OPENAI_CLAUDE_CODE_MODEL=$(sed -n 's/^OPENAI_CLAUDE_CODE_MODEL=//p' .openai-model 2>/dev/null | head -1)
+  if [ -z "${OPENAI_CLAUDE_CODE_MODEL:-}" ]; then
+    echo "[run] missing OPENAI_CLAUDE_CODE_MODEL in .openai-model"
+    exit 1
+  fi
+  export LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL="$OPENAI_CLAUDE_CODE_MODEL"
+  echo "[run] Claude Code internal model: ${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL} (OpenAI mode)"
+  # Other OpenAI-only agent settings (classifier model, gateway model discovery, context cap).
   while IFS='=' read -r k v; do
     case "$k" in CLAUDE_CODE_*) export "$k=$v"; echo "[run] $k=$v" ;; esac
   done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' .openai-model 2>/dev/null)
@@ -154,6 +156,7 @@ else
   # Leave no trace of OpenAI mode in the environment. Unsetting the base URL is what makes
   # the env-gated patches fall back to the app's own Anthropic host.
   unset PROXY_ANTHROPIC_BASE_URL
+  unset LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL
   # These carry OpenAI model ids in .openai-model; inherited from a shell they would send
   # e.g. gpt-4.1-mini to Anthropic and simply error, so drop them in this mode.
   for v in CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY; do

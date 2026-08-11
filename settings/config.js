@@ -90,6 +90,10 @@ const SCHEMA = [
   { group: "Claude CLI", file: ".openai-model", key: "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", type: "bool",
     default: "1", label: "Gateway model discovery",
     help: "Makes the app list the proxy's /v1/models in its picker. OpenAI mode only." },
+  { group: "Claude CLI", file: ".openai-model", key: "OPENAI_CLAUDE_CODE_MODEL", type: "text",
+    default: "claude-opus-4-8[1m]", placeholder: "claude-opus-4-8[1m]",
+    label: "Claude Code internal identity",
+    help: "Client capability identity, not the OpenAI answering model. In OpenAI mode the repository-owned disclaimer helper rewrites only the exact bundled/cache Claude main-model argument to this value. The supported [1m] suffix activates Claude Code's 1M capability; Claude Code then strips it before /v1/messages, so the proxy receives claude-opus-4-8 and maps that normalized identity to the OpenAI Model setting. Anthropic mode is an exact passthrough. Do not put an OpenAI model id here: proxy routing happens too late to affect the client's context resolver." },
 
   { group: "Output limits", file: ".openai-model", key: "OPENAI_CONTINUE_ON_TRUNCATION", type: "bool",
     default: "1", label: "Continue when cut off by the output cap",
@@ -116,9 +120,9 @@ const SCHEMA = [
     label: "Disable all telemetry",
     help: "Three levers at once: env vars for the agent, PRIVACY_DISABLE_TELEMETRY plus bundle patches for the desktop shell (whose gates are otherwise MDM-only), and DNS sinkholing for the renderer's Datadog/Sentry and the first-party-proxied analytics hosts. Verified 0 bytes egress." },
 
-  { group: "Reasoning", file: ".openai-model", key: "CLAUDE_CODE_AUTO_COMPACT_WINDOW", type: "int",
-    default: "900000", label: "Context window shown to the app (tokens)",
-    help: "This IS the context window the app displays and auto-compacts against: it resolves to window = min(model's own window, max(100000, this)), capped at 1e6, and usable = window - min(maxOutputTokens, 20000). Set it wrong and the \"context left\" indicator lies. Measured by bisecting real calls until they 400 on the context window: gpt-5.6-sol accepted 920,011 input tokens and was rejected at 930,000; gpt-5.3-codex accepted 253,339 and was rejected near 284,000; gpt-4.1 accepted 618,000. 900000 rather than 920000 because CLAUDE_CODE_MAX_OUTPUT_TOKENS is 64000 while the CLI only reserves 20,000, so a full-length answer needs about 44k more room than it has accounted for. Change this whenever the model changes — the numbers are not interchangeable. Only applied in openai mode; real Claude genuinely has 1M." },
+  { group: "Compaction", file: ".openai-model", key: "CLAUDE_CODE_AUTO_COMPACT_WINDOW", type: "int",
+    default: "900000", label: "Client context upper bound (tokens)",
+    help: "An upper bound, not an unconditional override: Claude Code first resolves the capability of its internal identity, then clamps this value to it. Bundled 2.1.219 resolved unsuffixed claude-opus-4-8 over localhost to 200,000, so the 900,000 setting could not prevent ordinary auto-compaction near 167,000 (200k minus the 20k output reserve and 13k compaction reserve). With the supported [1m] internal identity, this 900,000 bound yields about 880,000 tokens shown as available after the output reserve and ordinary auto-compaction near 867,000 after the additional compaction reserve. gpt-5.6-sol accepted 920,011 measured input tokens and rejected 930,000; the lower bound leaves room for its 64k maximum response. Change this with the OpenAI answering model; per-model measurements are not interchangeable. OpenAI mode only. Proxy overflow compaction is a separate fallback after an upstream context error." },
 
   { group: "Sessions", file: ".sync", key: "SYNC_CLAUDE_SESSIONS", type: "bool",
     default: "1", label: "Share the session store with Claude Desktop",

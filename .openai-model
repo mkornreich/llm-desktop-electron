@@ -94,43 +94,53 @@ OPENAI_DEFAULT_MAX_TOKENS=8192
 OPENAI_CONTINUE_ON_TRUNCATION=1
 OPENAI_MAX_TURN_OUTPUT_TOKENS=56000
 
-# Tell Claude Code the truth about the context window (issue #14).
+# Claude Code's INTERNAL model identity in OpenAI mode (issue #17). This is a client
+# capability identity, not the model that answers the request. run.sh gives it only to the
+# repository-owned disclaimer helper, which rewrites the exact bundled/cache Claude main-model
+# argument without modifying Claude Code or the app bundle:
 #
-# The CLI sizes its own auto-compaction from the model it BELIEVES it is talking to — a
-# 1M-context Claude — so on gpt-5.3-codex it never fired and the proxy was left truncating
-# after the fact, discarding ~112k tokens at a time. This makes the CLI compact itself first,
-# which is strictly better: it knows which parts of its own context matter.
+#   Claude Code init/session identity:  claude-opus-4-8[1m]
+#   /v1/messages model after normalization: claude-opus-4-8
+#   proxy-selected OpenAI model:         gpt-5.6-sol (OPENAI_MODEL above)
 #
-# Semantics, read out of the CLI (function R7):
-#   window   = Math.min(<model's own window>, max(100000, value))   value capped at 1e6
-#   usable   = window - min(maxOutputTokens, 20000)                 i.e. a 20k output reserve
+# `[1m]` is Claude Code's supported long-context suffix. Claude Code uses it while resolving
+# its own capacity, then strips it before sending the Anthropic-compatible request. Do not put
+# an OpenAI model id here: proxy-side model mapping happens too late to affect the client's
+# context resolver. Anthropic mode does not export this setting and remains an exact passthrough.
+OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]
+
+# Upper bound for Claude Code's client-side context accounting (issues #14 and #17).
 #
-# So this value IS the context window the app shows you, and a wrong one makes the "context left"
-# indicator lie in whichever direction it is wrong. It was 600000, set from the 622,229 tokens
-# gpt-5.6-sol had been shown to accept — which was only ever a lower bound from one probe, and it
-# understated the real window by about a third.
+# This is NOT an unconditional context override. Bundled Claude Code 2.1.219 first resolves
+# the capability of its internal model, then clamps this value to that capability. In the
+# broken configuration the internal identity was unsuffixed claude-opus-4-8, the API base was
+# localhost, no long-context beta was present, and localhost failed native first-party provider
+# detection. That combination resolved to the 200,000-token fallback even though this value was
+# 900,000. With a 20,000-token output reserve and the ordinary 13,000-token auto-compaction
+# reserve, automatic compaction therefore clustered around 167,000 tokens:
 #
-# MEASURED PROPERLY, by bisecting real /v1/responses calls until they 400 with "Your input exceeds
-# the context window of this model" (each probe built from " token", one token apiece, and
-# confirmed against the usage.input_tokens the API reported back):
+#   200,000 - 20,000 - 13,000 = 167,000
+#
+# The supported `[1m]` identity above activates the 1M capability before this upper bound is
+# applied. At 900,000, the UI has ~880,000 tokens available after the 20,000 output reserve,
+# while ordinary automatic compaction begins around ~867,000 after the additional 13,000
+# compaction reserve. Those are intentionally different figures. Reactive/precompute thresholds
+# are separate again.
+#
+# The 900,000 upper bound comes from real /v1/responses probes whose input usage was reported by
+# OpenAI:
 #
 #   gpt-5.6-sol    800,011 ok   900,011 ok   920,011 ok   |   930,000 REJECTED   950,000  1,000,000
 #   gpt-5.3-codex  253,339 ok                             |   ~284,000 REJECTED
 #   gpt-4.1        618,000 ok
 #
-# So sol's true ceiling is between 920,012 and 930,000 — 921,600 would be the round number in
-# that gap, but nothing here depends on guessing which.
+# gpt-5.6-sol's measured ceiling is between 920,012 and 930,000. We use 900,000 rather than
+# 920,000 because Claude Code reserves only 20,000 tokens while its maximum response is 64,000;
+# the extra ~44,000 margin keeps a maximal answer below the known upstream ceiling. Change this
+# whenever OPENAI_MODEL changes: the measurements are per-model and not interchangeable. Values
+# below 100,000 are ignored and values above 1,000,000 are capped.
 #
-# 900000 is set rather than 920000 for the output reserve. The CLI only holds back
-# min(maxOutputTokens, 20000) = 20,000, while CLAUDE_CODE_MAX_OUTPUT_TOKENS is 64000, so a turn
-# that generates a full-length answer needs ~44k more room than the CLI has accounted for. At
-# 900000 the usable figure is 880,000, which leaves that margin below the 920,011 that is known to
-# be accepted — auto-compact fires before the hard wall rather than after it. The proxy's
-# mid-stream compaction is the backstop, not the plan.
-#
-# Change this whenever OPENAI_MODEL changes; the numbers above are per-model and not
-# interchangeable. Values below 100000 are ignored, above 1000000 are capped.
-#
-# Only exported in openai mode, which is what we want: in anthropic mode the real Claude
-# genuinely has a 1M window and forcing this would shrink it for no reason.
+# Only exported in OpenAI mode. Real Anthropic mode keeps Claude's native context behavior.
+# Proxy overflow compaction remains an independent fallback after an upstream context error; it
+# is not the client-generated summary flow controlled by this setting.
 CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000

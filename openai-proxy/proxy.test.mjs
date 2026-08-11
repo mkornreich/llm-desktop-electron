@@ -16,7 +16,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
-        mapUsage, compactionKind, requestShape, approxTokens, kilo } =
+        mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
+        COMPACTION_EFFECT, approxTokens, kilo } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1680,8 +1681,10 @@ test("every streamed message_delta reports full usage, not output_tokens alone",
 
 // ---------- context-size logging, and spotting the client's own compaction (issue #17) ----------
 
-// Verbatim from the CLI binary at /Users/mk/.local/share/claude/versions/2.1.217. If the client's
-// wording changes these stop matching, which is the point of pinning the real text in a test.
+// Verbatim from the bundled CLI this app actually launches — Claude Code 2.1.219 under
+// user-data/claude-code/. (An earlier note here cited a standalone 2.1.217 install, which is not
+// the executable Electron runs.) If the client's wording changes these stop matching, which is the
+// point of pinning the real text in a test.
 const COMPACT_FULL =
   "Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.";
 const COMPACT_CONTINUING =
@@ -1737,7 +1740,7 @@ test("requestShape measures context size and points at the biggest contributor",
   };
   const shape = requestShape(body);
   assert.equal(shape.msgs, 3);
-  assert.ok(shape.total >= 9500, `total should include system and all messages, got ${shape.total}`);
+  assert.ok(shape.content >= 9500, `content should include system and all messages, got ${shape.content}`);
   assert.equal(shape.biggest, 9000, "the tool_result is the biggest single item");
   assert.equal(shape.biggestFrom, "tool_result", "and the log must say what it was");
   assert.ok(shape.toolDefs > 200, "tool definitions are measured separately");
@@ -1748,8 +1751,154 @@ test("requestShape names the tool when the biggest item is a tool_use, and survi
     messages: [{ role: "assistant", content: [{ type: "tool_use", name: "Edit", input: { s: "x".repeat(500) } }] }],
   });
   assert.equal(shape.biggestFrom, "tool_use:Edit");
-  assert.deepEqual(requestShape({}), { msgs: 0, total: 0, biggest: 0, biggestFrom: "", toolDefs: 0 });
+  assert.deepEqual(requestShape({}),
+    { msgs: 0, system: 0, content: 0, toolDefs: 0, total: 0, tools: 0, biggest: 0, biggestFrom: "" });
   assert.equal(requestShape({ messages: [{ role: "user" }] }).total, 0, "a message with no content is 0, not a throw");
+});
+
+// The correction that made issue #17 legible: ~236 tool schemas are ~121.8k estimated tokens of
+// fixed overhead present on turn one, and the old total left every one of them out. Two sessions
+// compacted at record 20 on 269k and 318k real tokens while the log implied something far smaller.
+test("requestShape counts the tool schemas in the total, not just the conversation", () => {
+  const body = {
+    system: "s".repeat(4000),
+    messages: [{ role: "user", content: "u".repeat(2000) }],
+    tools: Array.from({ length: 20 }, (_, i) => ({ name: `T${i}`, description: "d".repeat(1000) })),
+  };
+  const shape = requestShape(body);
+  assert.equal(shape.system, 4000);
+  assert.equal(shape.content, 6000, "system + messages, counted once each");
+  assert.ok(shape.toolDefs > 20000, `schemas should dominate, got ${shape.toolDefs}`);
+  assert.equal(shape.total, shape.content + shape.toolDefs, "total is content plus schemas");
+  assert.equal(shape.tools, 20);
+});
+
+test("requestShape counts each part exactly once — inspecting candidates never inflates the total", () => {
+  // The largest-item search walks blocks and schemas individually. If that walk contributed to the
+  // aggregate, a message of N blocks would be counted twice and ~total would be fiction.
+  const body = {
+    system: "s".repeat(100),
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "a".repeat(300) },
+        { type: "tool_result", content: "b".repeat(700) },
+      ],
+    }],
+    tools: [{ name: "One", description: "d".repeat(50) }],
+  };
+  const shape = requestShape(body);
+  assert.equal(shape.content, 1100, "100 system + 300 text + 700 tool_result, no double count");
+  assert.equal(shape.total, 1100 + shape.toolDefs);
+  assert.equal(shape.biggest, 700, "the biggest single BLOCK, not the whole message");
+  assert.equal(shape.biggestFrom, "tool_result");
+});
+
+test("requestShape lets the fixed system prompt win when it really is the largest single item", () => {
+  // Previously impossible: system was added to the total but never compared, so a session whose
+  // bulk was startup overhead reported its biggest contributor as some small ordinary message.
+  const shape = requestShape({
+    system: "s".repeat(50000),
+    messages: [{ role: "user", content: "u".repeat(200) }],
+  });
+  assert.equal(shape.biggest, 50000);
+  assert.equal(shape.biggestFrom, "system");
+});
+
+test("requestShape names the single largest tool schema", () => {
+  const shape = requestShape({
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      { name: "Small", description: "d".repeat(100) },
+      { name: "Huge", description: "d".repeat(40000) },
+    ],
+  });
+  assert.equal(shape.biggestFrom, "tool_schema:Huge");
+  assert.ok(shape.biggest > 40000);
+});
+
+test("requestShape labels plain user and assistant content", () => {
+  assert.equal(requestShape({ messages: [{ role: "user", content: "u".repeat(500) }] }).biggestFrom, "user");
+  assert.equal(
+    requestShape({ messages: [{ role: "assistant", content: [{ type: "text", text: "a".repeat(500) }] }] }).biggestFrom,
+    "assistant");
+});
+
+test("contextFields marks every estimate with ~ and separates content from schemas", () => {
+  const line = contextFields(requestShape({
+    system: "s".repeat(4000),
+    messages: [{ role: "user", content: [{ type: "tool_result", content: "r".repeat(40000) }] }],
+    tools: [{ name: "Bash", description: "d".repeat(8000) }],
+  }));
+  assert.match(line, /msgs=1/);
+  assert.match(line, /~system\+messages=11k tok|~system\+messages=11ktok/);
+  assert.match(line, /~tools=~?2k?tok|~tools=2k tok|~tools=2ktok/);
+  assert.match(line, /~total=/);
+  assert.match(line, /biggest=~10ktok\/tool_result/);
+  // No unmarked estimate may appear: every token figure here is chars/4, not a real count.
+  for (const field of line.split(" ").filter((f) => /tok$/.test(f))) {
+    assert.match(field, /~/, `estimate without a ~ marker: ${field}`);
+  }
+});
+
+test("both surfaces log context through the one shared formatter", () => {
+  // These two lines were assembled independently and had already drifted apart — one reported a
+  // field the other did not. A single builder is what keeps them honest.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const sites = src.match(/log\(`\/v1\/messages \[[a-z]+\][^`]*`/g) || [];
+  assert.equal(sites.length, 2, `expected exactly the responses and chat sites, found ${sites.length}`);
+  for (const s of sites) {
+    assert.match(s, /\$\{contextFields\(shape\)\}/, `site must use the shared formatter: ${s.slice(0, 60)}`);
+    assert.ok(!/~ctx=/.test(s), "the old ~ctx field excluded tool schemas and must be gone");
+  }
+  const warns = src.match(/if \(compacting\) log\(compactionWarning\(/g) || [];
+  assert.equal(warns.length, 2, "both surfaces must use the shared compaction warning");
+});
+
+test("the compaction warning states what each prompt family actually retains", () => {
+  // "and will then discard the transcript" was true of the full path only. Saying it for all three
+  // misdescribed the client to whoever reads the log.
+  const shape = requestShape({ system: "s".repeat(1000), messages: [{ role: "user", content: "x" }] });
+  const full = compactionWarning("full", shape, "claude-opus-4-8", "gpt-5.6-sol");
+  const cont = compactionWarning("continuing", shape, "claude-opus-4-8", "gpt-5.6-sol");
+  const part = compactionWarning("partial", shape, "claude-opus-4-8", "gpt-5.6-sol");
+  assert.match(full, /conversation-so-far/);
+  assert.match(cont, /start of a continuing session/);
+  assert.match(part, /keeps earlier retained context intact/);
+  assert.equal(new Set([full, cont, part]).size, 3, "the three must not read identically");
+  for (const w of [full, cont, part]) assert.ok(!/discard the transcript/.test(w));
+  assert.deepEqual(Object.keys(COMPACTION_EFFECT).sort(), ["continuing", "full", "partial"]);
+});
+
+test("the compaction warning reports the wire model and the full accounting", () => {
+  const shape = requestShape({
+    system: "s".repeat(2000),
+    messages: [{ role: "user", content: "u".repeat(500) }],
+    tools: [{ name: "Bash", description: "d".repeat(4000) }],
+  });
+  const w = compactionWarning("full", shape, "claude-opus-4-8", "gpt-5.6-sol");
+  // The NORMALIZED identity: Claude Code strips its [1m] suffix before /v1/messages, so the proxy
+  // sees claude-opus-4-8 and must not claim otherwise.
+  assert.match(w, /claude-opus-4-8->gpt-5\.6-sol/);
+  assert.ok(!/\[1m\]/.test(w.replace(/configured internal identity [^,.]*/, "")),
+    "only the configured-identity field may mention a suffix");
+  assert.match(w, /~system\+messages=/);
+  assert.match(w, /~tools=/);
+  assert.match(w, /~total=/);
+});
+
+test("the compaction warning does not claim to know the trigger or the effective window", () => {
+  // Both /compact and automatic compaction send the identical prompt, and the effective window is
+  // resolved inside the client from state the proxy cannot see. Overclaiming either is how the
+  // earlier version sent this investigation down the wrong path.
+  const w = compactionWarning("full", requestShape({ messages: [] }), "claude-opus-4-8", "gpt-5.6-sol");
+  assert.match(w, /not visible in the request/);
+  assert.match(w, /compactMetadata\.trigger/);
+  assert.match(w, /upper bound/);
+  assert.ok(!/context window is set too low/.test(w), "must not assert a cause it cannot verify");
+  // And it must be distinguishable from the proxy's own overflow fallback.
+  assert.match(w, /NOT the proxy's own overflow compaction/);
+  assert.match(w, /CLIENT-SIDE COMPACTION/);
 });
 
 test("the token figures are marked as estimates, because the proxy has no tokenizer", () => {
@@ -1762,7 +1911,7 @@ test("the token figures are marked as estimates, because the proxy has no tokeni
   for (const m of src.match(/approxTokens\([^)]*\)\)\}tok/g) || []) {
     assert.ok(true, m); // shape check below is the real assertion
   }
-  assert.match(src, /~ctx=\$\{kilo\(approxTokens/, "the context estimate is marked with ~");
+  assert.match(src, /~total=\$\{kilo\(approxTokens/, "the context estimate is marked with ~");
   assert.match(src, /in_tokens=\$\{inTok\}/, "the authoritative count is logged unmarked, from real usage");
 });
 
