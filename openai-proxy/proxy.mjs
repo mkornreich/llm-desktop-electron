@@ -391,19 +391,36 @@ if (!OPENAI_API_KEY) {
 // (403, missing scope api.usage.read), so the only way to answer "how many tokens have I
 // used" for this app is to count them here. Persisted, because the proxy restarts on every
 // app launch. GET /usage returns the totals.
-const USAGE_FILE = fileURLToPath(new URL("./usage.json", import.meta.url));
+// PROXY_NO_LISTEN is the unit-test import mode. Point the ledger somewhere disposable there:
+// recordUsage() is exported and exercised directly, and it debounce-writes to disk, so tests
+// would otherwise inject fake models into the real accounting file — which they did, until
+// this was added.
+const USAGE_FILE = process.env.PROXY_NO_LISTEN === "1"
+  ? fileURLToPath(new URL("./usage.test-scratch.json", import.meta.url))
+  : fileURLToPath(new URL("./usage.json", import.meta.url));
 let usageState = { since: null, byModel: {} };
-try { usageState = JSON.parse(fs.readFileSync(USAGE_FILE, "utf8")); } catch { /* first run */ }
+if (process.env.PROXY_NO_LISTEN !== "1") {
+  try { usageState = JSON.parse(fs.readFileSync(USAGE_FILE, "utf8")); } catch { /* first run */ }
+}
 if (!usageState.byModel) usageState = { since: null, byModel: {} };
 let usageDirty = false, usageTimer = null;
-function recordUsage(model, inTok, outTok, reasoningTok = 0) {
+// `inTok` is OpenAI's convention: cache reads INCLUDED. `cachedTok` is the subset of it that
+// was served from cache, recorded separately because it is the difference between what this
+// proxy moved and what the account is actually billed for — measured at ~96% of input, so a
+// ledger without it overstates billable input by more than an order of magnitude. Note this
+// is the opposite convention to the Anthropic-facing numbers mapUsage() produces, where
+// input_tokens EXCLUDES cache reads; usageSummary() below spells that out.
+function recordUsage(model, inTok, outTok, reasoningTok = 0, cachedTok = 0) {
   if (!model) return;
   if (!usageState.since) usageState.since = new Date().toISOString();
-  const m = (usageState.byModel[model] ||= { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 });
+  const m = (usageState.byModel[model] ||= { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_input_tokens: 0 });
+  // A ledger written before cached_input_tokens existed has no such key.
+  if (m.cached_input_tokens === undefined) m.cached_input_tokens = 0;
   m.requests += 1;
   m.input_tokens += inTok || 0;
   m.output_tokens += outTok || 0;
   m.reasoning_tokens += reasoningTok || 0;
+  m.cached_input_tokens += cachedTok || 0;
   usageDirty = true;
   // Debounced: a busy agent turn would otherwise rewrite this file dozens of times.
   if (!usageTimer) usageTimer = setTimeout(() => {
@@ -414,11 +431,18 @@ function recordUsage(model, inTok, outTok, reasoningTok = 0) {
   }, 3000);
 }
 function usageSummary() {
-  const totals = { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+  const totals = { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_input_tokens: 0 };
   for (const m of Object.values(usageState.byModel)) for (const k of Object.keys(totals)) totals[k] += m[k] || 0;
-  return { since: usageState.since, total: { ...totals, tokens: totals.input_tokens + totals.output_tokens },
+  // The figure that actually predicts the bill. Cache reads are a fraction of the price of
+  // fresh input, and they are the overwhelming majority of what this proxy sends, so
+  // input_tokens on its own is not a cost signal.
+  const fresh = Math.max(0, totals.input_tokens - totals.cached_input_tokens);
+  const hitRate = totals.input_tokens ? Math.round((totals.cached_input_tokens / totals.input_tokens) * 1000) / 10 : 0;
+  return { since: usageState.since,
+           total: { ...totals, tokens: totals.input_tokens + totals.output_tokens,
+                    uncached_input_tokens: fresh, cache_hit_rate_pct: hitRate },
            by_model: usageState.byModel,
-           note: "Counted by this proxy only. OpenAI has no token allowance to report; the account limit is per-minute (see x-ratelimit-* headers) plus dollar billing. This key cannot read the org usage API." };
+           note: "Counted by this proxy only. input_tokens follows OpenAI's convention and INCLUDES cache reads (the opposite of the Anthropic-facing input_tokens this proxy returns to the client, which excludes them); uncached_input_tokens is the part billed at the full rate. OpenAI has no token allowance to report; the account limit is per-minute (see x-ratelimit-* headers) plus dollar billing. This key cannot read the org usage API." };
 }
 
 // ---------- helpers ----------
@@ -699,6 +723,11 @@ async function summariseDropped(pieces) {
     });
     if (!r.ok) { log(`  ! compaction summary failed (${r.status}); falling back to truncation`); return null; }
     const j = await r.json();
+    // This is a real upstream call on the account's key, and it was the one request the
+    // ledger never saw — /usage claimed to cover every path while silently omitting it.
+    recordUsage(COMPACT_MODEL, j?.usage?.input_tokens, j?.usage?.output_tokens,
+                j?.usage?.output_tokens_details?.reasoning_tokens,
+                j?.usage?.input_tokens_details?.cached_tokens);
     let text = "";
     for (const it of j.output || [])
       if (it.type === "message") for (const c of it.content || []) if (c.type === "output_text") text += c.text || "";
@@ -1476,7 +1505,11 @@ async function callOpenAI(payload, isClassifier = false) {
 // ---------- SSE streaming: OpenAI -> Anthropic ----------
 function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); }
 
-async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null) {
+// `reqModel` is what the CLIENT asked for and is echoed back in the Anthropic message;
+// `model` is the OpenAI model that actually answered, which is what the usage ledger must be
+// keyed on. They differ on every request (claude-opus-4-8 vs gpt-5.6-sol), and this path used
+// to file its usage under the client's name — the only one of the four that did.
+async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null, model = reqModel) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -1549,7 +1582,8 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null)
     sse(res, "content_block_delta", { type: "content_block_delta", index: tb.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
   }
-  recordUsage(reqModel, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens);
+  recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
+              usage?.prompt_tokens_details?.cached_tokens);
   // input_tokens goes in the FINAL delta, not message_start: at message_start the upstream has
   // not reported usage yet, and a placeholder there would be double counted by any client that
   // sums the two events. 0 + the truth is the truth either way.
@@ -1899,17 +1933,47 @@ function compactionWarning(kind, shape, reqModel, model) {
     `context error and reports "context exceeded".`;
 }
 
+// The input size and how much of it was served from cache, straight from the upstream. Both
+// turn-end sites format it through here.
+//
+// The cached part is ALWAYS printed, including "(0 cached)". It used to be suppressed at zero,
+// so the worst possible case — a large turn that hit no cache at all — rendered exactly like a
+// turn with no cache reporting, and a `\((\d+) cached\)` scan of the log silently skipped every
+// one of them. In this log that hid 361 turns and 47.7M input tokens.
+function inTokensField(usage) {
+  const u = usage || {};
+  if (u.input_tokens == null) return "?";
+  const cached = u.input_tokens_details?.cached_tokens || 0;
+  return `${u.input_tokens} (${cached} cached)`;
+}
+
+// Cache misses are the dominant cost in this proxy: ~96% of input is normally cache reads, so a
+// large turn that misses is worth flagging the way a client compaction is. Only above a size
+// threshold, and only under a low ratio — a small turn has nothing to reuse, and the FIRST turn
+// of any conversation legitimately misses, which the message says rather than implying a bug.
+const CACHE_WARN_MIN_TOKENS = 20000;
+const CACHE_WARN_MAX_RATIO = 0.5;
+function cacheWarning(usage) {
+  const u = usage || {};
+  const total = u.input_tokens || 0;
+  if (total < CACHE_WARN_MIN_TOKENS) return null;
+  const cached = u.input_tokens_details?.cached_tokens || 0;
+  const ratio = cached / total;
+  if (ratio > CACHE_WARN_MAX_RATIO) return null;
+  return `  !! CACHE MISS on a large turn: ${total} input tokens, ${cached} from cache ` +
+    `(${Math.round(ratio * 100)}%). Normal for the first turn of a conversation, or after the ` +
+    `client rewrote its own history. Mid-conversation and repeated, it means the prompt prefix ` +
+    `changed — anything edited ahead of the transcript (system text, tool list) invalidates it.`;
+}
+
 function logTurnEnd(surface, resp, toolCount, textLen, ms = null) {
   const status = resp?.status || "completed";
   const reason = resp?.incomplete_details?.reason;
   const out = resp?.usage?.output_tokens ?? "?";
   const verdict = toolCount ? `${toolCount} tool call(s)` : (textLen ? "text only — TURN ENDS, agent waits for user" : "EMPTY");
-  // The real input size, straight from the upstream. This is the number the client's context meter
-  // works from, so it is the only trustworthy measure of how full the context is.
-  const u = resp?.usage || {};
-  const cached = u.input_tokens_details?.cached_tokens || 0;
-  const inTok = u.input_tokens != null ? `${u.input_tokens}${cached ? ` (${cached} cached)` : ""}` : "?";
-  log(`  <- ${surface}${ms != null ? " " + ms + "ms" : ""} status=${status}${reason ? "/" + reason : ""} in_tokens=${inTok} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
+  log(`  <- ${surface}${ms != null ? " " + ms + "ms" : ""} status=${status}${reason ? "/" + reason : ""} in_tokens=${inTokensField(resp?.usage)} out_tokens=${out} text=${textLen}ch -> ${verdict}`);
+  const warn = cacheWarning(resp?.usage);
+  if (warn) log(warn);
 }
 
 function respStopReason(resp, hasTool) {
@@ -2272,19 +2336,18 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   } else if (emptyRetries) {
     log(`  -> recovered after ${emptyRetries} empty-turn retr${emptyRetries === 1 ? "y" : "ies"}`);
   }
-  recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens);
+  recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens,
+              usage?.input_tokens_details?.cached_tokens);
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
   // in_tokens is the authoritative context size for this turn — the same number the client's context
   // meter uses. Logged on the STREAMING path too, which is every real turn; without it the log
   // recorded only how much was written back, never how full the context was getting.
-  const inTok = usage?.input_tokens != null
-    ? `${usage.input_tokens}${usage.input_tokens_details?.cached_tokens ? ` (${usage.input_tokens_details.cached_tokens} cached)` : ""}`
-    : "?";
-  log(`  <- responses stream ${Date.now() - turnStart}ms stop_reason=${stop} in_tokens=${inTok} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
+  log(`  <- responses stream ${Date.now() - turnStart}ms stop_reason=${stop} in_tokens=${inTokensField(usage)} out_tokens=${totalOutTokens || (usage?.output_tokens ?? "?")} text=${textLen}ch` +
       (thinkLen ? ` thinking=${thinkLen}ch` : "") + ` -> ` +
       (toolCount ? `${toolCount} tool call(s)` :
        stop === "max_tokens" ? "hit the output cap mid-turn — agent stops" :
        textLen ? "TEXT ONLY, no tool call — turn ends here and the agent waits for the user" : "EMPTY response"));
+  { const warn = cacheWarning(usage); if (warn) log(warn); }
   sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: stop, stop_sequence: null }, usage: mapUsage(usage, "responses") });
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
@@ -2372,7 +2435,8 @@ const server = http.createServer(async (req, res) => {
             if (retry.ok) rj = await retry.json();
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
         }
-        recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens);
+        recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens,
+                    rj?.usage?.input_tokens_details?.cached_tokens);
         const msg = fromResponses(rj, reqModel, nameMap, schemas);
         appendTaskEcho(msg, body, isCls);
         if (isCls) {
@@ -2405,10 +2469,16 @@ const server = http.createServer(async (req, res) => {
       log(`OpenAI ${upstream.status}: ${errTxt.slice(0, 300)}`);
       return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
     }
-    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, nameMap, schemas); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, nameMap, schemas, model); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
-                oai?.usage?.completion_tokens_details?.reasoning_tokens);
+                oai?.usage?.completion_tokens_details?.reasoning_tokens,
+                oai?.usage?.prompt_tokens_details?.cached_tokens);
+    logTurnEnd("chat", { usage: { input_tokens: oai?.usage?.prompt_tokens,
+                                  output_tokens: oai?.usage?.completion_tokens,
+                                  input_tokens_details: { cached_tokens: oai?.usage?.prompt_tokens_details?.cached_tokens } } },
+               (oai?.choices?.[0]?.message?.tool_calls || []).length,
+               (oai?.choices?.[0]?.message?.content || "").length);
     { const msg = toAnthropic(oai, reqModel, nameMap, schemas);
       appendTaskEcho(msg, body, isCls);
       return sendJSON(res, 200, msg); }
@@ -2420,6 +2490,7 @@ const server = http.createServer(async (req, res) => {
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
+         inTokensField, cacheWarning, recordUsage, usageSummary,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,

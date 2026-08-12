@@ -17,7 +17,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         rememberUnsupported, stripUnsupported,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
-        COMPACTION_EFFECT, cacheKeyFor, approxTokens, kilo } =
+        COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
+        approxTokens, kilo } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1912,7 +1913,7 @@ test("the token figures are marked as estimates, because the proxy has no tokeni
     assert.ok(true, m); // shape check below is the real assertion
   }
   assert.match(src, /~total=\$\{kilo\(approxTokens/, "the context estimate is marked with ~");
-  assert.match(src, /in_tokens=\$\{inTok\}/, "the authoritative count is logged unmarked, from real usage");
+  assert.match(src, /in_tokens=\$\{inTokensField\(/, "the authoritative count is logged unmarked, from real usage");
 });
 
 test("every turn-end log line reports in_tokens, on the streaming path too", () => {
@@ -1991,4 +1992,106 @@ test("both surfaces send prompt_cache_key, and it survives an unrelated payload 
   // A mid-session tool change must not move the conversation to a different bucket.
   const later = { ...body, tools: [{ name: "Read", input_schema: { type: "object" } }] };
   assert.equal(toResponses(later, "gpt-5.6-sol", false).payload.prompt_cache_key, key);
+});
+
+// ---------- cache-aware usage accounting (#20) and miss visibility (#21) ----------
+
+test("the usage ledger separates cache reads from fresh input", () => {
+  // input_tokens follows OpenAI's convention and INCLUDES cache reads, so on its own it
+  // overstated billable input by ~25x at the measured 96% hit rate.
+  const model = `test-ledger-${Math.random().toString(36).slice(2)}`;
+  const before = usageSummary().total;
+  recordUsage(model, 100000, 500, 200, 96000);
+  recordUsage(model, 100000, 500, 200, 96000);
+  const s = usageSummary();
+  const m = s.by_model[model];
+  assert.equal(m.requests, 2);
+  assert.equal(m.input_tokens, 200000, "gross input, cache reads included");
+  assert.equal(m.cached_input_tokens, 192000);
+  // Assert on the DELTA, not the absolute: usageSummary() aggregates a ledger that persists
+  // across runs, so a real proxy's history would otherwise decide whether this passes.
+  assert.equal(s.total.cached_input_tokens - before.cached_input_tokens, 192000);
+  assert.equal(s.total.uncached_input_tokens - before.uncached_input_tokens, 8000,
+    "the fresh part is what actually gets billed at full rate");
+  assert.ok(s.total.cache_hit_rate_pct >= 0 && s.total.cache_hit_rate_pct <= 100);
+  // The note must state which convention input_tokens follows, since it is the opposite of
+  // the Anthropic-facing number this same proxy returns to the client.
+  assert.match(s.note, /INCLUDES cache reads/);
+});
+
+test("a ledger written before cached_input_tokens existed still accumulates", () => {
+  // usage.json persists across restarts; an old file has no such key.
+  const model = `test-legacy-${Math.random().toString(36).slice(2)}`;
+  recordUsage(model, 10, 1, 0, 0);
+  const s1 = usageSummary();
+  delete s1.by_model[model].cached_input_tokens;      // simulate the old shape
+  recordUsage(model, 10, 1, 0, 4);
+  assert.equal(usageSummary().by_model[model].cached_input_tokens, 4, "must not become NaN");
+});
+
+test("recordUsage ignores a missing model rather than creating a junk bucket", () => {
+  const before = Object.keys(usageSummary().by_model).length;
+  recordUsage(null, 100, 10);
+  recordUsage(undefined, 100, 10);
+  assert.equal(Object.keys(usageSummary().by_model).length, before);
+});
+
+test("a zero-cache turn prints (0 cached) rather than nothing at all", () => {
+  // The worst case used to render identically to a turn with no cache reporting, so a
+  // `\((\d+) cached\)` scan of the log skipped 361 turns and 47.7M tokens.
+  assert.equal(inTokensField({ input_tokens: 252372, input_tokens_details: { cached_tokens: 0 } }),
+    "252372 (0 cached)");
+  assert.equal(inTokensField({ input_tokens: 252372 }), "252372 (0 cached)");
+  assert.equal(inTokensField({ input_tokens: 100, input_tokens_details: { cached_tokens: 90 } }),
+    "100 (90 cached)");
+  assert.equal(inTokensField({}), "?", "an absent count stays unknown, not zero");
+  assert.equal(inTokensField(null), "?");
+});
+
+test("both turn-end sites format in_tokens through the one helper", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const ends = src.match(/log\(`  <- [^`]*out_tokens=[^`]*`/g) || [];
+  assert.ok(ends.length >= 2, `expected the streaming and non-streaming sites, found ${ends.length}`);
+  for (const e of ends) {
+    assert.match(e, /in_tokens=\$\{inTokensField\(/, `site must use the helper: ${e.slice(0, 60)}`);
+  }
+  // The old inline ternary suppressed the field at zero; it must not come back.
+  assert.ok(!/cached_tokens \? ` \(\$\{/.test(src), "no site may suppress the cached field at zero");
+});
+
+test("a large poorly-cached turn warns, and an ordinary one does not", () => {
+  const miss = cacheWarning({ input_tokens: 252372, input_tokens_details: { cached_tokens: 0 } });
+  assert.match(miss, /CACHE MISS/);
+  assert.match(miss, /252372 input tokens, 0 from cache \(0%\)/);
+  // Must not assert a bug: a first turn legitimately misses.
+  assert.match(miss, /first turn of a conversation/);
+
+  assert.equal(cacheWarning({ input_tokens: 145768, input_tokens_details: { cached_tokens: 140000 } }), null,
+    "a well-cached turn is not noteworthy");
+  assert.equal(cacheWarning({ input_tokens: 500, input_tokens_details: { cached_tokens: 0 } }), null,
+    "a small turn has nothing to reuse");
+  assert.equal(cacheWarning({}), null);
+  assert.equal(cacheWarning(null), null);
+});
+
+test("the compaction summariser records its own upstream call", () => {
+  // It fires a real request on the account's key and was the one path the ledger never saw,
+  // while the README claimed all four were counted.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("async function summariseDropped"), src.indexOf("async function compactResponsesInputSummarised"));
+  assert.match(fn, /recordUsage\(COMPACT_MODEL/, "summariseDropped must record its own usage");
+});
+
+test("every recordUsage call site passes the cached figure and the resolved model", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // Require a real first argument, so the function's own definition and any prose mentioning
+  // `recordUsage()` are not counted as call sites.
+  const calls = [...src.matchAll(/recordUsage\([A-Za-z][\w?.]*,[^;]*?\);/gs)].map((m) => m[0]);
+  assert.ok(calls.length >= 5, `expected at least five call sites, found ${calls.length}`);
+  for (const c of calls) {
+    assert.match(c, /cached_tokens/, `call site must pass the cached split: ${c.slice(0, 70)}`);
+  }
+  // reqModel is the CLIENT's id (claude-opus-4-8); the ledger is keyed on the OpenAI model.
+  assert.ok(!/recordUsage\(reqModel\b/.test(src),
+    "usage must not be filed under the client-requested model");
 });

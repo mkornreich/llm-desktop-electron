@@ -15,4 +15,5 @@ user-data/
 .DS_Store
 openai-proxy/tools-dump.txt
 openai-proxy/usage.json
+openai-proxy/usage.test-scratch.json
 settings/server.log

@@ -532,14 +532,31 @@ this app. `GET /usage`:
 
 ```json
 { "since": "2026-07-30T05:01:02Z",
-  "total": { "requests": 3, "input_tokens": 26, "output_tokens": 22, "reasoning_tokens": 0, "tokens": 48 },
+  "total": { "requests": 3, "input_tokens": 26, "output_tokens": 22, "reasoning_tokens": 0,
+             "cached_input_tokens": 18, "uncached_input_tokens": 8, "cache_hit_rate_pct": 69.2,
+             "tokens": 48 },
   "by_model": { "gpt-5.3-codex": { "requests": 2, … }, "gpt-5.4": { "requests": 1, … } } }
 ```
 
-Counted on all four paths (chat and Responses, streaming and not) and persisted to
-`openai-proxy/usage.json` (gitignored), since the proxy restarts on every app launch.
-`reasoning_tokens` is tracked separately — those are billed as output but never shown,
-which is what made the small-budget starvation above possible.
+Counted on all five upstream paths — chat and Responses, streaming and not, plus the
+compaction summariser's own call — and persisted to `openai-proxy/usage.json` (gitignored),
+since the proxy restarts on every app launch. `reasoning_tokens` is tracked separately;
+those are billed as output but never shown, which is what made the small-budget starvation
+above possible.
+
+**`input_tokens` includes cache reads**, following OpenAI's convention — which is the
+*opposite* of the Anthropic-facing `input_tokens` this proxy hands back to the client, where
+cache reads are reported separately as `cache_read_input_tokens`. That matters more than it
+sounds: measured over 8,755 real turns, **96%** of this proxy's input tokens are cache reads,
+so `input_tokens` alone overstates what is billed at the full rate by more than an order of
+magnitude. `uncached_input_tokens` is the figure that predicts the bill.
+
+Two earlier gaps here, both fixed ([issue #20]): the ledger recorded no cache split at all,
+and the summariser's call was never counted despite the sentence above claiming it was.
+Totals accumulated before that fix carry `cached_input_tokens: 0` — not a 0% hit rate, just
+history from before the field existed.
+
+[issue #20]: https://github.com/mkornreich/llm-desktop-electron/issues/20
 
 [issue #5]: https://github.com/mkornreich/llm-desktop-electron/issues/5
 
