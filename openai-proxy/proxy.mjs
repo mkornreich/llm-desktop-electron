@@ -788,33 +788,58 @@ function selectTools(tools, limit) {
 }
 
 // ---- output shaping ----
+//
+// Every selector below is ORDER-INVARIANT, deliberately. The hint they build is spliced
+// into `instructions` (withFormatHint), which sits in the cached prompt prefix — so if the
+// hint text changes, the cache entry for that prefix is gone. Picking "whichever match came
+// first in the array" made the hint depend on the agent's tool ORDER, which is not
+// something the hint has any reason to care about: swapping two equally-matching tools
+// rewrote the instructions and could invalidate a prefix worth ~114k tokens of tool
+// schemas. Sorting the candidates costs nothing and removes the whole class.
+const pickStable = (tools, re) =>
+  (Array.isArray(tools) ? tools : [])
+    .map((t) => String(t?.name || ""))
+    .filter((n) => re.test(n))
+    .sort()[0] || null;
+
 // Names a request's file-writing tool, so the hint can order the model to CALL it by
 // name. A generic "write it to a .svg file" reads as advice, and the model answers with
 // raw markup plus "save this as pelican.svg" — narrating the action instead of doing it.
 const WRITE_TOOL_RE = /^(write|write_file|create_file|fs_write|edit_file|str_replace(_based)?_editor)$/i;
-const findWriteTool = (tools) =>
-  (Array.isArray(tools) ? tools.find((t) => WRITE_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
+const findWriteTool = (tools) => pickStable(tools, WRITE_TOOL_RE);
 // Writing a .svg to disk does NOT display it — that only yields a path the user has to
 // open. The harness surfaces a file inline when it is SENT with display:"render", so the
 // hint has to name that tool too or the model stops at "here is the file".
 const SEND_FILE_TOOL_RE = /^(senduserfile|send_user_file|send_file)$/i;
-const findSendFileTool = (tools) =>
-  (Array.isArray(tools) ? tools.find((t) => SEND_FILE_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
+const findSendFileTool = (tools) => pickStable(tools, SEND_FILE_TOOL_RE);
 
 // The tool that actually paints something into the transcript. In this app that is
 // mcp__visualize__show_widget ("Show visual content — SVG graphics, diagrams, charts …
 // renders inline alongside your text response") — and it is the LAST of the 214 tools,
 // so the old blind slice(0,128) dropped it outright.
-const RENDER_TOOL_RE = /(show_widget|visuali[sz]e|artifact|canvas|render_(svg|chart|diagram))/i;
+//
+// Matched against the tool's OWN name, after any mcp__server__ prefix is stripped. The
+// pattern used to be a bare substring test, so anything containing "canvas" or "artifact"
+// qualified — slack_create_canvas among them — and a session that merely had Slack
+// connected took a different hint branch than the same session without it. Note a leading
+// `(^|_)` anchor does not fix that: "_canvas" still matches. The tool has to BE a renderer,
+// not merely mention one.
+const RENDER_TOOL_RE = /^(show_widget|visuali[sz]e[a-z_]*|artifact|canvas|render_(svg|chart|diagram))$/i;
+// mcp__visualize__show_widget -> show_widget; Artifact -> Artifact.
+const bareToolName = (n) => String(n || "").replace(/^mcp__[^_]+(?:_[^_]+)*?__/, "");
 const findRenderTool = (tools) =>
-  (Array.isArray(tools) ? tools.find((t) => RENDER_TOOL_RE.test(String(t?.name || ""))) : null)?.name || null;
+  (Array.isArray(tools) ? tools : [])
+    .map((t) => String(t?.name || ""))
+    .filter((n) => RENDER_TOOL_RE.test(bareToolName(n)))
+    .sort()[0] || null;
 
 // Tools for inspecting work that runs asynchronously. Without knowing these exist, the
 // model answers "I can't show output from a background task" — which is wrong, it just
-// has to go and fetch it.
+// has to go and fetch it. Sorted for the same reason as the single-tool selectors: the
+// names are interpolated into the hint, so array order would leak into the prefix.
 const BG_TOOL_RE = /^(taskoutput|tasklist|taskget|bashoutput)$/i;
 const findBgTools = (tools) =>
-  (Array.isArray(tools) ? tools : []).map((t) => String(t?.name || "")).filter((n) => BG_TOOL_RE.test(n));
+  (Array.isArray(tools) ? tools : []).map((t) => String(t?.name || "")).filter((n) => BG_TOOL_RE.test(n)).sort();
 
 // Tell the model the things it cannot infer about this client's renderer.
 function buildFormatHint(tools) {
@@ -1345,6 +1370,9 @@ function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
     else if (tc.type === "tool") out.tool_choice = { type: "function", function: { name: sanitizeToolName(tc.name) } };
   }
   if (out.stream) out.stream_options = { include_usage: true };
+  // Same cache routing as the Responses path; both surfaces accept the field.
+  const cacheKey = cacheKeyFor(body);
+  if (cacheKey) out.prompt_cache_key = cacheKey;
   return { payload: out, nameMap, schemas, imagesSent };
 }
 
@@ -1567,6 +1595,10 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
     }
   }
   const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
+  // Route this conversation to its own cache node rather than the bucket every session
+  // shares by default. Stable for the session's life; see cacheKeyFor.
+  const cacheKey = cacheKeyFor(body);
+  if (cacheKey) out.prompt_cache_key = cacheKey;
   // Both fields are required for summaries to appear; effort alone or summary alone gives none.
   //
   // Never for a classifier call. Two independent reasons: its prompt asks for reasoning IN
@@ -1674,6 +1706,39 @@ async function callResponses(payload, isClassifier = false) {
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 const approxTokens = (chars) => Math.round(chars / CHARS_PER_TOKEN_ESTIMATE);
 const kilo = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
+
+// ---- cache routing ----
+//
+// OpenAI caches a request's PREFIX, and routes each request to a cache node by hashing the
+// first tokens of the prompt unless it is told otherwise. Every Claude Code session opens
+// with the same CLI system-prompt head, so without a key all concurrently-running sessions
+// hash to ONE bucket while carrying DIFFERENT full prefixes — they compete for the same
+// node and evict each other. This log shows 35% of requests arriving in a second that
+// carried two or more, and 7-13 distinct live tool-block signatures per hour, so the
+// contention is real rather than theoretical.
+//
+// prompt_cache_key is a routing HINT, not a correctness mechanism: an identical prefix
+// still hits regardless, and a wrong key can only cost a miss, never a wrong answer. That
+// is why it is safe to derive it heuristically.
+//
+// The key must be STABLE for a conversation's life and DISTINCT between conversations. The
+// system prompt plus the first user message satisfy both: fixed once the session starts,
+// and different per session (cwd, project instructions, the opening request). Deliberately
+// NOT the tool list — it legitimately changes mid-session, and re-keying on it would split
+// one conversation across two buckets, which is the problem this exists to avoid.
+function cacheKeyFor(body) {
+  const sys = Array.isArray(body?.system)
+    ? body.system.map((b) => b?.text || "").join("\n")
+    : (body?.system || "");
+  const first = body?.messages?.[0];
+  const firstText = typeof first?.content === "string"
+    ? first.content
+    : Array.isArray(first?.content)
+      ? first.content.map((b) => (typeof b?.text === "string" ? b.text : "")).join("\n")
+      : "";
+  if (!sys && !firstText) return null;   // nothing stable to key on; let OpenAI route it
+  return crypto.createHash("sha256").update(`${sys}\n \n${firstText}`).digest("hex").slice(0, 32);
+}
 
 // What the LAUNCHER configured, for logging only (issue #17). These are reported so a compaction
 // line says which client identity and upper bound were in force, and they are deliberately NOT
@@ -2354,7 +2419,7 @@ const server = http.createServer(async (req, res) => {
 
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
-export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT,
+export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,

@@ -17,7 +17,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         rememberUnsupported, stripUnsupported,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
-        COMPACTION_EFFECT, approxTokens, kilo } =
+        COMPACTION_EFFECT, cacheKeyFor, approxTokens, kilo } =
   await import("./proxy.mjs");
 
 // ---------- math delimiter rewriting ----------
@@ -1923,4 +1923,72 @@ test("every turn-end log line reports in_tokens, on the streaming path too", () 
   const ends = src.match(/log\(`  <- [^`]*out_tokens=[^`]*`/g) || [];
   assert.ok(ends.length >= 2, `expected at least the streaming and non-streaming sites, found ${ends.length}`);
   for (const e of ends) assert.match(e, /in_tokens=/, `turn-end log without in_tokens: ${e.slice(0, 80)}`);
+});
+
+// ---------- prompt-cache routing and hint stability ----------
+
+test("the format hint does not depend on tool ORDER", () => {
+  // The hint goes into `instructions`, which sits in the cached prefix. Picking "first
+  // match in the array" made a harmless reordering rewrite the prefix.
+  const a = [{ name: "Artifact" }, { name: "mcp__visualize__show_widget" }, { name: "Write" }];
+  const b = [{ name: "mcp__visualize__show_widget" }, { name: "Write" }, { name: "Artifact" }];
+  assert.equal(buildFormatHint(a), buildFormatHint(b), "reordering tools must not change the hint");
+  assert.equal(findRenderTool(a), findRenderTool(b));
+  assert.equal(findWriteTool(a), findWriteTool(b));
+});
+
+test("background tool names are interpolated in a stable order", () => {
+  const one = findBgTools([{ name: "TaskOutput" }, { name: "BashOutput" }, { name: "TaskList" }]);
+  const two = findBgTools([{ name: "TaskList" }, { name: "TaskOutput" }, { name: "BashOutput" }]);
+  assert.deepEqual(one, two);
+  assert.deepEqual(one, [...one].sort(), "must be sorted, not array order");
+});
+
+test("the render-tool pattern is anchored, so an unrelated tool cannot hijack the hint", () => {
+  // Unanchored, /canvas|artifact/ matched slack_create_canvas — so merely connecting Slack
+  // changed which branch of the hint fired.
+  assert.equal(findRenderTool([{ name: "slack_create_canvas" }]), null);
+  assert.equal(findRenderTool([{ name: "mcp__visualize__show_widget" }]), "mcp__visualize__show_widget");
+  assert.equal(findRenderTool([{ name: "Artifact" }]), "Artifact");
+});
+
+test("cacheKeyFor is stable across a conversation and distinct between conversations", () => {
+  const sys = "You are Claude Code, in /repo/one";
+  const first = { role: "user", content: "start the task" };
+  const turn1 = { system: sys, messages: [first] };
+  const turn2 = { system: sys, messages: [first, { role: "assistant", content: "ok" }, { role: "user", content: "next" }] };
+  assert.equal(cacheKeyFor(turn1), cacheKeyFor(turn2), "later turns of one session must key the same");
+
+  const other = { system: "You are Claude Code, in /repo/two", messages: [first] };
+  assert.notEqual(cacheKeyFor(turn1), cacheKeyFor(other), "different sessions must not collide");
+});
+
+test("cacheKeyFor ignores the tool list, which legitimately changes mid-session", () => {
+  const base = { system: "s", messages: [{ role: "user", content: "hi" }] };
+  const withTools = { ...base, tools: [{ name: "Read" }, { name: "Write" }] };
+  assert.equal(cacheKeyFor(base), cacheKeyFor(withTools),
+    "re-keying on tools would split one conversation across two cache buckets");
+});
+
+test("cacheKeyFor reads block content and degrades to null with nothing stable", () => {
+  const blocks = { system: [{ type: "text", text: "sys" }], messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] };
+  const plain = { system: "sys", messages: [{ role: "user", content: "hello" }] };
+  assert.equal(cacheKeyFor(blocks), cacheKeyFor(plain), "block and string forms must agree");
+  assert.equal(cacheKeyFor({}), null);
+  assert.equal(cacheKeyFor({ messages: [] }), null);
+  assert.match(cacheKeyFor(plain), /^[0-9a-f]{32}$/);
+});
+
+test("both surfaces send prompt_cache_key, and it survives an unrelated payload change", () => {
+  const body = { model: "claude-opus-4-8", system: "s", max_tokens: 100,
+                 messages: [{ role: "user", content: "hi" }] };
+  const r = toResponses(body, "gpt-5.6-sol", false);
+  const c = toOpenAI(body, "gpt-4.1-mini", false);
+  const key = cacheKeyFor(body);
+  assert.equal(r.payload.prompt_cache_key, key);
+  assert.equal(c.payload.prompt_cache_key, key);
+
+  // A mid-session tool change must not move the conversation to a different bucket.
+  const later = { ...body, tools: [{ name: "Read", input_schema: { type: "object" } }] };
+  assert.equal(toResponses(later, "gpt-5.6-sol", false).payload.prompt_cache_key, key);
 });

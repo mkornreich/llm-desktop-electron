@@ -28,17 +28,30 @@ OPENAI_MODEL=gpt-5.6-sol
 # Forcing the Responses API gives all 236 tools and correct tool calls.
 OPENAI_API=responses
 
-# Fast model for Claude Code's auto-mode SAFETY CLASSIFIER — a separate, latency-
-# sensitive LLM call made before each risky action. Routing it to a small fast
-# model (instead of the slow codex model) avoids the "claude-opus-4-8 temporarily
-# unavailable" fail-closed blocks. The proxy detects the classifier request by its
-# system prompt and sends it to this model via Chat Completions.
-OPENAI_CLASSIFIER_MODEL=gpt-4.1-mini
+# Model for Claude Code's BASH COMMAND PREFIX DETECTION — not the safety verdict, which
+# is OPENAI_CLASSIFIER_SAFETY_MODEL. The CLI asks a model to reduce a command to the prefix
+# an allowlist entry would match ("git commit -m x" -> "git commit", "npm test" -> "none"),
+# and to answer "command_injection_detected" when a command smuggles in a second command.
+# That last case is the security-relevant one: a prefix of "echo" for
+# `echo hi && rm -rf /tmp/x` would let rm ride along on an allowlisted echo.
+#
+# gpt-5.4-nano, measured on the CLI's own prompt with 14 held-out cases:
+#   gpt-5.4-nano  12/14  median 1050ms   caught && chaining
+#   gpt-4.1-nano  12/14  median  857ms   missed && chaining
+#   gpt-4.1-mini  11/14  median  890ms   caught && only 2 of 3 times
+#   gpt-5.4-mini  13/14  median  820ms   NEVER caught && (0 of 3) — highest score, worst
+#                                        failure. Do not use it here.
+# All four missed "docker ps -a" -> "docker ps" and most missed "git push" -> "none";
+# those are conservative errors (an unnecessary prompt), unlike an injection miss.
+#
+# Note this path is RARE in practice — one call in a 7,730-request log, because the CLI
+# only needs it when a command is a candidate for prefix allowlisting.
+OPENAI_CLASSIFIER_MODEL=gpt-5.4-nano
 
 # Also request that model on the agent side. NOTE: the desktop builds the agent's
 # env from a curated set, so this may not reach the in-app agent — the proxy-side
 # routing above is the reliable mechanism; this is for the CLI agent / propagation.
-CLAUDE_CODE_BG_CLASSIFIER_MODEL=gpt-4.1-mini
+CLAUDE_CODE_BG_CLASSIFIER_MODEL=gpt-5.4-nano
 
 # Make the model picker list OpenAI models: with gateway model-discovery on, the
 # app fetches GET <base>/v1/models and shows those ids. The proxy serves the list
