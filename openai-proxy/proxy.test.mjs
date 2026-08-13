@@ -3,6 +3,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+// Resolved against EMPTY sources throughout: these tests assert what the code defaults to, and
+// reading the developer's own ~/.dbeaver-ai-complete or .openai-model would make the result
+// depend on the machine. `resolve({env:{},project:{},home:{}})` is the shipped default.
+import { resolve as resolveConfig } from "./config.mjs";
+const DEFAULTS = resolveConfig({ env: {}, project: {}, home: {} }).values;
 
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
@@ -830,8 +835,17 @@ test("issue #8: truncated turns are continued, bounded by a cumulative ceiling",
   assert.match(src, /totalOutTokens < MAX_TURN_OUTPUT_TOKENS/,
     "continuations must respect the cumulative ceiling");
   assert.match(src, /Do not repeat anything already written/, "the resume prompt must forbid repetition");
-  // the ceiling exists because splicing into one message can exceed the client's own maximum
-  assert.match(src, /MAX_TURN_OUTPUT_TOKENS = parseInt/);
+  // The ceiling exists because splicing into one message can exceed the client's own maximum,
+  // which reports "Claude's response exceeded the 64000 output token maximum". Asserted as the
+  // resolved VALUE rather than as the shape of its expression: the previous version matched
+  // `MAX_TURN_OUTPUT_TOKENS = parseInt`, which broke the moment the setting moved into the
+  // config resolver while behaving identically — and would equally have passed if the ceiling
+  // had been raised past the client's limit, which is the thing actually worth guarding.
+  assert.equal(typeof DEFAULTS.OPENAI_MAX_TURN_OUTPUT_TOKENS, "number");
+  assert.ok(DEFAULTS.OPENAI_MAX_TURN_OUTPUT_TOKENS > 0, "a ceiling of 0 would block every turn");
+  assert.ok(DEFAULTS.OPENAI_MAX_TURN_OUTPUT_TOKENS < 64000,
+    `the turn ceiling (${DEFAULTS.OPENAI_MAX_TURN_OUTPUT_TOKENS}) must stay under the client's ` +
+    `own 64000 per-response maximum, or the splice it is meant to bound gets rejected wholesale`);
 });
 
 test("issue #8: the cumulative total is what gets reported, not the last pass", () => {
@@ -978,11 +992,10 @@ test("issue #6/#11: the safety verdict never uses a model measured to be more pe
   // `ssh backend-prod` command that gpt-5.3-codex blocked, and emitted no verdict at all on
   // another prompt; gpt-4.1 allowed a Production Reads block too. Neither may be the default
   // here, however fast they are. (Speed alone is settled separately, in the #11 test.)
-  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  const m = src.match(/PROJECT\.OPENAI_CLASSIFIER_SAFETY_MODEL \|\| "([^"]*)"/);
-  assert.ok(m, "safety model default not found");
-  assert.ok(!/^gpt-4\.1/.test(m[1]),
-    `the safety default must not be a gpt-4.1 variant (found ${m[1]})`);
+  const model = DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL;
+  assert.ok(model, "there must be a safety model default");
+  assert.ok(!/^gpt-4\.1/.test(model),
+    `the safety default must not be a gpt-4.1 variant (found ${model})`);
 });
 
 test("issue #6: safety and prefix resolve to different models from the main one", () => {
@@ -1013,10 +1026,22 @@ test("issue #6: the verdict is never fabricated by the proxy", () => {
 });
 
 test("issue #6: the proxy log is appended, not truncated, on launch", () => {
-  const run = fs.readFileSync(new URL("../run.sh", import.meta.url), "utf8");
-  assert.ok(!/node proxy\.mjs > proxy\.log/.test(run),
-    "truncating on launch destroys the evidence for the next bug report");
-  assert.match(run, /node proxy\.mjs >> proxy\.log/);
+  // Truncating on launch destroys the evidence for the next bug report — which is exactly what
+  // happened to issue #6, whose classifier failure was already gone by the time it was reported.
+  // The launch moved from a shell redirect in run.sh into ensure-proxy.mjs, so the invariant is
+  // asserted where it now lives, plus a negative check that no launch path reintroduces a
+  // truncating redirect.
+  const ensure = fs.readFileSync(new URL("../scripts/ensure-proxy.mjs", import.meta.url), "utf8");
+  assert.match(ensure, /openSync\(LOG, "a"\)/, "the log must be opened for append");
+  assert.ok(!/openSync\(LOG, "w"\)/.test(ensure), "never for truncation");
+  assert.match(ensure, /renameSync\(LOG/, "and it must rotate rather than grow without bound");
+  for (const f of ["../run.sh", "../scripts/ensure-proxy.mjs", "./supervise.mjs"]) {
+    // Comments are stripped first: these files EXPLAIN the old truncating redirect, and a check
+    // that cannot tell prose from code fails on its own documentation.
+    const code = fs.readFileSync(new URL(f, import.meta.url), "utf8")
+      .split("\n").filter((l) => !/^\s*(\/\/|#)/.test(l)).join("\n");
+    assert.ok(!/[^>]> *proxy\.log/.test(code), `${f} must not truncate proxy.log`);
+  }
 });
 
 // ---------- issue #7: show the actual tasks, and narrate the work ----------
@@ -1339,7 +1364,12 @@ test("a context overflow is not treated as a plain empty turn", () => {
 
 test("issue #11: a classifier verdict is timed, and warns before the CLI's cliff", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /CLASSIFIER_SLOW_MS = parseInt/);
+  // A threshold at or past the CLI's own 60s abort can never fire before the denial it is
+  // supposed to predict, so the value matters and the expression does not.
+  assert.equal(typeof DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS, "number");
+  assert.ok(DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS > 0 && DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS < 60000,
+    `the slow-verdict warning must land before the CLI's 60s fail-closed deadline ` +
+    `(got ${DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS}ms)`);
   assert.match(src, /classifier=\$\{family\} verdict in \$\{ms\}ms/);
   assert.match(src, /The CLI aborts its classifier at 60s and then DENIES the action/);
 });
@@ -1356,8 +1386,8 @@ test("issue #11: the safety verdict uses a model that fits the CLI's deadline", 
   // verdicts on gpt-5.3-codex: median 12.2s, p90 54s, max 287s, 2 past the cliff. gpt-5.4
   // answered the four largest real prompts in 1.4-3.5s and was never more permissive.
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /PROJECT\.OPENAI_CLASSIFIER_SAFETY_MODEL \|\| "gpt-5\.4"/,
-    "the safety model must default to something that answers inside the deadline");
+  assert.equal(DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4",
+    "the safety model must default to the one measured to answer inside the deadline");
   // and the measurement that justifies it must stay next to the decision
   assert.match(src, /b6e29189\s+YES \/ 37667ms/);
   assert.match(src, /4\.1 too permissive/);
@@ -1547,9 +1577,12 @@ test("OPENAI_API overrides the per-request surface choice", () => {
 });
 
 test("the tool caps that make the surface choice matter are unchanged", () => {
-  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /MAX_TOOLS_CHAT = parseInt\(process\.env\.OPENAI_MAX_TOOLS \|\| "128"/);
-  assert.match(src, /MAX_TOOLS_RESPONSES = parseInt\([^)]*\) \|\| Infinity/);
+  // Probed against the live API: Chat Completions rejects a 129th tool, Responses accepted
+  // every size tried up to 512. The caps are asserted as values because that is what decides
+  // whether 108 of this app's 236 tools survive the request.
+  assert.equal(DEFAULTS.OPENAI_MAX_TOOLS, 128, "Chat Completions' hard cap");
+  assert.equal(DEFAULTS.OPENAI_MAX_TOOLS_RESPONSES, Infinity,
+    "Responses showed no cap, and 0 is how that is configured");
 });
 
 // ---------- an oversized single message is now compactable ----------

@@ -29,9 +29,15 @@ Electron app and can be ignored if you just want the CLI on OpenAI.
 ### Quick start
 
 ```bash
-export OPENAI_API_KEY=sk-...           # the only secret involved
-cd openai-proxy && node proxy.mjs      # listens on 127.0.0.1:8123
+export OPENAI_API_KEY=sk-...              # the only secret involved
+cd openai-proxy && node supervise.mjs     # listens on 127.0.0.1:8123, restarts on crash
 ```
+
+`node proxy.mjs` still works and is the right thing for a one-off. Prefer the supervisor
+for anything you leave running: the proxy has taken itself down twice on a dropped upstream
+socket, and nothing noticed for hours — the app, the launcher and every agent kept running
+against a closed port. The supervisor restarts it, logs why, and gives up loudly rather than
+looping if it cannot start at all.
 
 Then, in another shell, point the stock Claude Code CLI at it:
 
@@ -70,6 +76,45 @@ Instead of environment variables you can put `KEY=VALUE` lines in
 `~/.dbeaver-ai-complete` (a pre-existing per-user file this proxy will read an
 `apiKey=` from if it happens to exist). Precedence is env var → project file →
 user file → default.
+
+That precedence lives in exactly one place, [`openai-proxy/config.mjs`](openai-proxy/config.mjs),
+which also produces the config hash below. To see what a launch would actually use:
+
+```bash
+node openai-proxy/config.mjs            # the effective config, with the source of each value
+```
+
+`--hash` prints just the config hash, `--validate` checks it and exits non-zero on an error.
+The key never appears in any of them — only a `sha256:` fingerprint of it.
+
+### Knowing which proxy is running
+
+`/health` reports an identity, not just liveness:
+
+```json
+{ "ok": true, "instance": "8f3c…", "pid": 82110, "configHash": "38d9c8b2…",
+  "codeVersion": "a8e08f01…", "inflight": 0, "model": "gpt-5.6-sol", "…": "…" }
+```
+
+- **`instance`** is a nonce generated at startup and also written to `proxy-runtime.json`.
+  Only the process that generated it can serve it, so matching both proves ownership — which is
+  what lets the launcher restart *its* proxy and refuse to touch anything else.
+- **`configHash`** covers every behaviour-affecting setting plus a fingerprint of the key.
+  The launcher compares it and restarts a proxy that is serving stale settings, instead of the
+  old behaviour: any answer on `/health` counted as healthy, so a changed model silently did not
+  take effect while the launcher printed "proxy healthy".
+- **`codeVersion`** is a hash of the proxy sources, catching a process running older translation
+  logic with current settings.
+- **`inflight`** is how many turns are being answered right now, so a restart can say what it
+  would interrupt.
+
+Supervisor behaviour is tuned by environment variable; the defaults are meant to be left alone.
+`PROXY_MAX_FAST_FAILURES` (8) bounds immediate restart attempts, `PROXY_RESTART_BASE_MS` (500)
+and `PROXY_RESTART_MAX_MS` (30000) set the backoff, and `PROXY_HEALTH_EVERY_MS` (15000) /
+`PROXY_HEALTH_TIMEOUT_MS` (5000) / `PROXY_HEALTH_MISSES` (3) control the watchdog that replaces a
+proxy holding the port without answering. Set `PROXY_HEALTH_EVERY_MS=0` to disable that watchdog.
+An externally-killed proxy always restarts and never counts toward the give-up bound, so manually
+restarting it does not disable auto-restart.
 
 ### Which API surface, and why it matters
 
@@ -195,9 +240,23 @@ Node 26; there is no `engines` field, so older versions are untested rather than
 ./settings.sh
 ```
 
-Every parameter, grouped, each with the reasoning behind it, plus live status (app up,
-proxy up, model, tokens used) and **Save & restart**, since most settings are read at
-launch.
+Every parameter, grouped, each with the reasoning behind it, plus live status and
+**Save & restart**, since most settings are read at launch.
+
+The status line separates **configured** from **active**, because they can differ and the
+window used to show only the files and present that as the running state. A proxy serving the
+previous settings is now labelled `STALE — restart to apply` rather than appearing healthy; a
+launch-time `OPENAI_MODEL=x ./run.sh` override is shown as an override rather than as your saved
+configuration; and in Anthropic mode the OpenAI-only settings are dimmed and marked as not in
+effect — still saved, and applied again the moment you switch back.
+
+**Save & restart** performs the sequence the state actually requires and verifies the result:
+it stops the app first (it holds an exclusive LevelDB lock on the session store), waits for it to
+exit rather than sleeping hopefully, stops the proxy *only if it can prove the proxy is ours*,
+waits for the port to be released, launches, and then confirms the new proxy reports the expected
+config hash before reporting success. If a turn is in flight it says how many and asks first. It
+previously ran `pkill -f llm-desktop-electron/user-data` — which matches any process whose command
+line merely *mentions* that path — slept 1.5s, and reported success before anything had started.
 
 It is a local page rather than an Electron window for a concrete reason: the
 `Resources/app.asar → app/` symlink makes Electron load *Anthropic's* app and ignore

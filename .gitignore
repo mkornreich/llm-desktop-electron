@@ -5,8 +5,9 @@ node_modules/
 # Isolated app profile — session/login data, not source
 user-data/
 
-# Runtime logs
+# Runtime logs, including the rotated copies (proxy.log.1)
 *.log
+*.log.[0-9]
 
 # Local backups of patched files (originals are preserved in git history)
 *.orig
@@ -17,3 +18,11 @@ openai-proxy/tools-dump.txt
 openai-proxy/usage.json
 openai-proxy/usage.test-scratch.json
 settings/server.log
+
+# Which proxy process is running right now: pid, instance nonce, config hash. Per-machine
+# runtime state, meaningless in another checkout, and committing it would let a stale record
+# claim ownership of a pid on someone else's machine.
+openai-proxy/proxy-runtime.json
+
+# Temporary agent worktrees. Not source, and never to be committed.
+.claude/worktrees/

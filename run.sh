@@ -120,21 +120,25 @@ echo "[run] CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL} (always-enable=
 if [ "$PROVIDER" = "openai" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
-  if ! curl -sf "${PROXY_URL}/health" >/dev/null 2>&1; then
-    echo "[run] starting translation proxy on ${PROXY_URL}"
-    # APPEND, and rotate at 8MB. This used to be `> proxy.log`, which truncated the log on
-    # every launch — so by the time a bug was reported the evidence for it was already gone.
-    # That is exactly what happened with the auto-mode classifier failure in issue #6.
-    # `if`, not `&&`: a false test as the last command of an && list returns non-zero, which
-    # under `set -e` would kill the subshell before the proxy ever started.
-    ( cd openai-proxy || exit 1
-      if [ -f proxy.log ] && [ "$(wc -c < proxy.log)" -gt 8388608 ]; then mv -f proxy.log proxy.log.1; fi
-      PORT="$PORT" nohup node proxy.mjs >> proxy.log 2>&1 & disown )
-    for _ in $(seq 1 10); do curl -sf "${PROXY_URL}/health" >/dev/null 2>&1 && break; sleep 1; done
+  # This used to be `curl -sf /health` — "something answered, good enough". It was not:
+  #   * a model change did not take effect, because the OLD proxy answered /health and got
+  #     reused while the launcher printed "proxy healthy";
+  #   * a foreign listener on the port was indistinguishable from ours;
+  #   * a crashed proxy's hand-started replacement ran as PPID 1, so nothing could tell whether
+  #     it was ours to restart.
+  # ensure-proxy.mjs decides from evidence — an instance nonce for identity, a config hash for
+  # equivalence, a code hash for staleness — and starts the SUPERVISOR rather than the proxy, so
+  # a crash is followed by a restart instead of by hours of a dead port. Its exit status is the
+  # answer; there is no second opinion to take here.
+  #
+  # NOT piped through sed for a prefix: under a pipeline the exit status belongs to the last
+  # command, so `node ... | sed` would report sed's success and the check would never fire. This
+  # script does set `pipefail`, which happens to make it work — but a correctness guarantee that
+  # depends on a `set` line a hundred lines away is one refactor from being silently wrong.
+  if ! node scripts/ensure-proxy.mjs --port "$PORT"; then
+    echo "[run] the translation proxy is not serving the configured settings — see the lines above"
+    exit 1
   fi
-  curl -sf "${PROXY_URL}/health" >/dev/null 2>&1 \
-    && echo "[run] proxy healthy: $(curl -s ${PROXY_URL}/health)" \
-    || { echo "[run] proxy failed to start — see openai-proxy/proxy.log"; exit 1; }
   export PROXY_ANTHROPIC_BASE_URL="${PROXY_URL}"
   echo "[run] PROXY_ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
   # Claude Code resolves context capacity from its INTERNAL model identity before it

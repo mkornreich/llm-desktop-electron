@@ -25,6 +25,11 @@
         padding:3px 10px;font-size:11.5px;color:var(--muted);white-space:nowrap}
   .chip b{color:var(--ink);font-weight:600}
   .chip.on b{color:var(--ok)} .chip.off b{color:var(--warn)}
+  .chip.warn{border-color:var(--warn)} .chip.warn b{color:var(--warn)}
+  /* An OpenAI-only setting while the agent is on Anthropic. Dimmed and marked, never
+     hidden or cleared: the value is still what applies when the provider goes back. */
+  .row.inert{opacity:.55} .row.inert .ctl{filter:grayscale(1)}
+  .inert-note{color:var(--warn);margin-top:4px}
   main{padding:20px 26px 130px;max-width:900px}
   section{background:var(--panel);border:1px solid var(--line);border-radius:12px;
           margin:0 0 16px;overflow:hidden}
@@ -123,8 +128,25 @@ function refreshDirty() {
   setMsg(d.length ? `${d.length} unsaved change${d.length > 1 ? "s" : ""}` : "", d.length ? "warn" : "");
 }
 
+// Everything persisted in .openai-model is read only in OpenAI mode: run.sh exports those
+// CLAUDE_CODE_* keys only for the proxy path, and several hold OpenAI model ids that Anthropic
+// would reject outright. .provider, .privacy and .sync apply either way.
+const OPENAI_ONLY = (s) => s.file === ".openai-model";
+
 function control(s) {
   const v = DRAFT[s.key];
+  if (s.type === "enum" && s.key === "PROVIDER") {
+    // Switching the provider changes which OTHER controls are in effect, so this one re-renders
+    // rather than only recording the draft value.
+    const sel = document.createElement("select");
+    for (const o of s.options) {
+      const op = document.createElement("option");
+      op.value = o; op.textContent = o; if (o === v) op.selected = true;
+      sel.append(op);
+    }
+    sel.onchange = () => { DRAFT[s.key] = sel.value; render(); };
+    return sel;
+  }
   if (s.type === "bool") {
     const w = document.createElement("label"); w.className = "sw";
     const i = document.createElement("input"); i.type = "checkbox"; i.checked = isBoolOn(v);
@@ -185,6 +207,16 @@ function render() {
       lab.append(key);
       const help = document.createElement("div"); help.className = "help"; help.textContent = s.help || "";
       left.append(lab, help);
+      // In Anthropic mode the OpenAI-only settings are inert — run.sh does not export them, and
+      // several hold OpenAI model ids that Anthropic would simply reject. They are marked, not
+      // hidden and never cleared: the value is still what will be used the moment the provider
+      // goes back to openai, and deleting it would lose a deliberate choice.
+      if (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s)) {
+        row.classList.add("inert");
+        const n = document.createElement("div"); n.className = "help inert-note";
+        n.textContent = "Not in effect: the agent is set to Anthropic. Saved, and applied again when you switch back to OpenAI.";
+        left.append(n);
+      }
       const ctl = document.createElement("div"); ctl.className = "ctl"; ctl.append(control(s));
       row.append(left, ctl); sec.append(row);
     }
@@ -208,14 +240,48 @@ async function refreshStatus() {
   try { st = await window.settings.status(); } catch { return; }
   el.textContent = "";
   el.append(chip("app", st.appRunning ? "running" : "not running", st.appRunning ? "on" : "off"));
-  if (st.proxy) {
-    el.append(chip("proxy", "up", "on"));
-    el.append(chip("model", st.proxy.model || "?"));
-    if (st.proxy.classifier_model) el.append(chip("classifier", st.proxy.classifier_model));
-    el.append(chip("api", st.proxy.api || "?"));
+
+  // "agent provider", not "provider". Only the local agent is affected by this setting — the
+  // chat window is always the remote claude.ai app talking to Anthropic — and calling it
+  // "provider" made it read as though it switched the whole application.
+  const cfg = st.configured || {};
+  el.append(chip("agent provider", cfg.provider || "?", cfg.provider === "openai" ? "on" : ""));
+
+  // CONFIGURED and ACTIVE are separate rows because they can legitimately differ, and the
+  // window used to show only the files and present that as the live state. An edited-but-not-
+  // restarted setting looked applied; a stale proxy looked healthy.
+  if (cfg.provider === "openai") {
+    const state = st.proxyState;
+    if (state === "ours") {
+      el.append(chip("proxy", "serving these settings", "on"));
+      el.append(chip("model", st.proxy.model || "?"));
+      if (st.proxy.classifier_model) el.append(chip("classifier", st.proxy.classifier_model));
+      el.append(chip("api", st.proxy.api || "?"));
+      if (st.proxy.inflight) el.append(chip("in flight", String(st.proxy.inflight)));
+    } else if (state === "stale") {
+      // The failure this exists to surface: a running proxy answering /health with the PREVIOUS
+      // configuration. It looks healthy from every angle except this one.
+      el.append(chip("proxy", "STALE — restart to apply", "warn"));
+      el.append(chip("running", st.proxy ? `${st.proxy.model} (${st.proxy.configHash || "?"})` : "not answering", "warn"));
+      el.append(chip("configured", `${cfg.model} (${cfg.configHash})`));
+    } else if (state === "foreign") {
+      el.append(chip("proxy", "PORT TAKEN by another process", "warn"));
+      el.append(chip("detail", st.proxyStateReason || "", "warn"));
+    } else {
+      el.append(chip("proxy", "not running", "off"));
+      el.append(chip("configured", `${cfg.model} (${cfg.api})`));
+    }
   } else {
-    el.append(chip("proxy", "not running", "off"));
+    // Anthropic mode has no proxy by design, so "not running" is the correct state rather than a
+    // fault. Saying nothing here made a correct configuration look broken.
+    el.append(chip("proxy", "not used in anthropic mode", ""));
   }
+
+  // A launch-time environment override resolves to the same value as a saved one, so without
+  // this the window would report a temporary override as the persisted configuration.
+  if (cfg.envOverrides?.length)
+    el.append(chip("env override", cfg.envOverrides.join(", "), "warn"));
+  for (const e of st.validation?.errors || []) el.append(chip("config error", e, "warn"));
   if (st.usage && st.usage.total) {
     const t = st.usage.total;
     el.append(chip("tokens this proxy", `${(t.tokens || 0).toLocaleString()}`));
@@ -248,13 +314,33 @@ $("#revert").onclick = () => {
   render(); setMsg("Reverted", "");
 };
 $("#relaunch").onclick = async () => {
+  const btn = $("#relaunch");
   try {
     await save();
-    setMsg("Restarting the app…", "");
-    await window.settings.relaunch();
-    setTimeout(refreshStatus, 6000);
-    setMsg("App restarted with these settings", "ok");
+    // Warn before discarding work. A turn can be minutes of real work and the old restart threw
+    // it away silently; the count comes from the proxy, so it is what is actually in flight
+    // rather than a guess.
+    let st = null;
+    try { st = await window.settings.status(); } catch { /* status is best-effort here */ }
+    const busy = st?.proxy?.inflight || 0;
+    if (busy && !confirm(
+        `${busy} request${busy > 1 ? "s" : ""} ${busy > 1 ? "are" : "is"} still being answered. ` +
+        `Restarting now will interrupt ${busy > 1 ? "them" : "it"} and that work will be lost.\n\n` +
+        `Restart anyway?`)) {
+      setMsg("Restart cancelled", "");
+      return;
+    }
+    btn.disabled = true;
+    setMsg("Stopping the app, then the proxy…", "");
+    // The server now performs the whole sequence and VERIFIES the result, so this reports what
+    // actually happened instead of announcing success the moment the request returned.
+    const r = await window.settings.relaunch();
+    await refreshStatus();
+    if (r.error) setMsg(r.error, "warn");
+    else if (r.verified === false) setMsg("Launched, but the new settings are not serving yet", "warn");
+    else setMsg(`Restarted — ${r.model || r.verified || "running"}`, "ok");
   } catch (e) { setMsg("Restart failed: " + e.message, "warn"); }
+  finally { btn.disabled = false; }
 };
 
 load().catch((e) => { $("#form").textContent = "Failed to load settings: " + e.message; });
