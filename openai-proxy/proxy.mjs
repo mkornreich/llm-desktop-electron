@@ -24,6 +24,12 @@ import {
 import {
   newInstanceId, writeManifest, readManifest, clearManifest, REPO,
 } from "../scripts/lib/proxy-runtime.mjs";
+import { ToolRegistry } from "./tool-registry.mjs";
+import { parseRequestBody, validateMessagesRequest, parseToolArguments } from "./request-policy.mjs";
+// `anthropicError` is deliberately NOT imported: this file already has a function of that name
+// that writes to a response. Importing the body-builder under the same name is how you end up
+// sending a plain object where a response was expected.
+import { RequestError, TranslationError, errorResponse } from "./errors.mjs";
 
 // ---------- config ----------
 // Every setting, its precedence and its coercion now live in config.mjs, which also produces
@@ -474,7 +480,11 @@ function usageSummary() {
 
 // ---------- helpers ----------
 const rid = (p) => p + crypto.randomBytes(16).toString("hex");
-const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
+// safeParse is GONE, deliberately. It was `try { JSON.parse(s) } catch { return {} }`, used for
+// both the client's request body and the model's tool arguments, and `{}` is the wrong answer for
+// both: an unreadable request became an empty conversation, and unreadable tool arguments became
+// an executable call with no input. Parsing now goes through request-policy.mjs, which throws.
+// Nothing here should reacquire a JSON parser that cannot fail.
 // Date included on purpose. With time-of-day alone, any measurement across the log's day
 // boundary silently wraps — which produced two wrong latency figures while diagnosing the
 // classifier aborts (a "median 34s" and then a "median 483s", both artefacts) before the
@@ -821,10 +831,22 @@ function pruneToolArgs(schema, args) {
   return { args: out, dropped };
 }
 // Prune by tool name, logging what was removed so it is never silent.
-function pruneByName(schemas, name, args) {
-  const { args: pruned, dropped } = pruneToolArgs(schemas?.get?.(name), args);
+function pruneByName(registry, name, args) {
+  const { args: pruned, dropped } = pruneToolArgs(registry?.schema?.(name), args);
   if (dropped.length) log(`  ! ${name}: dropped ${dropped.length} argument(s) not in its schema: ${dropped.join(", ")}`);
   return pruned;
+}
+
+// The model's argument bytes -> arguments, strictly. Throws TranslationError rather than
+// returning a value, because there is no safe value to return: `{}` is not "no arguments", it is
+// a complete executable call whose arguments were lost. `Bash({})` and `Write({})` are
+// indistinguishable to the agent from calls the model meant to make.
+//
+// Callers must therefore be prepared to fail the turn. That is the point — the previous behaviour
+// could not fail, so it always produced something runnable.
+function toolArgs(registry, name, raw) {
+  const args = parseToolArguments(raw, { toolName: name, schema: registry?.schema?.(name) });
+  return pruneByName(registry, name, args);
 }
 
 // ---- tool selection ----
@@ -1406,41 +1428,44 @@ function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
   if (temp != null) out.temperature = temp;
   if (body.top_p != null) out.top_p = body.top_p;
   if (body.stop_sequences?.length) out.stop = body.stop_sequences;
-  const nameMap = new Map(); // sanitized -> original, to translate tool_calls back
-  const schemas = new Map(); // original tool name -> input_schema, for argument pruning
+  // The registry validates the WHOLE catalog before the cap drops anything, so a name collision
+  // cannot depend on which tools happened to survive. It throws, and the caller turns that into a
+  // 400 naming both tools — see tool-registry.mjs for why renaming would be worse.
+  const registry = ToolRegistry.from(body.tools);
   if (body.tools?.length) {
     const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
     if (dropped.length) log(`chat cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}: ${dropped.slice(0, 12).join(", ")}${dropped.length > 12 ? ", …" : ""}`);
-    out.tools = tools.map((t) => {
-      const name = sanitizeToolName(t.name);
-      if (name !== t.name) nameMap.set(name, t.name);
-      schemas.set(t.name, t.input_schema);
-      return { type: "function", function: { name, description: t.description, parameters: t.input_schema } };
-    });
+    out.tools = tools.map((t) => ({
+      type: "function",
+      function: { name: registry.wireName(t.name), description: t.description, parameters: t.input_schema },
+    }));
   }
   if (body.tool_choice) {
     const tc = body.tool_choice;
     if (tc.type === "auto") out.tool_choice = "auto";
     else if (tc.type === "any") out.tool_choice = "required";
-    else if (tc.type === "tool") out.tool_choice = { type: "function", function: { name: sanitizeToolName(tc.name) } };
+    else if (tc.type === "tool") out.tool_choice = { type: "function", function: { name: registry.wireName(tc.name) } };
   }
   if (out.stream) out.stream_options = { include_usage: true };
   // Same cache routing as the Responses path; both surfaces accept the field.
   const cacheKey = cacheKeyFor(body);
   if (cacheKey) out.prompt_cache_key = cacheKey;
-  return { payload: out, nameMap, schemas, imagesSent };
+  return { payload: out, registry, imagesSent };
 }
 
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
-function toAnthropic(oai, reqModel, nameMap, schemas) {
+function toAnthropic(oai, reqModel, registry) {
   const choice = oai.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
   if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
   {
-    const nm = (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name;
-    content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: nm, input: pruneByName(schemas, nm, safeParse(tc.function?.arguments || "{}")) });
+    const nm = registry.originalName(tc.function?.name);
+    // Throws on unparseable arguments; the route handler turns that into an error response rather
+    // than handing the agent a call it cannot trust.
+    content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: nm,
+                   input: toolArgs(registry, nm, tc.function?.arguments) });
   }
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel,
@@ -1535,7 +1560,7 @@ function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.string
 // `model` is the OpenAI model that actually answered, which is what the usage ledger must be
 // keyed on. They differ on every request (claude-opus-4-8 vs gpt-5.6-sol), and this path used
 // to file its usage under the client's name — the only one of the four that did.
-async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null, model = reqModel) {
+async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -1584,16 +1609,19 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null,
       for (const tc of d.tool_calls || []) {
         let tb = toolBlocks.get(tc.index);
         if (!tb) {
-          tb = { aIndex: nextIndex++, started: false };
+          // NO index is reserved and NO content_block_start is emitted yet. The block is opened
+          // only once its arguments have arrived and parsed — see the loop after the stream ends.
+          // Opening it up front is what made a truncated call unavoidable: the client already held
+          // an open tool_use block, so the only remaining choice was which input to put in it, and
+          // `{}` was the fallback.
+          tb = { started: false, argBuf: "" };
           toolBlocks.set(tc.index, tb);
         }
-        if (!tb.started && (tc.id || tc.function?.name)) {
-          tb.toolName = (nameMap && nameMap.get(tc.function?.name)) || tc.function?.name || "";
-          sse(res, "content_block_start", { type: "content_block_start", index: tb.aIndex, content_block: { type: "tool_use", id: tc.id || rid("toolu_"), name: tb.toolName, input: {} } });
-          tb.started = true;
+        if (!tb.toolName && (tc.id || tc.function?.name)) {
+          tb.toolName = registry.originalName(tc.function?.name || "");
+          tb.callId = tc.id || rid("toolu_");
         }
-        // Buffer, then prune once complete (see pruneToolArgs).
-        if (tc.function?.arguments) tb.argBuf = (tb.argBuf || "") + tc.function.arguments;
+        if (tc.function?.arguments) tb.argBuf += tc.function.arguments;
       }
     }
   }
@@ -1602,18 +1630,36 @@ async function streamAnthropic(res, upstream, reqModel, nameMap, schemas = null,
     if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: tail } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: textIndex });
   }
+  // Now that every call is complete, open the ones whose arguments are usable — and only those.
+  // A call that cannot be parsed is withheld entirely and fails the turn: the client never sees a
+  // tool_use block for it, so there is nothing for the agent to execute.
+  let withheld = null;
+  let emittedTools = 0;
   for (const tb of toolBlocks.values()) {
-    if (!tb.started) continue;
-    const pruned = pruneByName(schemas, tb.toolName, safeParse(tb.argBuf || "{}"));
-    sse(res, "content_block_delta", { type: "content_block_delta", index: tb.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
-    sse(res, "content_block_stop", { type: "content_block_stop", index: tb.aIndex });
+    if (!tb.toolName) continue;                 // never got a name; nothing to attribute a call to
+    let pruned;
+    try { pruned = toolArgs(registry, tb.toolName, tb.argBuf); }
+    catch (e) { withheld = withheld || e; log(`  ! withholding ${tb.toolName}: ${e.message}`); continue; }
+    const aIndex = nextIndex++;
+    sse(res, "content_block_start", { type: "content_block_start", index: aIndex,
+        content_block: { type: "tool_use", id: tb.callId || rid("toolu_"), name: tb.toolName, input: {} } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: aIndex });
+    emittedTools++;
   }
   recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
               usage?.prompt_tokens_details?.cached_tokens);
   // input_tokens goes in the FINAL delta, not message_start: at message_start the upstream has
   // not reported usage yet, and a placeholder there would be double counted by any client that
   // sums the two events. 0 + the truth is the truth either way.
-  sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, toolBlocks.size > 0), stop_sequence: null }, usage: mapUsage(usage, "chat") });
+  // A withheld call must not be reported as a normal completion. stop_reason=tool_use would
+  // promise a call the client cannot find, and end_turn would present a truncated turn as finished.
+  if (withheld) {
+    sse(res, "error", { type: "error", error: { type: "api_error", message: withheld.message } });
+    sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: "error", stop_sequence: null }, usage: mapUsage(usage, "chat") });
+  } else {
+    sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: mapFinish(finish, emittedTools > 0), stop_sequence: null }, usage: mapUsage(usage, "chat") });
+  }
   sse(res, "message_stop", { type: "message_stop" });
   res.end();
 }
@@ -1672,27 +1718,25 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
   // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding.
   if (VERBOSITY && !isCls) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isCls, body.tools);
-  const nameMap = new Map();
-  const schemas = new Map(); // original tool name -> input_schema, for argument pruning
+  const registry = ToolRegistry.from(body.tools);
   if (body.tools?.length) {
     // No cap on this surface (verified up to 512), so the agent keeps every tool.
     const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_RESPONSES);
     if (dropped.length) log(`responses cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}`);
-    out.tools = tools.map((t) => { // Responses tools are flat: {type,name,description,parameters}
-      const name = sanitizeToolName(t.name);
-      if (name !== t.name) nameMap.set(name, t.name);
-      schemas.set(t.name, t.input_schema);
-      return { type: "function", name, description: t.description, parameters: t.input_schema };
-    });
+    // Responses tools are flat: {type,name,description,parameters}
+    out.tools = tools.map((t) => ({
+      type: "function", name: registry.wireName(t.name),
+      description: t.description, parameters: t.input_schema,
+    }));
   }
   if (body.tool_choice) {
     const tc = body.tool_choice;
     if (tc.type === "auto") out.tool_choice = "auto";
     else if (tc.type === "any") out.tool_choice = "required";
-    else if (tc.type === "tool") out.tool_choice = { type: "function", name: sanitizeToolName(tc.name) };
+    else if (tc.type === "tool") out.tool_choice = { type: "function", name: registry.wireName(tc.name) };
   }
   // temperature intentionally omitted — codex/reasoning models only accept the default.
-  return { payload: out, nameMap, schemas, imagesSent };
+  return { payload: out, registry, imagesSent };
 }
 
 // Returns the Response, and records which body was ACCEPTED on `res.effectivePayload`.
@@ -2019,7 +2063,7 @@ function respStopReason(resp, hasTool) {
 }
 
 // Responses (non-streaming) -> Anthropic message
-function fromResponses(resp, reqModel, nameMap, schemas) {
+function fromResponses(resp, reqModel, registry) {
   const content = [];
   let hasTool = false;
   // filled in below if nothing else is
@@ -2029,8 +2073,9 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
     } else if (item.type === "function_call") {
       hasTool = true;
       {
-        const nm = (nameMap && nameMap.get(item.name)) || item.name;
-        content.push({ type: "tool_use", id: item.call_id || item.id, name: nm, input: pruneByName(schemas, nm, safeParse(item.arguments || "{}")) });
+        const nm = registry.originalName(item.name);
+        content.push({ type: "tool_use", id: item.call_id || item.id, name: nm,
+                       input: toolArgs(registry, nm, item.arguments) });
       }
     } // reasoning items are dropped
   }
@@ -2050,7 +2095,7 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
 // makes (transport retry, truncation continuation, auto-continue, context recovery, empty retry)
 // must keep using the classifier's reserved connection pool, or a verdict can queue behind agent
 // traffic and miss the CLI's fail-closed 60s deadline.
-async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null, taskState = null, isClassifierPayload = false) {
+async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false) {
   // Measured, not inferred. Pairing a request line with a completion line in this log is
   // unreliable because turns overlap — two earlier attempts to answer "how slow is a turn"
   // from the log produced confidently wrong medians (34s, then 483s) before that was noticed.
@@ -2068,10 +2113,15 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
   let refusalText = "";                          // a refusal is content, and must not be retried
   const unknownEvents = new Set();               // SSE event types this proxy does not handle
   let incompleteReason = null;                   // as reported by the API, never assumed
+  let toolWithheld = null;                       // a tool call whose arguments could not be parsed
   let totalOutTokens = 0;                        // cumulative across continuations
+  // The index is assigned HERE, at open time, not when the item first appears. That is what lets a
+  // tool block be deferred until its arguments parse: an item can exist, accumulate arguments, and
+  // still never claim an index or emit a content_block_start.
   const open = (itemId, cb) => {
     let it = items.get(itemId);
-    if (!it) { it = { aIndex: nextIndex++, opened: false, closed: false }; items.set(itemId, it); }
+    if (!it) { it = { opened: false, closed: false }; items.set(itemId, it); }
+    if (it.aIndex === undefined) it.aIndex = nextIndex++;
     if (!it.opened) { sse(res, "content_block_start", { type: "content_block_start", index: it.aIndex, content_block: cb }); it.opened = true; }
     return it;
   };
@@ -2107,10 +2157,16 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
       switch (j.type) {
         case "response.output_item.added":
           if (j.item?.type === "function_call") {
-            hasTool = true; toolCount++;
-            const nm = (nameMap && nameMap.get(j.item.name)) || j.item.name || "";
-            const it = open(j.item.id, { type: "tool_use", id: j.item.call_id || j.item.id, name: nm, input: {} });
-            it.toolName = nm; it.argBuf = "";   // buffered so the args can be pruned before the client sees them
+            toolCount++;
+            // DEFERRED. No index, no content_block_start, and hasTool stays false until the
+            // arguments have arrived AND parsed. Opening the block here is what made a truncated
+            // call unavoidable: once the client holds an open tool_use block the only remaining
+            // question is what input to put in it, and `{}` was the answer.
+            items.set(j.item.id, {
+              opened: false, closed: false, pending: true, argBuf: "",
+              toolName: registry.originalName(j.item.name || ""),
+              callId: j.item.call_id || j.item.id,
+            });
           }
           break;
         // Reasoning summary -> Anthropic thinking block. Deliberately NOT added to
@@ -2147,17 +2203,25 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
         case "response.output_item.done":
           if (j.item?.id) {
             const it = items.get(j.item.id);
-            if (it && it.argBuf !== undefined) {
-              // A truncated turn can cut a tool call's arguments in half. Say so — an empty
-              // or partial argument object otherwise looks like the model's own choice.
-              if (it.argBuf && !it.argBuf.trim().endsWith("}")) {
-                log(`  ! ${it.toolName}: arguments look truncated (${it.argBuf.length} chars, no closing brace) — the turn probably hit max_output_tokens`);
+            if (it && it.pending) {
+              let pruned;
+              try {
+                pruned = toolArgs(registry, it.toolName, it.argBuf);
+              } catch (e) {
+                // Withheld. The client never sees a tool_use block for this call, so there is
+                // nothing for the agent to execute, and the turn ends with an error below.
+                toolWithheld = toolWithheld || e;
+                log(`  ! withholding ${it.toolName}: ${e.message}`);
+                it.pending = false; it.argBuf = undefined;
+                break;
               }
-              const pruned = pruneByName(schemas, it.toolName, safeParse(it.argBuf || "{}"));
+              // Usable: open the block now, fill it, and only now does the turn have a tool.
+              open(j.item.id, { type: "tool_use", id: it.callId, name: it.toolName, input: {} });
               sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
               // Record the task change while the arguments are in hand (issue #7).
               if (taskState && applyTaskCall(taskState, it.toolName, pruned)) taskChanged = true;
-              it.argBuf = undefined;
+              hasTool = true;
+              it.pending = false; it.argBuf = undefined;
             }
             close(j.item.id);
           }
@@ -2294,7 +2358,9 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     // client must not be able to run it. Blocks already closed by consume() stay as they are.
     let withheld = 0;
     for (const [id, it] of items) {
-      if (it.argBuf !== undefined && it.opened && !it.closed) { withheld++; it.argBuf = undefined; }
+      // `pending` is the deferred state: arguments were still arriving, so no block was ever
+      // opened. Nothing has to be un-sent; it just must not be counted as a tool call.
+      if (it.pending) { withheld++; it.pending = false; it.argBuf = undefined; }
       close(id);
     }
     if (withheld) log(`  ! withheld ${withheld} incomplete tool call(s) from the client`);
@@ -2309,6 +2375,28 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     // Anthropic's stream carries in-band errors as an `error` event; a bare res.end() after
     // message_start is a silent EOF the client cannot distinguish from success.
     sse(res, "error", { type: "error", error: { type: "api_error", message: detail } });
+    sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: "error", stop_sequence: null }, usage: mapUsage(usage, "responses") });
+    sse(res, "message_stop", { type: "message_stop" });
+    res.end();
+    return;
+  }
+
+  // A tool call whose arguments could not be parsed. Terminates the turn HERE, before any of the
+  // continuation paths below: auto-continue, the truncation resume and the empty retry all decide
+  // what to do next from `hasTool` and `textLen`, and none of them should run for a turn that is
+  // already known to be broken. Continuing would also re-ask the model while the client is still
+  // waiting on a promise that a tool call was coming.
+  //
+  // The call itself was never emitted — no content_block_start, so there is nothing to retract and
+  // nothing the agent can execute. All that remains is to say so instead of claiming end_turn.
+  if (toolWithheld) {
+    for (const [id] of items) close(id);
+    log(`  <- responses stream WITHHELD a tool call after ${Date.now() - turnStart}ms` +
+        ` text=${textLen}ch tools=${toolCount}`);
+    recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens,
+                usage?.output_tokens_details?.reasoning_tokens,
+                usage?.input_tokens_details?.cached_tokens);
+    sse(res, "error", { type: "error", error: { type: "api_error", message: toolWithheld.message } });
     sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: "error", stop_sequence: null }, usage: mapUsage(usage, "responses") });
     sse(res, "message_stop", { type: "message_stop" });
     res.end();
@@ -2544,7 +2632,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url === "/usage") return sendJSON(res, 200, usageSummary());
 
   if (req.method === "POST" && url === "/v1/messages/count_tokens") {
-    const body = safeParse(await readBody(req));
+    // A malformed body used to parse to `{}` and be answered with input_tokens: 2 — a confident
+    // count of a request that could not be read.
+    let body;
+    try { body = parseRequestBody(await readBody(req), { what: "count_tokens body" }); }
+    catch (e) { const r = errorResponse(e); return sendJSON(res, r.status, r.body); }
     const txt = JSON.stringify(body.messages || "") + (body.system ? JSON.stringify(body.system) : "");
     return sendJSON(res, 200, { input_tokens: Math.ceil(txt.length / 4) }); // rough estimate
   }
@@ -2559,7 +2651,17 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && url === "/v1/messages") {
     const raw = await readBody(req);
-    const body = safeParse(raw);
+    // Strict from here on. A body that cannot be read is a 400, not an empty conversation: the
+    // old `safeParse` returned `{}`, so a truncated or mistyped request was answered as though
+    // the client had sent no messages at all.
+    let body;
+    try {
+      body = validateMessagesRequest(parseRequestBody(raw, { what: "/v1/messages body" }));
+    } catch (e) {
+      const r = errorResponse(e);
+      log(`/v1/messages rejected: ${r.body.error.message}`);
+      return sendJSON(res, r.status, r.body);
+    }
     const reqModel = body.model || OPENAI_MODEL;
     // Decided once per request: it drives the model choice, hint injection, reasoning and
     // whether the turn may be continued, and it logs when it vetoes a match.
@@ -2569,8 +2671,17 @@ const server = http.createServer(async (req, res) => {
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
     dumpTools(body.tools);
 
+    // Both encoders build the tool registry, which validates the whole declared catalog. A name
+    // collision throws here rather than being sanitized into an alias, because two tools sharing a
+    // wire name means a returned call cannot be attributed — see tool-registry.mjs.
     if (useResp) {
-      const { payload, nameMap, schemas, imagesSent } = toResponses(body, model, isCls);
+      let payload, registry, imagesSent;
+      try { ({ payload, registry, imagesSent } = toResponses(body, model, isCls)); }
+      catch (e) {
+        const r = errorResponse(e);
+        log(`/v1/messages [responses] rejected: ${r.body.error.message}`);
+        return sendJSON(res, r.status, r.body);
+      }
       const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
       // `msgs=`, not `input=`: the old name read like a token count and was a message count.
       // ~total includes the tool schemas, biggest= names the single largest item, and the
@@ -2598,7 +2709,7 @@ const server = http.createServer(async (req, res) => {
         // actually fire (images stripped, effort lowered, context compacted), so a later transport
         // retry inside the stream must not resurrect the pre-fallback request.
         const accepted = upstream.effectivePayload || payload;
-        try { await streamResponses(res, upstream, reqModel, nameMap, accepted, mayContinue, schemas, taskState, isCls); }
+        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, isCls); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
@@ -2620,7 +2731,16 @@ const server = http.createServer(async (req, res) => {
         }
         recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens,
                     rj?.usage?.input_tokens_details?.cached_tokens);
-        const msg = fromResponses(rj, reqModel, nameMap, schemas);
+        // fromResponses throws when a tool call's arguments cannot be parsed. Nothing has been
+        // sent yet on this path, so the failure becomes a clean error response rather than a
+        // tool_use block the agent would execute with empty input.
+        let msg;
+        try { msg = fromResponses(rj, reqModel, registry); }
+        catch (e) {
+          const r = errorResponse(e);
+          log(`  ! ${r.body.error.message}`);
+          return sendJSON(res, r.status, r.body);
+        }
         appendTaskEcho(msg, body, isCls);
         if (isCls) {
           // Measured, not inferred: a classifier verdict that approaches the CLI's budget is
@@ -2637,7 +2757,13 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, msg); }
     }
 
-    const { payload, nameMap, schemas, imagesSent } = toOpenAI(body, model, isCls);
+    let payload, registry, imagesSent;
+    try { ({ payload, registry, imagesSent } = toOpenAI(body, model, isCls)); }
+    catch (e) {
+      const r = errorResponse(e);
+      log(`/v1/messages [chat] rejected: ${r.body.error.message}`);
+      return sendJSON(res, r.status, r.body);
+    }
     const shape = requestShape(body);
     const compacting = compactionKind(body);
     log(`/v1/messages [chat] model=${reqModel}->${model} ${contextFields(shape)}` +
@@ -2652,7 +2778,7 @@ const server = http.createServer(async (req, res) => {
       log(`OpenAI ${upstream.status}: ${errTxt.slice(0, 300)}`);
       return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
     }
-    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, nameMap, schemas, model); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
                 oai?.usage?.completion_tokens_details?.reasoning_tokens,
@@ -2662,7 +2788,13 @@ const server = http.createServer(async (req, res) => {
                                   input_tokens_details: { cached_tokens: oai?.usage?.prompt_tokens_details?.cached_tokens } } },
                (oai?.choices?.[0]?.message?.tool_calls || []).length,
                (oai?.choices?.[0]?.message?.content || "").length);
-    { const msg = toAnthropic(oai, reqModel, nameMap, schemas);
+    { let msg;
+      try { msg = toAnthropic(oai, reqModel, registry); }
+      catch (e) {
+        const r = errorResponse(e);
+        log(`  ! ${r.body.error.message}`);
+        return sendJSON(res, r.status, r.body);
+      }
       appendTaskEcho(msg, body, isCls);
       return sendJSON(res, 200, msg); }
   }
@@ -2677,7 +2809,7 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
-         pruneToolArgs, emptyTurnNotice,
+         pruneToolArgs, emptyTurnNotice, toolArgs, pruneByName,
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
          compactResponsesInputSummarised, summariseDropped,
          compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,

@@ -24,6 +24,69 @@ Claude Code hardcodes that in its system prompt and requests
 `model: claude-opus-4-8`, so the model just reads it back. The proxy log and the
 child's env are the ground truth; both say OpenAI.
 
+## Nothing malformed becomes runnable
+
+A single helper used to parse both the client's request body and the model's tool arguments:
+
+```js
+const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
+```
+
+`{}` is the wrong answer to both questions, and badly wrong to the second. A tool call's `input`
+is not a suggestion — the client receives a complete, well-formed `tool_use` block and runs it. A
+turn cut off at `{"command":"rm -r` arrived as **`Bash({})`**; a half-streamed write arrived as
+`Write({})`. The agent cannot distinguish either from a call the model meant to make, so the
+failure surfaced as a tool behaving strangely, blamed on the model.
+
+Parsing is now split by whose input it is, and neither half has a fallback value:
+
+| Input | Failure | Result |
+|---|---|---|
+| `/v1/messages` body | unparseable, or valid JSON that is not an object | **400** `invalid_request_error` |
+| model tool arguments | unparseable, truncated, or not an object | the call is **withheld** and the turn ends with `stop_reason: error` |
+| model tool arguments | no bytes at all | `{}` **only** if the schema requires nothing; otherwise withheld |
+
+On the streaming path the `tool_use` block is not opened until its arguments have parsed. That is
+the structural reason a malformed call cannot reach the client: while the block was opened on
+`response.output_item.added`, the only remaining question was *which* input to put in an
+already-open block — and `{}` was the answer. One bad call fails the whole turn rather than
+delivering the good ones, because a partial tool-call set would have the agent run half the work
+and believe the turn complete.
+
+## One authority for tool names
+
+OpenAI requires tool names matching `^[a-zA-Z0-9_-]{1,64}$`, so the proxy sanitizes them. That
+mapping is **many-to-one**, and nothing checked for the collision. Both encoders built their own
+pair of maps inline, and `nameMap.set(wire, original)` simply overwrote:
+
+- `foo.bar` and `foo_bar` both become `foo_bar`.
+- Two names sharing their first 64 characters become the same name.
+
+When two tools collide, three things go wrong at once and none is visible: the wire carries two
+tools with one name, a returned call maps back to whichever tool was declared **last**, and the
+wrong schema prunes the arguments — dropping every argument the wrong schema does not declare. The
+result is a call to the wrong tool with mangled arguments, attributed to the model.
+
+**How close this is.** Measured against the 57 real MCP tool names this app sends: **32 are already
+longer than 64 characters** and therefore truncated, and the closest pair is **two characters** from
+colliding —
+
+```
+mcp__34c022b6-…-c999a7f65ec4__slack_search_public
+mcp__34c022b6-…-c999a7f65ec4__slack_search_public_and_private
+```
+
+because `mcp__` + a 36-character UUID + `__` consumes 43 of the 64 characters, leaving 21 for the
+tool name itself. No collision exists today. One more connector, or one longer tool name, and there
+is.
+
+`tool-registry.mjs` is now the single authority for wire names, reverse mapping and schema lookup.
+It validates the **whole** declared catalog before any per-surface cap drops tools — so a collision
+cannot depend on which tools happened to survive — and refuses the request with a 400 naming both
+tools and the reason. It does not silently suffix an alias: that would keep the request working
+while making the model's tool list disagree with its own documentation, and the failure would
+resurface later as a model that "chose the wrong tool".
+
 ## Scope / honest limits
 
 - **Only the Claude Code / agent sub-layer** is affected. The main chat window is
