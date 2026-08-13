@@ -158,8 +158,30 @@ single `$`, which silently turned display math into inline math.
 
 ## Config
 
+Every setting, its precedence and its coercion live in **`config.mjs`** — one declarative
+table, not forty inline `process.env.X || PROJECT.X || default` expressions. That extraction
+preserved the existing behaviour exactly, including two inconsistencies that are marked
+`QUIRK` in the table rather than quietly fixed:
+
+- `OPENAI_MAX_CONTINUATIONS=0` does **not** disable auto-continue; it resolves back to 2.
+  `OPENAI_AUTO_CONTINUE=0` is the off switch.
+- `OPENAI_THINKING_MIN_BUDGET` defaults to 4000, but an explicit `0` resolves to 2000.
+
+One more, marked `KNOWN DEFECT`: setting `OPENAI_CLASSIFIER_SAFETY_MODEL=` blank is documented
+to mean "use the main model" and does not — blank is falsy, so `||` walks past it to the
+default and you silently get `gpt-5.4`. Honouring it needs "defined but empty" to be
+distinguishable from absent, which is a safety-critical change and belongs to the phase that
+owns classifier routing.
+
+```bash
+node config.mjs              # the effective config plus the source of every value
+node config.mjs --hash       # just the config hash the launcher compares
+node config.mjs --validate   # range and cross-field checks; non-zero on error
+```
+
 - **API key** (and `maxTokens`/`temperature` defaults): `~/.dbeaver-ai-complete`
-  (`KEY=VALUE`). The key is **never logged**.
+  (`KEY=VALUE`). The key is **never logged**, never in a snapshot, and never in the hash —
+  only a one-way `sha256:` fingerprint of it, so a rotated key still invalidates the hash.
 - **Model** for this project: the repo-root dot file **`.openai-model`**
   (`OPENAI_MODEL=…`). Currently **`gpt-5.3-codex`** — OpenAI's SOTA coding model.
   Model-resolution precedence: `OPENAI_MODEL` env → `.openai-model` →

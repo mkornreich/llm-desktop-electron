@@ -18,36 +18,44 @@ import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  resolve as resolveConfig, snapshot, configHash, codeVersion, validate, provider,
+} from "./config.mjs";
+import {
+  newInstanceId, writeManifest, readManifest, clearManifest, REPO,
+} from "../scripts/lib/proxy-runtime.mjs";
 
 // ---------- config ----------
-function loadKV(path) {
-  const cfg = {};
-  try {
-    for (const line of fs.readFileSync(path, "utf8").split(/\r?\n/)) {
-      const t = line.trim();
-      if (!t || t.startsWith("#")) continue;
-      const i = t.indexOf("=");
-      if (i > 0) cfg[t.slice(0, i).trim()] = t.slice(i + 1).trim();
-    }
-  } catch { /* file may be absent — that's fine */ }
-  return cfg;
-}
-const FILE = loadKV(os.homedir() + "/.dbeaver-ai-complete");
-// Per-project override — a dot file at the repo root storing THIS project's model
-// choice (the API key stays in ~/.dbeaver-ai-complete; only the model lives here).
-const PROJECT = loadKV(fileURLToPath(new URL("../.openai-model", import.meta.url)));
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || PROJECT.apiKey || FILE.apiKey || "";
+// Every setting, its precedence and its coercion now live in config.mjs, which also produces
+// the redacted snapshot and the hash that /health reports. The declarations below keep their
+// names and their comments — the comments ARE the documentation for why each exists — and take
+// their values from that one resolver instead of each re-deriving its own precedence.
+const { values: CFG, sources: CFG_SOURCES } = resolveConfig();
+const OPENAI_API_KEY = CFG.OPENAI_API_KEY;
+
+// ---------- identity of this process ----------
+//
+// A nonce generated once per start. Nothing else can produce it, so a caller that finds this
+// value on /health and in the manifest knows it is talking to the process it started — not to a
+// recycled PID, not to a foreign server that happens to hold the port, and not to a stale
+// manifest. That distinction is what the crash on 08-13 had no way to make: the replacement
+// proxy came back with PPID 1, indistinguishable from an unrelated program.
+const INSTANCE = newInstanceId();
+const STARTED_AT = new Date().toISOString();
+// Computed once. The hash covers every behaviour-affecting setting plus a fingerprint of the
+// key and a hash of the source files, so "same hash" means "would behave the same".
+const CONFIG_HASH = configHash({ resolved: { values: CFG, sources: CFG_SOURCES } });
+const CONFIG_SNAPSHOT = snapshot({ resolved: { values: CFG, sources: CFG_SOURCES } });
+const CONFIG_ISSUES = validate({ resolved: { values: CFG, sources: CFG_SOURCES } });
 // Precedence: env var > project dot file > global dbeaver file > default.
-const OPENAI_MODEL =
-  process.env.OPENAI_MODEL || PROJECT.OPENAI_MODEL || PROJECT.model || FILE.model || "gpt-4.1";
+const OPENAI_MODEL = CFG.OPENAI_MODEL;
 // API surface: OpenAI's codex models are served only via the Responses API;
 // everything else uses Chat Completions. Override with OPENAI_API=responses|chat.
-const OPENAI_API = (process.env.OPENAI_API || PROJECT.OPENAI_API ||
-  (/codex/i.test(OPENAI_MODEL) ? "responses" : "chat")).toLowerCase();
+const OPENAI_API = CFG.OPENAI_API;
 // A faster/cheaper model for the auto-mode safety classifier (a separate LLM call
 // Claude Code makes before each risky action). The main coding model can be slow
 // for these latency-sensitive checks, so route them to a small fast model here.
-const OPENAI_CLASSIFIER_MODEL = process.env.OPENAI_CLASSIFIER_MODEL || PROJECT.OPENAI_CLASSIFIER_MODEL || "";
+const OPENAI_CLASSIFIER_MODEL = CFG.OPENAI_CLASSIFIER_MODEL;
 // The auto-mode SAFETY verdict. This defaulted to the main model, on the reasoning that a
 // security decision should use the strongest model available. Live measurement killed that:
 // gpt-5.3-codex takes 25-38s on real classifier prompts, and the CLI aborts its classifier at
@@ -65,42 +73,39 @@ const OPENAI_CLASSIFIER_MODEL = process.env.OPENAI_CLASSIFIER_MODEL || PROJECT.O
 // allowed the one codex blocked — the same failure gpt-4.1-mini showed.
 //
 // Set to "" to go back to the main model, accepting the latency.
-const OPENAI_CLASSIFIER_SAFETY_MODEL = process.env.OPENAI_CLASSIFIER_SAFETY_MODEL ||
-  PROJECT.OPENAI_CLASSIFIER_SAFETY_MODEL || "gpt-5.4";
+const OPENAI_CLASSIFIER_SAFETY_MODEL = CFG.OPENAI_CLASSIFIER_SAFETY_MODEL;
 // A classifier call is a verdict, so it carries no tools. This is the ceiling above which a
 // prompt that LOOKS like a classifier is treated as a normal agent turn instead — see
 // isClassifierRequest. 0 would be defensible; a few allows for a call that passes one or two.
-const CLASSIFIER_MAX_TOOLS = parseInt(process.env.OPENAI_CLASSIFIER_MAX_TOOLS ||
-  PROJECT.OPENAI_CLASSIFIER_MAX_TOOLS || "4", 10) || 0;
+const CLASSIFIER_MAX_TOOLS = CFG.OPENAI_CLASSIFIER_MAX_TOOLS;
 // Models advertised on GET /v1/models — what the app's gateway model-discovery
 // (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) lists in the picker. Selecting one
 // makes the agent request that id, which the proxy passes straight through.
 // Comma-separated "id:Display Name" pairs; override via OPENAI_PICKER_MODELS.
-const PICKER_MODELS = (process.env.OPENAI_PICKER_MODELS || PROJECT.OPENAI_PICKER_MODELS ||
-  // The default model has to be in here or the picker cannot offer what the proxy is actually
-// running — gpt-5.6-sol was missing from this list while being the default, so /v1/models
-// advertised five models, none of them the one answering.
-  "gpt-5.6-sol:GPT-5.6 Sol,gpt-5.5:GPT-5.5,gpt-5.3-codex:GPT-5.3 Codex,gpt-5.4:GPT-5.4,gpt-4.1:GPT-4.1,gpt-4.1-mini:GPT-4.1 mini,gpt-4o:GPT-4o")
+// The default list lives in config.mjs. The answering model must appear in it or the picker
+// cannot offer what the proxy is actually running — gpt-5.6-sol was once the default while
+// missing from the list, so /v1/models advertised five models, none of them the one answering.
+const PICKER_MODELS = CFG.OPENAI_PICKER_MODELS
   .split(",").map((s) => { const [id, ...n] = s.split(":"); return { id: (id || "").trim(), name: (n.join(":").trim() || (id || "").trim()) }; })
   .filter((m) => m.id);
-const OPENAI_BASE = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+const OPENAI_BASE = CFG.OPENAI_BASE_URL;
 // Budget used only when the client omits max_tokens. It deliberately does NOT read
 // FILE.maxTokens any more: ~/.dbeaver-ai-complete is a DBeaver config and carries
 // maxTokens=512, which is fine for a SQL assistant and far too small for an agent — a request
 // that omitted max_tokens got 512 tokens, and with reasoning attached could return nothing at
 // all. Override with OPENAI_DEFAULT_MAX_TOKENS.
-const DEFAULT_MAX_TOKENS = parseInt(process.env.OPENAI_DEFAULT_MAX_TOKENS || PROJECT.OPENAI_DEFAULT_MAX_TOKENS || "8192", 10) || 8192;
+const DEFAULT_MAX_TOKENS = CFG.OPENAI_DEFAULT_MAX_TOKENS;
 // OpenAI models cap completion tokens (e.g. gpt-4.1 = 32768) far below Claude's
 // 64k; clamp so agents that request Claude-sized budgets don't 400.
-const MAX_OUTPUT_TOKENS = parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS || "32768", 10) || 32768;
+const MAX_OUTPUT_TOKENS = CFG.OPENAI_MAX_OUTPUT_TOKENS;
 // Tool-array caps are PER API SURFACE, not global — probed directly against the API:
 //   Chat Completions: hard cap 128 (129 -> 400 "array too long").
 //   Responses:        no cap observed (128/129/214/256/512 all accepted).
 // The desktop agent sends ~214 tools, so on the Responses path we now send ALL of
 // them and the model never loses a tool it needs. Only the chat path must clamp.
 // Names must still match ^[a-zA-Z0-9_-]{1,64}$, so they are always sanitized.
-const MAX_TOOLS_CHAT = parseInt(process.env.OPENAI_MAX_TOOLS || "128", 10) || 128;
-const MAX_TOOLS_RESPONSES = parseInt(process.env.OPENAI_MAX_TOOLS_RESPONSES || "0", 10) || Infinity;
+const MAX_TOOLS_CHAT = CFG.OPENAI_MAX_TOOLS;
+const MAX_TOOLS_RESPONSES = CFG.OPENAI_MAX_TOOLS_RESPONSES;
 // When the chat path MUST drop tools, drop the least essential ones rather than
 // whichever happened to be last in the array. These are the tools an agent needs to
 // actually finish work (read/write/run/search/plan) plus the ones that make output
@@ -118,7 +123,7 @@ const ESSENTIAL_TOOL_RE = new RegExp(
 const isEssentialTool = (n) => ESSENTIAL_TOOL_RE.test(String(n || ""));
 // PROXY_DUMP_TOOLS=1 writes the exact tool list a request carried to tools-dump.txt.
 // The agent's real tool set is otherwise invisible from outside the app.
-const DUMP_TOOLS = process.env.PROXY_DUMP_TOOLS === "1";
+const DUMP_TOOLS = CFG.PROXY_DUMP_TOOLS;
 function dumpTools(tools) {
   if (!DUMP_TOOLS || !Array.isArray(tools)) return;
   try {
@@ -132,14 +137,14 @@ function dumpTools(tools) {
 // shows literally; it wants $ / $$. And .svg FILES render as images (the bundle maps
 // IMAGE_EXT_TO_MIME ".svg" -> "image/svg+xml"), while inline <svg> markup in chat text
 // does not. Set OPENAI_OUTPUT_FIXUPS=0 to disable both.
-const OUTPUT_FIXUPS = (process.env.OPENAI_OUTPUT_FIXUPS || PROJECT.OPENAI_OUTPUT_FIXUPS || "1") !== "0";
+const OUTPUT_FIXUPS = CFG.OPENAI_OUTPUT_FIXUPS;
 // Agentic persistence. Claude Code's auto mode grants PERMISSION to run tools; it cannot
 // make a model decide to keep going. Claude is trained to run a task to completion, while
 // GPT models routinely end the turn to check in ("If you want, I'll run that now") — which
 // in an agent loop reads as the task stalling and forces the user to say "yes, continue"
 // every step. This adds an explicit persistence directive. Set OPENAI_PERSISTENCE=0 to
 // disable it independently of the output fixups.
-const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENCE || "1") !== "0";
+const PERSISTENCE = CFG.OPENAI_PERSISTENCE;
 // Auto-continue. Prompting alone does NOT fix the stall: measured over 4 trials per arm on
 // the prompt that stalled, the model called a tool 3/4 times with the persistence
 // directive and 3/4 without — a ~25% stall rate either way, unmoved by wording. When a
@@ -155,8 +160,8 @@ const PERSISTENCE = (process.env.OPENAI_PERSISTENCE || PROJECT.OPENAI_PERSISTENC
 // response.reasoning_summary_text.delta events. These are mapped to Anthropic `thinking`
 // content blocks, which the client renders as thinking. Responses path only — Chat
 // Completions has no reasoning parameter.
-const SHOW_THINKING = (process.env.OPENAI_SHOW_THINKING || PROJECT.OPENAI_SHOW_THINKING || "1") !== "0";
-const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || PROJECT.OPENAI_REASONING_EFFORT || "medium";
+const SHOW_THINKING = CFG.OPENAI_SHOW_THINKING;
+const REASONING_EFFORT = CFG.OPENAI_REASONING_EFFORT;
 // The reasoning-effort enum is API-wide but each model supports a SUBSET, and the API only
 // tells you by rejecting the request: gpt-5.3-codex and gpt-5.4 both answer
 //   "Unsupported value: 'max' is not supported with the '<model>' model.
@@ -207,7 +212,7 @@ function lowerEffort(model, rejected) {
 // gain nothing from thinking, so only request it when there is room to spare. The threshold
 // is 4000 rather than 2000 because effort is now `max`: on one measured prompt the hidden
 // reasoning went 98 tokens at medium -> 476 at xhigh, so the room needed grew with it.
-const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || PROJECT.OPENAI_THINKING_MIN_BUDGET || "4000", 10) || 2000;
+const THINKING_MIN_BUDGET = CFG.OPENAI_THINKING_MIN_BUDGET;
 // github issue #1 — "sometimes I see output with no text". Two causes, two fixes.
 // (a) gpt-5.3-codex is terse to the point of silence: every tool-calling turn in the proxy
 //     log came back text=0ch, so the UI showed a tool chip and no prose. OpenAI has a native
@@ -215,7 +220,7 @@ const THINKING_MIN_BUDGET = parseInt(process.env.OPENAI_THINKING_MIN_BUDGET || P
 //     list). It measurably changes output: "4" at low vs "2 + 2 = **4**." at high.
 // (b) a turn can come back genuinely empty — no text AND no tool call — which must never be
 //     forwarded as a blank turn. See emptyTurnNotice().
-const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "high";
+const VERBOSITY = CFG.OPENAI_VERBOSITY;
 // Compaction can either discard old tool output or SUMMARISE it. Summarising costs one extra
 // model call but keeps the substance, which is what Claude Code's native compaction does.
 // Falls back to plain truncation whenever the summary call fails, so it can only add value.
@@ -226,23 +231,20 @@ const VERBOSITY = process.env.OPENAI_VERBOSITY || PROJECT.OPENAI_VERBOSITY || "h
 // temporarily unavailable, so auto mode cannot determine the safety of X" and the action is
 // denied. A classifier verdict is ~11 output tokens, so anything near that budget means the
 // proxy is the problem. Warn well before the cliff.
-const CLASSIFIER_SLOW_MS = parseInt(process.env.OPENAI_CLASSIFIER_SLOW_MS ||
-  PROJECT.OPENAI_CLASSIFIER_SLOW_MS || "20000", 10) || 20000;
+const CLASSIFIER_SLOW_MS = CFG.OPENAI_CLASSIFIER_SLOW_MS;
 
 // An empty turn stalls the session: the user waits ~40s and gets a diagnostic instead of work.
 // Retry instead. Bounded, and skipped for refusals, truncation and hard upstream errors — see
 // the loop in streamResponses for why each of those must not be retried.
-const EMPTY_RETRY = (process.env.OPENAI_EMPTY_RETRY || PROJECT.OPENAI_EMPTY_RETRY || "1") !== "0";
-const MAX_EMPTY_RETRIES = parseInt(process.env.OPENAI_MAX_EMPTY_RETRIES ||
-  PROJECT.OPENAI_MAX_EMPTY_RETRIES || "2", 10) || 0;
-const CONTINUE_ON_TRUNCATION = (process.env.OPENAI_CONTINUE_ON_TRUNCATION || PROJECT.OPENAI_CONTINUE_ON_TRUNCATION || "1") !== "0";
+const EMPTY_RETRY = CFG.OPENAI_EMPTY_RETRY;
+const MAX_EMPTY_RETRIES = CFG.OPENAI_MAX_EMPTY_RETRIES;
+const CONTINUE_ON_TRUNCATION = CFG.OPENAI_CONTINUE_ON_TRUNCATION;
 // A dropped upstream socket is not an answer, and until this existed it was not retried anywhere
 // in the stack: the proxy logged "stream error: terminated" and ended the turn, and the CLI could
 // not retry either because it had already been handed HTTP 200 and a partial stream. 97 turns in
 // this log died that way. Small bound — a genuinely unreachable upstream should fail fast rather
 // than sit through a long ladder, and the CLI still has its own retries above this one.
-const MAX_TRANSPORT_RETRIES = parseInt(process.env.OPENAI_MAX_TRANSPORT_RETRIES ||
-  PROJECT.OPENAI_MAX_TRANSPORT_RETRIES || "2", 10) || 0;
+const MAX_TRANSPORT_RETRIES = CFG.OPENAI_MAX_TRANSPORT_RETRIES;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Restricted on purpose to errors that mean "the connection broke", never "the API said no".
 // undici reports a socket that dies mid-body as TypeError("terminated") with cause
@@ -266,12 +268,11 @@ function isTransportError(e) {
 // every continuation appends to the same message, and the client enforces its own per-response
 // maximum — "Claude's response exceeded the 64000 output token maximum". Splicing without a
 // budget is a plausible way to produce exactly that error, so continuations stop below it.
-const MAX_TURN_OUTPUT_TOKENS = parseInt(process.env.OPENAI_MAX_TURN_OUTPUT_TOKENS || PROJECT.OPENAI_MAX_TURN_OUTPUT_TOKENS || "56000", 10) || 56000;
-const COMPACT_SUMMARY = (process.env.OPENAI_COMPACT_SUMMARY || PROJECT.OPENAI_COMPACT_SUMMARY || "1") !== "0";
-const COMPACT_MODEL = process.env.OPENAI_COMPACT_MODEL || PROJECT.OPENAI_COMPACT_MODEL ||
-  OPENAI_CLASSIFIER_MODEL || "gpt-4.1-mini";
-const AUTO_CONTINUE = (process.env.OPENAI_AUTO_CONTINUE || PROJECT.OPENAI_AUTO_CONTINUE || "1") !== "0";
-const MAX_CONTINUATIONS = parseInt(process.env.OPENAI_MAX_CONTINUATIONS || PROJECT.OPENAI_MAX_CONTINUATIONS || "2", 10) || 2;
+const MAX_TURN_OUTPUT_TOKENS = CFG.OPENAI_MAX_TURN_OUTPUT_TOKENS;
+const COMPACT_SUMMARY = CFG.OPENAI_COMPACT_SUMMARY;
+const COMPACT_MODEL = CFG.OPENAI_COMPACT_MODEL;
+const AUTO_CONTINUE = CFG.OPENAI_AUTO_CONTINUE;
+const MAX_CONTINUATIONS = CFG.OPENAI_MAX_CONTINUATIONS;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
 // a genuine question the user alone can answer ("which of these three do you want?") should
 // still end the turn, so this matches announcements, offers, and "I need X to proceed".
@@ -404,8 +405,8 @@ const NUDGE = "You ended your turn without calling any tool, but the user's requ
   "missing a detail, discover it yourself first (git remotes and config, dotfiles, the environment, " +
   "CLAUDE.md and memory files, earlier sessions) and proceed. Do not reply with text alone again unless " +
   "the task is genuinely complete or you are blocked on something only the user can provide.";
-const DEFAULT_TEMP = FILE.temperature != null ? parseFloat(FILE.temperature) : undefined;
-const PORT = parseInt(process.env.PORT || "8123", 10);
+const DEFAULT_TEMP = CFG.DEFAULT_TEMP;
+const PORT = CFG.PORT;
 
 if (!OPENAI_API_KEY) {
   console.error("[proxy] FATAL: no OpenAI API key (set apiKey in ~/.dbeaver-ai-complete or OPENAI_API_KEY)");
@@ -613,8 +614,7 @@ const TRIMMED = "[earlier tool output trimmed by the proxy to fit the model's co
 // So: cut the single largest oversized text payload down to OPENAI_MAX_TEXT_CHARS, oldest
 // first, leaving the most recent item alone. One per call, so successive ladder steps shrink
 // successively smaller offenders instead of mangling everything at once.
-const MAX_TEXT_CHARS = parseInt(process.env.OPENAI_MAX_TEXT_CHARS ||
-  PROJECT.OPENAI_MAX_TEXT_CHARS || "400000", 10) || 400000;
+const MAX_TEXT_CHARS = CFG.OPENAI_MAX_TEXT_CHARS;
 const textCut = (n) => `\n\n[… ${n} characters trimmed by the proxy to fit the context window …]`;
 
 function truncateLargestText(items, getText, setText) {
@@ -1044,7 +1044,7 @@ function fixMath(text) {
 // So the proxy renders the list itself, as a text block next to the tool call. It is a
 // rendering of what the model actually did — read from its own tool-call arguments and from
 // the transcript — never invented.
-const TASK_ECHO = (process.env.OPENAI_TASK_ECHO || PROJECT.OPENAI_TASK_ECHO || "1") !== "0";
+const TASK_ECHO = CFG.OPENAI_TASK_ECHO;
 const taskToolKind = (name) => (
   name === "TaskCreate" ? "create" :
   name === "TaskUpdate" ? "update" :
@@ -1817,10 +1817,8 @@ function cacheKeyFor(body) {
 // used to assert the client's effective window: that resolution happens inside the client from its
 // internal suffix, beta headers, base URL, model registry and disable flags, none of which are
 // visible in a /v1/messages request.
-const CLAUDE_CODE_INTERNAL_MODEL =
-  process.env.OPENAI_CLAUDE_CODE_MODEL || PROJECT.OPENAI_CLAUDE_CODE_MODEL || "";
-const CLAUDE_CODE_CONTEXT_BOUND = parseInt(
-  process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || PROJECT.CLAUDE_CODE_AUTO_COMPACT_WINDOW || "0", 10) || 0;
+const CLAUDE_CODE_INTERNAL_MODEL = CFG.OPENAI_CLAUDE_CODE_MODEL;
+const CLAUDE_CODE_CONTEXT_BOUND = CFG.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
 
 // The CLI's own compaction calls. It asks the model to summarise the conversation, and there are
 // THREE distinct prompts — worth telling apart, because they mean different things about what the
@@ -2505,10 +2503,43 @@ function readBody(req) {
 function sendJSON(res, code, obj) { const s = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json" }); res.end(s); }
 function anthropicError(res, code, type, message) { sendJSON(res, code, { type: "error", error: { type, message } }); }
 
+// How many turns are being served right now. Reported on /health so a restart can say what it
+// would interrupt: a turn is often minutes of real work, and the settings window used to discard
+// them without a word. Counted on the response's close rather than after the handler returns,
+// because a streaming turn's handler resolves long before the stream ends.
+let inflight = 0;
+
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
+  if (req.method === "POST" && url === "/v1/messages") {
+    inflight++;
+    res.on("close", () => { inflight--; });
+  }
+  // /health is an IDENTITY, not a liveness ping. The first four fields are the original
+  // response and are kept verbatim so anything already reading them keeps working; everything
+  // after is what lets a caller tell "the proxy I configured" from "a proxy".
+  //
+  // `instance` is the load-bearing one. A launcher that finds a server on the port needs to
+  // know whether it may stop it, and the only unforgeable answer is a nonce this process
+  // generated at startup and also wrote to its manifest. `configHash` answers the separate
+  // question of whether restarting would change anything, and `codeVersion` catches a proxy
+  // running last week's translation logic with this week's settings.
+  //
+  // Nothing here is secret: the key appears only as a one-way fingerprint, and the snapshot
+  // omits it entirely. That is checked by test, because this endpoint is unauthenticated.
   if (req.method === "GET" && (url === "/" || url === "/health"))
-    return sendJSON(res, 200, { ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL, api: OPENAI_API, classifier_model: OPENAI_CLASSIFIER_MODEL || null });
+    return sendJSON(res, 200, {
+      ok: true, proxy: "anthropic->openai", model: OPENAI_MODEL, api: OPENAI_API,
+      classifier_model: OPENAI_CLASSIFIER_MODEL || null,
+      instance: INSTANCE, pid: process.pid, startedAt: STARTED_AT, inflight,
+      configHash: CONFIG_HASH, codeVersion: codeVersion(), provider: provider(),
+      port: PORT, upstream: OPENAI_BASE,
+      safety_model: OPENAI_CLASSIFIER_SAFETY_MODEL || null,
+      compact_model: COMPACT_MODEL || null,
+      claude_code_identity: CLAUDE_CODE_INTERNAL_MODEL || null,
+      context_bound: CLAUDE_CODE_CONTEXT_BOUND || null,
+      config: CONFIG_SNAPSHOT,
+    });
 
   if (req.method === "GET" && url === "/usage") return sendJSON(res, 200, usageSummary());
 
@@ -2699,4 +2730,47 @@ process.on("uncaughtException", (err) => fatal("uncaughtException", err));
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
+  // The identity, on one line, so the log says which configuration produced everything after
+  // it. Reconstructing this from a log that only recorded the default model was guesswork.
+  log(`instance ${INSTANCE} pid ${process.pid} config ${CONFIG_HASH} code ${codeVersion()} provider ${provider()}`);
+  // The manifest is what makes this process OWNABLE. Written after listen() succeeds, never
+  // before: a manifest claiming a port this process failed to bind would send the launcher to
+  // stop a proxy that is not there and reuse one that is.
+  try {
+    writeManifest({
+      instance: INSTANCE, pid: process.pid, startedAt: STARTED_AT, port: PORT,
+      configHash: CONFIG_HASH, codeVersion: codeVersion(), provider: provider(),
+      // Whether the settings on disk are the whole story. A one-launch
+      // `OPENAI_MODEL=x ./run.sh` resolves identically to a persisted value but must not be
+      // reported as persisted — that is how a temporary override becomes an unexplained
+      // permanent-looking state in the settings window.
+      envOverrides: Object.entries(CFG_SOURCES).filter(([, s]) => s === "env").map(([k]) => k),
+      repo: REPO,
+    });
+  } catch (e) {
+    // Not fatal. An unwritable manifest costs the launcher its ability to restart this proxy
+    // cleanly; it does not stop the proxy from serving, and refusing to serve over it would
+    // turn a management inconvenience into an outage.
+    log(`  ! could not write the runtime manifest (${e.message}) — restarts will not recognise this process`);
+  }
 });
+
+// Startup validation. Errors are logged, not thrown: a proxy that refuses to start leaves the
+// app pointed at a dead port, which is the exact failure mode this phase exists to remove. The
+// operator gets a loud line instead, and a request that genuinely cannot work still fails with
+// its own specific error.
+for (const w of CONFIG_ISSUES.warnings) log(`  ? config: ${w}`);
+for (const e of CONFIG_ISSUES.errors) log(`  ! config: ${e}`);
+
+// Release the manifest on the way out, so nothing later mistakes a dead instance for a live
+// one. Both signals, because SIGTERM is the graceful stop and SIGINT is a foreground Ctrl-C.
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, () => {
+    const m = readManifest();
+    if (m?.instance === INSTANCE) clearManifest();
+    log(`received ${sig} — shutting down instance ${INSTANCE}`);
+    server.close(() => process.exit(0));
+    // A stream in flight must not hold the process open indefinitely.
+    setTimeout(() => process.exit(0), 3000).unref?.();
+  });
+}
