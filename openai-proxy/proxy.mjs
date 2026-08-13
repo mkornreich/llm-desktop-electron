@@ -29,7 +29,9 @@ import { parseRequestBody, validateMessagesRequest, parseToolArguments } from ".
 // `anthropicError` is deliberately NOT imported: this file already has a function of that name
 // that writes to a response. Importing the body-builder under the same name is how you end up
 // sending a plain object where a response was expected.
-import { RequestError, TranslationError, errorResponse } from "./errors.mjs";
+import {
+  RequestError, TranslationError, errorResponse, isDroppableParam, SEMANTIC_CONTRACTS,
+} from "./errors.mjs";
 import {
   ROUTE, routeFor, policyFor, modelForRoute, routeLabel, isClassifier, isSafety,
   PREFIX_RE, SAFETY_RE, CLASSIFIER_RE, SEVERITY_RE, BLOCK_RE, OPENAI_MODEL_RE,
@@ -1637,7 +1639,13 @@ async function callOpenAI(payload, isClassifier = false) {
       const bad = txt.match(/"param":\s*"([^"]+)"/);
       if (bad && /unsupported_parameter|Unsupported parameter/i.test(txt)) {
         const base = retry || payload;
-        if (base[bad[1]] !== undefined) {
+        // A field that carries meaning is never dropped. Stripping `tools` would turn an agent turn
+        // into a text-only one that looks like a model declining to act — and the memo would make it
+        // permanent. See SEMANTIC_CONTRACTS.
+        if (!isDroppableParam(bad[1])) {
+          log(`  !! ${payload.model} rejected '${bad[1]}', which carries meaning — NOT dropping it. ` +
+              `Continuing without it would change what was asked for. The upstream error stands.`);
+        } else if (base[bad[1]] !== undefined) {
           rememberUnsupported(payload.model, bad[1], "chat");
           retry = { ...base };
           delete retry[bad[1]];
@@ -1899,7 +1907,11 @@ async function callResponses(payload, isClassifier = false) {
     // Same generic unsupported-parameter recovery as the chat surface above.
     else if (/unsupported_parameter|Unsupported parameter/i.test(txt) && /"param":\s*"([^"]+)"/.test(txt)) {
       const bad = txt.match(/"param":\s*"([^"]+)"/)[1];
-      if (payload[bad] !== undefined) {
+      // Same rule as the chat surface: a field that carries meaning is never dropped.
+      if (!isDroppableParam(bad)) {
+        log(`  !! ${payload.model} rejected '${bad}', which carries meaning — NOT dropping it. ` +
+            `Continuing without it would change what was asked for. The upstream error stands.`);
+      } else if (payload[bad] !== undefined) {
         rememberUnsupported(payload.model, bad, "responses");
         const { [bad]: _dropped, ...rest } = payload;
         log(`  ! ${payload.model} rejected '${bad}' — dropped it and retried`);

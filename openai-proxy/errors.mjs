@@ -61,3 +61,51 @@ export function errorResponse(e) {
     return { status: e.status, body: anthropicError(e.anthropicType, e.message) };
   return { status: 500, body: anthropicError("api_error", "internal proxy error") };
 }
+
+// ---------- semantic contracts ----------
+//
+// The generic unsupported-parameter recovery is keyed off the API's own `param` field: whatever the
+// upstream names, the proxy deletes and resends. That self-heals a knob like `stop` — which is what it
+// was built for, after twelve 400s in one session — but it must not be allowed near a field that
+// CARRIES MEANING.
+//
+// If the upstream ever answers `"param": "tools"` (a model without function calling would), the
+// recovery would strip the tools and continue. The turn then succeeds as text, the agent appears to
+// have declined to act, and the memo makes it permanent for the rest of the process. That is the same
+// failure shape as every silent tool-drop this project has already fixed: the symptom looks like a
+// model choosing not to work.
+//
+// So these are never dropped. A request that cannot be sent WITH them is a request that cannot be
+// honoured, and saying so is the only honest outcome.
+export const SEMANTIC_CONTRACTS = new Set([
+  "tools",            // dropping them makes an agent turn text-only
+  "tool_choice",      // dropping it silently un-forces a required call
+  "messages",         // Chat surface: the conversation itself
+  "input",            // Responses surface: same
+  "model",
+  "instructions",     // the system prompt
+  // Structured-output fields. Not sent today (see the phase note), listed so that if they ever are,
+  // the recovery cannot quietly return unstructured text against a schema the caller is parsing.
+  "response_format",
+  "text.format",
+  "output_config",
+  "strict",
+]);
+
+// Is this parameter safe for the drop-and-retry path?
+//
+// Matched against every PREFIX of the path, not just its root. A root-only check let
+// `text.format.json_schema` through — the root is `text`, which is not itself a contract, so a schema
+// rejection inside a structured-output field would have been "fixed" by deleting the field. Caught by
+// the test for exactly that case.
+export function isDroppableParam(param) {
+  const p = String(param ?? "");
+  if (!p) return false;
+  // Array indices are noise for this decision: tools[0] and tools[3] are both `tools`.
+  const segments = p.replace(/\[\d+\]/g, "").split(".").filter(Boolean);
+  if (!segments.length) return false;
+  for (let i = 1; i <= segments.length; i++) {
+    if (SEMANTIC_CONTRACTS.has(segments.slice(0, i).join("."))) return false;
+  }
+  return true;
+}

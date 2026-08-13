@@ -87,6 +87,54 @@ the proxy asked twice.
 whether it is exact. The pre-existing aggregate is carried as a labelled **floor**, never folded into
 the new totals — mixing an exact figure with an estimate produces something that is neither.
 
+## A rejection must not be allowed to change what was asked
+
+When the upstream rejects a parameter, the proxy drops it by name and retries. That was built for a
+real problem — the CLI sends `stop_sequences`, the Chat surface forwards them as `stop`, gpt-5.x
+rejects it, and twelve 400s appeared in one session — and keying off the API's own `param` field means
+the next unsupported knob self-heals without its own rule.
+
+It must not go near a field that **carries meaning**. If the upstream ever answers `"param": "tools"`
+(a model without function calling would), the recovery would strip the tools and retry. The turn then
+succeeds as text, the agent looks like it declined to act, and the per-model memo makes it permanent
+for the rest of the process — the same failure shape as every silent tool-drop already fixed here.
+
+So a small set of fields is never dropped: `tools`, `tool_choice`, `messages`, `input`, `model`,
+`instructions`, and the structured-output fields. A request that cannot be sent *with* them is a
+request that cannot be honoured, and the upstream error is surfaced instead.
+
+Matching is by **path prefix**, not by root. A root-only check let `text.format.json_schema` through —
+the root `text` is not itself a contract — so a schema rejection inside a structured-output field
+would have been "fixed" by deleting the field. `text.verbosity` stays droppable, because it shapes how
+an answer reads rather than what it must be.
+
+## Structured Outputs: not implemented, and why
+
+The bundled client has the strings — `output_config`, `output_format`, `json_schema`,
+`structured_output` — including the API's own error text:
+
+> "Both output_format and output_config.format were provided. Please use only output_config.format
+> (output_format is deprecated)."
+
+But **zero of 47,000+ logged requests carried any of them**, and the proxy has no handling. So there
+are no fixtures to pin, and translating `output_config.format` into `response_format` /
+`text.format.json_schema` would be speculative code with no test case and no traffic — the kind that
+is wrong in a way nobody discovers until it matters.
+
+Two consequences follow honestly rather than being worked around:
+
+- **Strict mode is not sent**, so there is no strict contract to enforce locally. Argument pruning
+  therefore stays a repair rather than becoming an error. Measured: pruning fired **once** across
+  47,000+ requests, dropping an invented `intent` from an MCP call — and in doing so it rescued a call
+  that would otherwise have been rejected wholesale. Making it fail would cost that and buy nothing.
+- **The caller's schemas are shared by reference and never written to.** That holds today and is now
+  pinned by test, because a normalizer is exactly the kind of code that would mutate them — and a
+  mutation there would corrupt the client's own tool definitions for the rest of the session, with the
+  symptom appearing somewhere else entirely.
+
+The structured-output fields are already in the protected set above, so if the client ever does start
+sending them, the recovery cannot quietly return unstructured text against a schema someone is parsing.
+
 ## A capability belongs to a surface, not to a model
 
 The proxy learns what a model rejects and stops sending it. That memory was keyed by **model alone**,
