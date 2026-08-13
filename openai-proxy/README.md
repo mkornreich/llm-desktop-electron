@@ -87,6 +87,66 @@ the proxy asked twice.
 whether it is exact. The pre-existing aggregate is carried as a labelled **floor**, never folded into
 the new totals — mixing an exact figure with an estimate produces something that is neither.
 
+## What the model is shown, per route
+
+Exposure decides what the model **sees**. It never decides what may **execute** — that is Claude
+Code's `allowedTools`, and hiding or showing a tool cannot move it. A call still goes back to the
+client, which still applies its own permissions.
+
+| Route | Tools sent | Calls possible | Why |
+|---|---|---|---|
+| `main` | all | yes | an agent turn needs its tools |
+| `compaction` | **all** | **no** | see below — the obvious fix was wrong |
+| `prefix` | none | — | a verdict has no use for a tool |
+| `safety:severity` / `safety:block` | none | — | as above |
+
+### The compaction case, where measurement overturned the plan
+
+A compaction request asks the model to summarise a transcript; the answer must be prose. Measured in
+this app's own logs: **224 of 318** client compaction requests carried tools, ~115k tokens of schemas
+each, **~25.8M tokens** in total attached to requests that must not call anything.
+
+The obvious fix is to drop the tools. That would have cost more than it saved. Those same requests run
+at a **95.7% cache hit rate** (39.3M of 41.1M input tokens served from cache; 299 of 300 above 50%),
+and tools sit *before* messages in the prompt prefix — so removing them invalidates everything after.
+Roughly **$177 of extra spend to avoid ~$13** of cached schema tokens.
+
+So the tools stay and `tool_choice: "none"` makes a call impossible. Probed directly against the API
+to confirm that parameter is not part of the cache key:
+
+```
+1 prime            input=4055 cached=0
+2 same again       input=4055 cached=4052
+3 + tool_choice    input=4055 cached=3980     <- still cached
+4 tool_choice agn  input=4055 cached=3980
+5 back to no tc    input=4055 cached=4052
+```
+
+98.2% retained; the 72-token gap is cache-block granularity, not a miss. Same guarantee, no bill.
+
+### Two bugs the policy closed
+
+**`tool_choice` could name a tool that was not sent.** On the Chat surface the 128-tool cap drops
+tools, and `tool_choice` was translated independently of it. Verified against the live encoder: 200
+tools in, 128 sent, and `tool_choice: {name: "zz_dropped_199"}` on the wire — which the API rejects,
+with an error naming the parameter rather than the cap that caused it. It is now resolved against what
+is actually being sent and **cleared** if the tool is absent, so the turn proceeds instead of failing.
+
+**Hints could name a tool the model cannot see.** They were built from the client's full list rather
+than from what was sent. Latent rather than live — every tool a hint names survives the essential-tool
+selector — but it becomes live the moment a policy hides something, which is what this adds. Hints now
+come from the exposed set.
+
+### Deferred tool search: defined, and not enabled
+
+The shape exists (`eager`, `deferred`, `allowed`) because the policy needs somewhere for it to live.
+It is **off**. The real `ToolSearch` → load → call loop has not been proven end to end in the app, and
+a deferral that loses a tool presents as a model that "chose" not to use it — the worst possible
+failure to debug. `ToolSearch` itself is permanently eager: it is the entry point to every deferred
+tool, so deferring it would make the rest unreachable.
+
+There is consequently nothing to evaluate against an all-eager baseline: all-eager is what ships.
+
 ## A classifier cannot inherit a model
 
 Claude Code asks the proxy whether a risky action is allowed, gives the answer a **60-second
