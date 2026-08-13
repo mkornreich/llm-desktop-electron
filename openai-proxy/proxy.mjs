@@ -33,6 +33,7 @@ import { RequestError, TranslationError, errorResponse } from "./errors.mjs";
 import {
   ROUTE, routeFor, policyFor, modelForRoute, routeLabel, isClassifier, isSafety,
   PREFIX_RE, SAFETY_RE, CLASSIFIER_RE, SEVERITY_RE, BLOCK_RE, OPENAI_MODEL_RE,
+  effortForRoute, outputCeilingForRoute,
 } from "./routes.mjs";
 import * as provenance from "../scripts/lib/provenance.mjs";
 import {
@@ -196,31 +197,55 @@ const EFFORT_LADDER = ["max", "xhigh", "high", "medium", "low", "minimal", "none
 // DENIES the action. Observed in the live log — request at 21:29:56, `stop` rejected at
 // 21:30:10, retry, classifier aborted at 21:30:26 — the doubled latency was itself the
 // cause of the denial the user saw.
+// Keyed by SURFACE and model, not model alone.
+//
+// A capability belongs to a (surface, model) pair. gpt-5.6-sol on Chat Completions answers "Function
+// tools with reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions" — while the
+// same model on the Responses API supports reasoning fully. With a model-only key, one Chat rejection
+// taught the process that the model rejects reasoning, and every later Responses call silently went
+// out without it: reasoning off, effort quietly lowered, and nothing in the log tying it to a
+// rejection on a different surface.
+//
+// Latent today, because OPENAI_API pins every call to one surface — but a blank OPENAI_API routes
+// `codex` names to Responses and everything else to Chat, so one process can genuinely use both.
+// Being latent is not a reason to leave a wrong key in place.
+const capKey = (surface, model) => `${surface || "?"}|${model || "?"}`;
 const unsupportedByModel = new Map();
-function rememberUnsupported(model, param) {
-  if (!unsupportedByModel.has(model)) unsupportedByModel.set(model, new Set());
-  const set = unsupportedByModel.get(model);
+function rememberUnsupported(model, param, surface = "?") {
+  const key = capKey(surface, model);
+  if (!unsupportedByModel.has(key)) unsupportedByModel.set(key, new Set());
+  const set = unsupportedByModel.get(key);
+  // `param` is a FIELD PATH, not just a name: a nested rejection must not suppress a top-level field
+  // that happens to share its last segment.
   if (!set.has(param)) {
     set.add(param);
-    log(`  ! remembering that ${model} rejects '${param}' — it will not be sent again`);
+    log(`  ! remembering that ${model} on ${surface} rejects '${param}' — it will not be sent again on that surface`);
   }
 }
-function stripUnsupported(payload) {
-  const bad = unsupportedByModel.get(payload?.model);
+function stripUnsupported(payload, surface = "?") {
+  const bad = unsupportedByModel.get(capKey(surface, payload?.model));
   if (!bad || bad.size === 0) return payload;
   const out = { ...payload };
   for (const p of bad) delete out[p];
   return out;
 }
 
+// Same reasoning for the effort ladder: a step taken because CHAT rejected `max` must not lower
+// effort on Responses, where the model accepts it.
 const effortByModel = new Map();
-const effortFor = (model) => effortByModel.get(model) || REASONING_EFFORT;
-function lowerEffort(model, rejected) {
+const effortFor = (model, surface = "?", route = ROUTE.MAIN) => {
+  // The route's TARGET effort and the model's CEILING are separate facts. The target says what this
+  // kind of call wants; the memo says what this (surface, model) pair has been observed to accept.
+  const target = effortForRoute(route, REASONING_EFFORT);
+  if (target === null) return null;
+  return effortByModel.get(capKey(surface, model)) || target;
+};
+function lowerEffort(model, rejected, surface = "?") {
   const i = EFFORT_LADDER.indexOf(rejected);
   const next = i === -1 ? "high" : EFFORT_LADDER[i + 1];
   if (!next) return null;
-  effortByModel.set(model, next);
-  log(`  ! reasoning effort '${rejected}' unsupported by ${model} — falling back to '${next}'`);
+  effortByModel.set(capKey(surface, model), next);
+  log(`  ! reasoning effort '${rejected}' unsupported by ${model} on ${surface} — falling back to '${next}'`);
   return next;
 }
 // Reasoning tokens are drawn from the SAME max_output_tokens budget as the answer, so
@@ -1575,7 +1600,7 @@ async function callOpenAI(payload, isClassifier = false) {
   const doFetch = (body) => f(`${OPENAI_BASE}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-    body: JSON.stringify(stripUnsupported(body)),
+    body: JSON.stringify(stripUnsupported(body, "chat")),
   });
   let res = await doFetch(payload);
   if (res.status === 400) {
@@ -1613,7 +1638,7 @@ async function callOpenAI(payload, isClassifier = false) {
       if (bad && /unsupported_parameter|Unsupported parameter/i.test(txt)) {
         const base = retry || payload;
         if (base[bad[1]] !== undefined) {
-          rememberUnsupported(payload.model, bad[1]);
+          rememberUnsupported(payload.model, bad[1], "chat");
           retry = { ...base };
           delete retry[bad[1]];
           log(`  ! ${payload.model} rejected '${bad[1]}' — dropped it and retried`);
@@ -1823,7 +1848,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   // hidden reasoning is charged to the same output budget, which is how a verdict comes back
   // empty and the CLI concludes the model is unavailable.
   if (policy.reasoning && SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
-    out.reasoning = { effort: effortFor(model), summary: "detailed" };
+    out.reasoning = { effort: effortFor(model, "responses", route), summary: "detailed" };
   }
   // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding.
   if (VERBOSITY && policy.verbosity) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
@@ -1875,7 +1900,7 @@ async function callResponses(payload, isClassifier = false) {
     else if (/unsupported_parameter|Unsupported parameter/i.test(txt) && /"param":\s*"([^"]+)"/.test(txt)) {
       const bad = txt.match(/"param":\s*"([^"]+)"/)[1];
       if (payload[bad] !== undefined) {
-        rememberUnsupported(payload.model, bad);
+        rememberUnsupported(payload.model, bad, "responses");
         const { [bad]: _dropped, ...rest } = payload;
         log(`  ! ${payload.model} rejected '${bad}' — dropped it and retried`);
         res = await doFetch(rest);
@@ -1914,7 +1939,7 @@ async function callResponses(payload, isClassifier = false) {
     // Walk the effort ladder down until the model accepts one.
     else if (payload.reasoning?.effort && /not supported with the .* model/i.test(txt)) {
       let effort = payload.reasoning.effort, next, body = payload;
-      while ((next = lowerEffort(payload.model, effort))) {
+      while ((next = lowerEffort(payload.model, effort, "responses"))) {
         body = { ...body, reasoning: { ...body.reasoning, effort: next } };
         res = await doFetch(body);
         if (res.status !== 400) break;
@@ -3047,7 +3072,7 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          toResponses, toOpenAI, pickModel,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
          newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
-         rememberUnsupported, stripUnsupported,
+         rememberUnsupported, stripUnsupported, effortFor, lowerEffort,
          isTransportError, TRANSPORT_ERROR_CODES, MAX_TRANSPORT_RETRIES,
          // Exported so a test can bind it to an ephemeral port and drive a real request through
          // the whole path — the transport retry lives in the streaming loop and cannot be

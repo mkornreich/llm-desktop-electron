@@ -87,6 +87,50 @@ the proxy asked twice.
 whether it is exact. The pre-existing aggregate is carried as a labelled **floor**, never folded into
 the new totals — mixing an exact figure with an estimate produces something that is neither.
 
+## A capability belongs to a surface, not to a model
+
+The proxy learns what a model rejects and stops sending it. That memory was keyed by **model alone**,
+and it should not have been.
+
+`gpt-5.6-sol` on Chat Completions answers:
+
+> "Function tools with reasoning_effort are not supported for gpt-5.6-sol in /v1/chat/completions"
+
+while the same model on the **Responses** API supports reasoning fully. With a model-only key, one
+Chat rejection taught the process that the model rejects reasoning — and every later Responses call
+silently went out without it. Reasoning off, effort quietly stepped down, and nothing in the log tying
+either to a rejection that happened on a different surface.
+
+Latent today, because `OPENAI_API` pins every call to one surface. But a blank `OPENAI_API` routes
+`codex` names to Responses and everything else to Chat, so one process genuinely uses both. Being
+latent is not a reason to leave a wrong key in place. The memo is now keyed by `(surface, model)`, and
+the recorded value is a **field path** rather than a bare name, so a nested rejection cannot suppress
+a top-level field that shares its last segment.
+
+The effort ladder is keyed the same way: a step taken because Chat rejected `max` no longer lowers
+effort on Responses, where the model accepts it.
+
+### Route target versus model ceiling
+
+These are separate facts and used to be one:
+
+- the **route target** is what this kind of call wants — an agent turn wants the configured effort, a
+  verdict wants no reasoning parameter at all
+- the **model ceiling** is what a `(surface, model)` pair has been observed to accept
+
+Collapsing them is what made a single rejection look like a configuration change. `null` effort (send
+no parameter) is also kept distinct from an effort of `"none"`, which asks for reasoning at the lowest
+setting and still pays for the field.
+
+**No default moved.** The route table reproduces the incumbent behaviour exactly: `main` and
+`compaction` take the configured effort, classifiers take none. A default may change only on paired
+evaluation showing zero safety or tool regression plus either a credible quality improvement or
+non-inferiority with a real speed gain — and none of that evidence exists yet, so a tuned table here
+would be changing behaviour on taste. The output ceilings were already aligned (`min(client max_tokens,
+OPENAI_MAX_OUTPUT_TOKENS)` on both surfaces, with validation warning when the cumulative turn ceiling
+sits below the single-call cap), and nothing advertises 128K, so there is no oversized reservation to
+shrink.
+
 ## What the model is shown, per route
 
 Exposure decides what the model **sees**. It never decides what may **execute** — that is Claude
