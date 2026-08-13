@@ -101,6 +101,15 @@ test("a blank safety model is legal, and warned about", () => {
   assert.deepEqual(r.errors, [], "blank is legal");
   assert.match(r.warnings.join(" "), /safety verdicts run on the main model/);
   assert.match(r.warnings.join(" "), /DENIES the action/);
+  // The warning must state the MEASURED reason. It used to blame latency, from figures taken on a
+  // different model; re-measuring showed latency is fine (p50 2.4s) and 8 of 14 verdicts come back
+  // unparseable. Someone reading the old text would have chosen blank expecting a slow answer rather
+  // than no answer.
+  assert.match(r.warnings.join(" "), /UNPARSEABLE/);
+  assert.match(r.warnings.join(" "), /eval\/reports\/safety-classifier\.md/,
+    "a default's justification must point at the report that measured it");
+  assert.ok(!/median 12\.2s/.test(r.warnings.join(" ")),
+    "the superseded latency figures must not remain as the stated reason");
 });
 
 test("the API surface is auto-selected from the model name, and overridable", () => {
