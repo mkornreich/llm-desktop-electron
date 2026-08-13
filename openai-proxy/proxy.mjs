@@ -36,6 +36,9 @@ import {
 } from "./routes.mjs";
 import * as provenance from "../scripts/lib/provenance.mjs";
 import {
+  exposureFor, resolveToolChoice, exposureFingerprint, partition, VISIBILITY,
+} from "./tool-policy.mjs";
+import {
   makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
   newId as newTurnId,
 } from "./attempts.mjs";
@@ -1450,13 +1453,28 @@ const IMAGE_REJECTED_RE = /image|vision|multimodal|input_image|image_url/i;
 // ---------- request translation: Anthropic -> OpenAI ----------
 function toOpenAI(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
+  // Exposure is decided FIRST, because the system message, the tools array and tool_choice all read
+  // it. Declaring it lower down put it in a temporal dead zone for the hint call — the encoder threw
+  // on every request until the tests said so.
+  const registry = ToolRegistry.from(body.tools);
+  const exposure = exposureFor(route);
+  const exposedTools = exposure.visibility === VISIBILITY.NONE || !body.tools?.length
+    ? []
+    : (() => {
+        const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
+        if (dropped.length) log(`chat cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}: ${dropped.slice(0, 12).join(", ")}${dropped.length > 12 ? ", …" : ""}`);
+        return tools;
+      })();
   const messages = [];
   let imagesSent = 0;
   if (body.system) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
       : body.system;
-    if (sys) messages.push({ role: "system", content: withFormatHint(sys, policy.hints, body.tools) });
+    // Hints are built from the EXPOSED tools, not from the client's full list. Naming a tool the
+    // model cannot see is an instruction it cannot follow — latent until a policy hides something,
+    // which is exactly what the exposure policy now does.
+    if (sys) messages.push({ role: "system", content: withFormatHint(sys, policy.hints, exposedTools) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -1501,29 +1519,25 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   if (temp != null) out.temperature = temp;
   if (body.top_p != null) out.top_p = body.top_p;
   if (body.stop_sequences?.length) out.stop = body.stop_sequences;
-  // The registry validates the WHOLE catalog before the cap drops anything, so a name collision
-  // cannot depend on which tools happened to survive. It throws, and the caller turns that into a
-  // 400 naming both tools — see tool-registry.mjs for why renaming would be worse.
-  const registry = ToolRegistry.from(body.tools);
-  // A verdict has a rigid output contract and no use for a tool. Offering one invites a tool call
-  // in PLACE of the verdict, which is unparseable, which makes the CLI retry and then DENY. Both
-  // encoders used to send whatever tools a classifier request carried — up to
-  // OPENAI_CLASSIFIER_MAX_TOOLS of them — because the tools block was never gated on the route.
-  if (policy.tools && body.tools?.length) {
-    const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
-    if (dropped.length) log(`chat cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}: ${dropped.slice(0, 12).join(", ")}${dropped.length > 12 ? ", …" : ""}`);
-    out.tools = tools.map((t) => ({
+  // The registry validated the WHOLE catalog above, before any cap dropped anything, so a name
+  // collision cannot depend on which tools happened to survive.
+  if (exposedTools.length) {
+    out.tools = exposedTools.map((t) => ({
       type: "function",
       function: { name: registry.wireName(t.name), description: t.description, parameters: t.input_schema },
     }));
   }
-  // tool_choice without tools is either meaningless or a 400, and "required" would demand a call
-  // the model has no tool to make.
-  if (policy.tools && body.tool_choice) {
-    const tc = body.tool_choice;
-    if (tc.type === "auto") out.tool_choice = "auto";
-    else if (tc.type === "any") out.tool_choice = "required";
-    else if (tc.type === "tool") out.tool_choice = { type: "function", function: { name: registry.wireName(tc.name) } };
+  // Resolved against what is ACTUALLY being sent. A tool_choice naming a tool the cap dropped is a
+  // 400 whose message points at the parameter rather than at the cause, so it is cleared instead.
+  {
+    const exposedNames = exposedTools.map((t) => t.name);
+    const { choice, cleared, reason } = resolveToolChoice(body.tool_choice, exposedNames, exposure);
+    if (cleared && reason) log(`  ! ${reason}`);
+    if (choice === "none") out.tool_choice = "none";
+    else if (choice === "auto") out.tool_choice = "auto";
+    else if (choice === "required") out.tool_choice = "required";
+    else if (choice && choice.type === "tool")
+      out.tool_choice = { type: "function", function: { name: registry.wireName(choice.name) } };
   }
   if (out.stream) out.stream_options = { include_usage: true };
   // Same cache routing as the Responses path; both surfaces accept the field.
@@ -1752,6 +1766,17 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
 // Anthropic Messages -> Responses request
 function toResponses(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
+  // Decided first, for the same reason as in toOpenAI: instructions, tools and tool_choice all read it.
+  const registry = ToolRegistry.from(body.tools);
+  const exposure = exposureFor(route);
+  const exposedTools = exposure.visibility === VISIBILITY.NONE || !body.tools?.length
+    ? []
+    : (() => {
+        // No cap on this surface (verified up to 512), so the agent keeps every tool.
+        const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_RESPONSES);
+        if (dropped.length) log(`responses cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}`);
+        return tools;
+      })();
   const input = [];
   let imagesSent = 0;
   for (const m of body.messages || []) {
@@ -1802,24 +1827,23 @@ function toResponses(body, model, route = routeForRequest(body)) {
   }
   // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding.
   if (VERBOSITY && policy.verbosity) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
-  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, body.tools);
-  const registry = ToolRegistry.from(body.tools);
-  // See the note in toOpenAI: a classifier gets no tools, on either surface.
-  if (policy.tools && body.tools?.length) {
-    // No cap on this surface (verified up to 512), so the agent keeps every tool.
-    const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_RESPONSES);
-    if (dropped.length) log(`responses cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}`);
-    // Responses tools are flat: {type,name,description,parameters}
-    out.tools = tools.map((t) => ({
+  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, exposedTools);
+  // Responses tools are flat: {type,name,description,parameters}
+  if (exposedTools.length) {
+    out.tools = exposedTools.map((t) => ({
       type: "function", name: registry.wireName(t.name),
       description: t.description, parameters: t.input_schema,
     }));
   }
-  if (policy.tools && body.tool_choice) {
-    const tc = body.tool_choice;
-    if (tc.type === "auto") out.tool_choice = "auto";
-    else if (tc.type === "any") out.tool_choice = "required";
-    else if (tc.type === "tool") out.tool_choice = { type: "function", name: registry.wireName(tc.name) };
+  {
+    const exposedNames = exposedTools.map((t) => t.name);
+    const { choice, cleared, reason } = resolveToolChoice(body.tool_choice, exposedNames, exposure);
+    if (cleared && reason) log(`  ! ${reason}`);
+    if (choice === "none") out.tool_choice = "none";
+    else if (choice === "auto") out.tool_choice = "auto";
+    else if (choice === "required") out.tool_choice = "required";
+    else if (choice && choice.type === "tool")
+      out.tool_choice = { type: "function", name: registry.wireName(choice.name) };
   }
   // temperature intentionally omitted — codex/reasoning models only accept the default.
   return { payload: out, registry, imagesSent };

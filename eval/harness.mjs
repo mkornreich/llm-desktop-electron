@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { CASES } from "./corpus.mjs";
 import { isLongContext, LONG_CONTEXT_THRESHOLD } from "../openai-proxy/model-registry.mjs";
+import { exposureFingerprint } from "../openai-proxy/tool-policy.mjs";
 
 // A reply that satisfies both surfaces, so one fake serves the whole corpus.
 const REPLY_RESPONSES = {
@@ -76,6 +77,12 @@ function observe(surface, payload) {
     // Pricing tier, so a change that grows requests past 272K shows up as a cost change rather than
     // as a surprise on the bill.
     longContextTier: isLongContext(grossInput, p.model),
+    // A stable digest of exactly what the model was shown, so an exposure change is reviewable as a
+    // value rather than as an impression.
+    exposureFingerprint: exposureFingerprint({
+      visibility: toolNames.length ? (p.tool_choice === "none" ? "no-calls" : "all") : "none",
+      names: toolNames,
+    }),
   };
 }
 

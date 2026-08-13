@@ -1,7 +1,7 @@
 {
   "meta": {
     "formatVersion": 1,
-    "corpusCases": 13,
+    "corpusCases": 15,
     "slices": [
       "agent tool selection",
       "renderer/file tools late in the catalogue",
@@ -17,8 +17,8 @@
       "forks / concurrency",
       "representative coding task"
     ],
-    "proxyCodeVersion": "d1d7e9004bee",
-    "configHash": "377aa423fa469cc2",
+    "proxyCodeVersion": "66a0e255e11d",
+    "configHash": "c874472acabcc655",
     "provider": "openai",
     "rateTableVersion": "2026-08-13",
     "node": "v26.5.0"
@@ -54,7 +54,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "0c0e0fcca853"
       }
     },
     {
@@ -87,7 +88,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "0c0e0fcca853"
       }
     },
     {
@@ -95,7 +97,7 @@
       "slice": "long tool loops",
       "status": 200,
       "error": null,
-      "ms": 4,
+      "ms": 5,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -120,7 +122,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 242,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "0c0e0fcca853"
       }
     },
     {
@@ -128,7 +131,7 @@
       "slice": "utility / structured helpers",
       "status": 200,
       "error": null,
-      "ms": 4,
+      "ms": 2,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -146,7 +149,8 @@
         "maxOutputTokens": 64,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
       }
     },
     {
@@ -154,7 +158,7 @@
       "slice": "prefix classifier",
       "status": 200,
       "error": null,
-      "ms": 4,
+      "ms": 6,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.4-nano",
@@ -172,7 +176,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
       }
     },
     {
@@ -180,7 +185,7 @@
       "slice": "safety stage 1",
       "status": 200,
       "error": null,
-      "ms": 3,
+      "ms": 2,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.4-2026-03-05",
@@ -198,7 +203,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
       }
     },
     {
@@ -206,7 +212,7 @@
       "slice": "safety stage 2",
       "status": 200,
       "error": null,
-      "ms": 2,
+      "ms": 1,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.4-2026-03-05",
@@ -224,7 +230,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
       }
     },
     {
@@ -250,7 +257,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
       }
     },
     {
@@ -258,7 +266,7 @@
       "slice": "agent turn that quotes the contract",
       "status": 200,
       "error": null,
-      "ms": 2,
+      "ms": 3,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -283,7 +291,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "0c0e0fcca853"
       }
     },
     {
@@ -291,7 +300,7 @@
       "slice": "client compaction",
       "status": 200,
       "error": null,
-      "ms": 3,
+      "ms": 2,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -300,7 +309,7 @@
         "firstTools": [],
         "lastTools": [],
         "hasRendererTool": false,
-        "toolChoice": null,
+        "toolChoice": "none",
         "hints": true,
         "instructionsChars": 3926,
         "reasoning": "max",
@@ -309,12 +318,47 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 11,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
       }
     },
     {
-      "id": "media/image-in-a-tool-result",
-      "slice": "media / document tasks",
+      "id": "compaction/with-a-full-catalogue",
+      "slice": "client compaction",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 238,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": "none",
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 15,
+        "longContextTier": false,
+        "exposureFingerprint": "5d1542c8c86b"
+      }
+    },
+    {
+      "id": "agent/tool-choice-names-a-tool-that-was-not-sent",
+      "slice": "agent tool selection",
       "status": 200,
       "error": null,
       "ms": 2,
@@ -341,8 +385,43 @@
         "verbosity": "high",
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false,
+        "exposureFingerprint": "52a9a0752f9b"
+      }
+    },
+    {
+      "id": "media/image-in-a-tool-result",
+      "slice": "media / document tasks",
+      "status": 200,
+      "error": null,
+      "ms": 1,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 22,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
         "messageCount": 3,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "52a9a0752f9b"
       }
     },
     {
@@ -375,7 +454,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 19,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "52a9a0752f9b"
       }
     },
     {
@@ -383,7 +463,7 @@
       "slice": "representative coding task",
       "status": 200,
       "error": null,
-      "ms": 4,
+      "ms": 3,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -408,7 +488,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false
+        "longContextTier": false,
+        "exposureFingerprint": "7ce18c07e718"
       }
     }
   ]

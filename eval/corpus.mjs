@@ -176,6 +176,33 @@ export const CASES = [
     }),
   },
   {
+    id: "compaction/with-a-full-catalogue",
+    slice: "client compaction",
+    // THE REAL-WORLD SHAPE. Measured in this app's logs: 224 of 318 client compaction requests
+    // carried tools, ~115k tokens of schemas each. The tools must stay (dropping them would break a
+    // 95.7% cache hit rate) and calls must be impossible.
+    body: () => ({
+      model: "claude-opus-4-8", max_tokens: 4096, stream: false, system: AGENT_SYS,
+      messages: [...toolLoop(6), { role: "user", content:
+        "Your task is to create a detailed summary of the conversation so far, paying close " +
+        "attention to the user's explicit requests and your previous actions." }],
+      tools: bigCatalogue(),
+    }),
+  },
+  {
+    id: "agent/tool-choice-names-a-tool-that-was-not-sent",
+    slice: "agent tool selection",
+    // Verified against the live encoder before this was fixed: a payload with 128 tools and
+    // `tool_choice: {name: "zz_dropped_199"}`, which the API rejects — an error naming a parameter
+    // rather than the cap that caused it.
+    body: () => ({
+      model: "claude-opus-4-8", max_tokens: 4096, stream: false, system: AGENT_SYS,
+      messages: [{ role: "user", content: "use the tool I named" }],
+      tools: bigCatalogue(20),
+      tool_choice: { type: "tool", name: "NotInTheCatalogueAtAll" },
+    }),
+  },
+  {
     id: "media/image-in-a-tool-result",
     slice: "media / document tasks",
     body: () => ({
