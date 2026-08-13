@@ -121,8 +121,7 @@ computed from Anthropic's price list and are meaningless when proxied.
 ### Tests
 
 ```bash
-node --test openai-proxy/proxy.test.mjs     # 128 tests
-node --test settings/config.test.js         #   8 tests
+npm test        # the whole suite: proxy + settings + launcher scripts
 ```
 
 Most were written against a specific misbehaviour; the comments say which.

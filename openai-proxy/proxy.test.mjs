@@ -14,7 +14,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
-        rememberUnsupported, stripUnsupported,
+        rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
@@ -569,9 +569,23 @@ test("issue #1: both response paths substitute the notice", () => {
   // non-streaming
   assert.match(src, /if \(!content\.length\) \{\s*\n\s*content\.push\(\{ type: "text", text: emptyTurnNotice\(resp\) \}\)/,
     "non-streaming path must guard empty turns");
-  // and usage must be recorded exactly once per stream, not twice
-  assert.equal((src.match(/recordUsage\(payload\?\.model/g) || []).length, 1,
-    "recordUsage must not be duplicated by the empty-turn guard");
+  // Usage must be recorded exactly once per stream. This used to count occurrences of
+  // `recordUsage(payload?.model` in the source and require exactly 1 — which broke the moment a
+  // second, MUTUALLY EXCLUSIVE terminal path was added (the transport-abort path, which ends in
+  // `res.end(); return;` before the normal accounting can run). Counting text cannot tell an
+  // exclusive branch from a duplicate, so assert the property that actually matters: every such
+  // call site is immediately followed by a terminal sequence ending the response.
+  const sites = [...src.matchAll(/recordUsage\(payload\?\.model[\s\S]{0,400}?\n/g)].map((m) => m.index);
+  assert.ok(sites.length >= 1, "the streaming path must record usage");
+  for (const at of sites) {
+    const after = src.slice(at, at + 1400);
+    assert.match(after, /sse\(res, "message_stop"[\s\S]{0,200}res\.end\(\)/,
+      "each streaming recordUsage must belong to a path that terminates the response, so no " +
+      "two of them can run for one turn");
+  }
+  // The abort path must return, or it would fall through into the normal accounting below it.
+  assert.match(src, /sse\(res, "message_stop", \{ type: "message_stop" \}\);\s*\n\s*res\.end\(\);\s*\n\s*return;/,
+    "the transport-abort terminal must return rather than fall through");
 });
 
 test("issue #1: verbosity is sent and configurable", () => {
@@ -2094,4 +2108,81 @@ test("every recordUsage call site passes the cached figure and the resolved mode
   // reqModel is the CLIENT's id (claude-opus-4-8); the ledger is keyed on the OpenAI model.
   assert.ok(!/recordUsage\(reqModel\b/.test(src),
     "usage must not be filed under the client-requested model");
+});
+
+// ---------- transport-error retry ----------
+//
+// 97 turns in the log ended as "stream error: terminated" and none was retried, because the four
+// retry loops in streamResponses all veto on `streamError`. That guard is right for an upstream
+// REFUSAL and wrong for a dropped socket, so transport failures now get their own bounded retry.
+
+test("classifies a dropped socket as transport, and an API refusal as not", () => {
+  // Exactly the shape undici throws: TypeError("terminated") wrapping UND_ERR_SOCKET.
+  const dropped = new TypeError("terminated");
+  dropped.cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+  assert.equal(isTransportError(dropped), true);
+
+  for (const code of ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "UND_ERR_BODY_TIMEOUT"]) {
+    assert.equal(isTransportError(Object.assign(new Error("x"), { code })), true, code);
+  }
+  // Nested one level deeper — fetch wraps the socket error in its own cause chain.
+  const nested = new TypeError("fetch failed");
+  nested.cause = { message: "terminated", cause: { code: "UND_ERR_SOCKET" } };
+  assert.equal(isTransportError(nested), true);
+
+  // Things that must NOT be retried: they are answers, not transport faults.
+  assert.equal(isTransportError(new Error("Your input exceeds the context window of this model")), false);
+  assert.equal(isTransportError(new Error("insufficient_quota")), false);
+  assert.equal(isTransportError(Object.assign(new Error("aborted"), { name: "AbortError" })), false);
+  assert.equal(isTransportError(null), false);
+  // "terminated" must match the whole message, so prose mentioning it is not swept in.
+  assert.equal(isTransportError(new Error("the run was terminated by policy")), false);
+});
+
+test("the transport retry is bounded and stops once output has been emitted", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.ok(MAX_TRANSPORT_RETRIES >= 1 && MAX_TRANSPORT_RETRIES <= 5,
+    `unreasonable bound: ${MAX_TRANSPORT_RETRIES}`);
+  // Retrying after content is already on the wire would renumber the client's content blocks,
+  // so the guard must exist and must be checked before any retry.
+  assert.match(src, /emittedAnything\s*=\s*\(\)\s*=>/, "needs an emitted-output guard");
+  assert.match(src, /if \(!isTransportError\(e\)\) throw e/,
+    "a non-transport error must propagate unchanged");
+  // A severed turn must be reported as one. The first version of this kept the partial output and
+  // let the normal terminal run, so a truncated answer went out as stop_reason=end_turn — and a
+  // tool call whose arguments were still arriving could go out as tool_use and be executed.
+  assert.match(src, /transportAborted/, "an aborted transport must be tracked distinctly");
+  assert.doesNotMatch(src, /keeping the partial turn/,
+    "the old behaviour presented a severed turn as a completion; it must not come back");
+});
+
+// Behavioural companions to the assertions above: the E2E cases in transport-retry.test.mjs
+// drive real sockets, and these pin the invariants that only exist as code shape.
+test("an aborted transport never reports a normal stop reason", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // The abort terminal sends stop_reason "error", not end_turn/tool_use/max_tokens.
+  const abortBlock = src.slice(src.indexOf("if (transportAborted) {"));
+  const terminal = abortBlock.slice(0, abortBlock.indexOf("res.end();") + 40);
+  assert.match(terminal, /stop_reason: "error"/, "a severed turn must stop with an error");
+  assert.doesNotMatch(terminal, /stop_reason: "(end_turn|tool_use|max_tokens)"/,
+    "a severed turn must never claim a successful stop reason");
+  assert.match(terminal, /sse\(res, "error"/,
+    "the client needs an in-band error event, not a silent EOF after message_start");
+  // A tool call still mid-assembly must be withheld rather than handed over as executable.
+  assert.match(abortBlock, /argBuf !== undefined[\s\S]{0,200}withheld/,
+    "incomplete tool calls must be withheld from the client");
+});
+
+test("every upstream call in the stream keeps the classifier's reserved pool", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // The classifier pool exists so a verdict cannot queue behind agent traffic and blow the CLI's
+  // fail-closed 60s deadline. A retry/continuation that dropped the flag silently demoted itself
+  // to the shared pool — reintroducing the exact starvation the pool prevents.
+  const fn = src.slice(src.indexOf("async function streamResponses"), src.indexOf("// ---------- server ----------"));
+  const calls = [...fn.matchAll(/await callResponses\(([^)]*)\)/g)].map((m) => m[1]);
+  assert.ok(calls.length >= 4, `expected several upstream calls in the stream, saw ${calls.length}`);
+  for (const args of calls) {
+    assert.match(args, /isClassifierPayload/,
+      `callResponses(${args}) must pass the classifier flag`);
+  }
 });

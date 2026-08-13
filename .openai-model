@@ -73,6 +73,16 @@ OPENAI_PERSISTENCE=1
 # confirmation requests for destructive actions, or for the safety classifier.
 OPENAI_AUTO_CONTINUE=1
 OPENAI_MAX_CONTINUATIONS=2
+# Retries when the UPSTREAM CONNECTION DROPS, which is different from every other retry here.
+# undici reports a socket that dies mid-body as TypeError("terminated"); a body that merely ends
+# early gives a clean EOF, so the message really does mean the transport broke (verified against
+# a local server that destroys the socket mid-SSE). Nothing used to retry it: the proxy logged
+# "stream error: terminated" and ended the turn, and the CLI could not retry either because it
+# had already been given HTTP 200 and a partial stream. 97 turns in one log died that way.
+# Retried only while NOTHING has reached the client yet — past the first delta the client holds
+# content blocks at fixed indices and a fresh response would renumber them, so a partial turn is
+# surfaced as-is instead. Never fires for an API refusal or a context error; those are answers.
+OPENAI_MAX_TRANSPORT_RETRIES=2
 # Show the model's thinking. The Responses API only emits reasoning SUMMARIES, and only when
 # BOTH summary and an explicit effort are sent — these become Anthropic `thinking` blocks.
 # OPENAI_SHOW_THINKING=0 turns it off.

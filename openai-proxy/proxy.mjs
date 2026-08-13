@@ -236,6 +236,32 @@ const EMPTY_RETRY = (process.env.OPENAI_EMPTY_RETRY || PROJECT.OPENAI_EMPTY_RETR
 const MAX_EMPTY_RETRIES = parseInt(process.env.OPENAI_MAX_EMPTY_RETRIES ||
   PROJECT.OPENAI_MAX_EMPTY_RETRIES || "2", 10) || 0;
 const CONTINUE_ON_TRUNCATION = (process.env.OPENAI_CONTINUE_ON_TRUNCATION || PROJECT.OPENAI_CONTINUE_ON_TRUNCATION || "1") !== "0";
+// A dropped upstream socket is not an answer, and until this existed it was not retried anywhere
+// in the stack: the proxy logged "stream error: terminated" and ended the turn, and the CLI could
+// not retry either because it had already been handed HTTP 200 and a partial stream. 97 turns in
+// this log died that way. Small bound — a genuinely unreachable upstream should fail fast rather
+// than sit through a long ladder, and the CLI still has its own retries above this one.
+const MAX_TRANSPORT_RETRIES = parseInt(process.env.OPENAI_MAX_TRANSPORT_RETRIES ||
+  PROJECT.OPENAI_MAX_TRANSPORT_RETRIES || "2", 10) || 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Restricted on purpose to errors that mean "the connection broke", never "the API said no".
+// undici reports a socket that dies mid-body as TypeError("terminated") with cause
+// UND_ERR_SOCKET; the cause code is the reliable half, since the message is version-dependent.
+// Verified against a local server: destroying the socket mid-SSE throws this, while a body that
+// merely ends early yields a clean EOF, so retrying on this signal cannot mask a real refusal.
+const TRANSPORT_ERROR_CODES = new Set([
+  "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN",
+]);
+function isTransportError(e) {
+  if (!e) return false;
+  if (e.name === "AbortError") return false;       // a deliberate cancel is not a transport fault
+  for (let cur = e, depth = 0; cur && depth < 4; cur = cur.cause, depth++) {
+    if (TRANSPORT_ERROR_CODES.has(cur.code)) return true;
+    if (typeof cur.message === "string" && /^terminated$/i.test(cur.message.trim())) return true;
+  }
+  return false;
+}
 // Ceiling on the TOTAL output tokens spliced into one assistant message. This matters because
 // every continuation appends to the same message, and the client enforces its own per-response
 // maximum — "Claude's response exceeded the 64000 output token maximum". Splicing without a
@@ -1669,9 +1695,18 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
   return { payload: out, nameMap, schemas, imagesSent };
 }
 
+// Returns the Response, and records which body was ACCEPTED on `res.effectivePayload`.
+//
+// This function silently rewrites the request when the model rejects it: lowering the output cap,
+// stripping images, dropping an unsupported parameter, compacting the context, walking the effort
+// ladder down. Those fallbacks are why a turn succeeds at all — but only the Response came back,
+// so a caller that later retried handed over the ORIGINAL payload and re-triggered every
+// rejection it had already worked around (and re-compacted context that was already compacted).
+// Attaching the accepted body lets the transport retry replay what actually worked.
 async function callResponses(payload, isClassifier = false) {
   const f = isClassifier ? classifierFetch : fetch;
-  const doFetch = (b) => f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) });
+  let accepted = payload;                        // updated by each fallback that gets used
+  const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) }); };
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();
@@ -1723,6 +1758,9 @@ async function callResponses(payload, isClassifier = false) {
       }
     }
   }
+  // Only meaningful when the request was accepted; on a failure the caller reports the error and
+  // does not replay. Non-enumerable so it cannot leak into logs or JSON of the Response.
+  try { Object.defineProperty(res, "effectivePayload", { value: accepted, enumerable: false }); } catch { /* frozen Response: replay falls back to the original */ }
   return res;
 }
 
@@ -2010,7 +2048,11 @@ function fromResponses(resp, reqModel, nameMap, schemas) {
 }
 
 // Responses SSE -> Anthropic SSE
-async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null, taskState = null) {
+// isClassifierPayload is threaded in rather than re-sniffed: every upstream call this function
+// makes (transport retry, truncation continuation, auto-continue, context recovery, empty retry)
+// must keep using the classifier's reserved connection pool, or a verdict can queue behind agent
+// traffic and miss the CLI's fail-closed 60s deadline.
+async function streamResponses(res, upstream, reqModel, nameMap, payload = null, allowContinue = false, schemas = null, taskState = null, isClassifierPayload = false) {
   // Measured, not inferred. Pairing a request line with a completion line in this log is
   // unreliable because turns overlap — two earlier attempts to answer "how slow is a turn"
   // from the log produced confidently wrong medians (34s, then 483s) before that was noticed.
@@ -2172,8 +2214,108 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     for (const id of items.keys()) close(id);
   }
 
-  await consume(upstream);
-  totalOutTokens += usage?.output_tokens || 0;
+  // The upstream socket can die mid-body. undici surfaces that as TypeError("terminated") with
+  // cause UND_ERR_SOCKET, thrown out of reader.read() — reproduced against a local server that
+  // destroys the socket after sending partial SSE; a body that simply ENDS early gives a clean
+  // EOF and no error, so this message really does mean the transport broke.
+  //
+  // It used to escape to the caller's `catch (e) { log("stream error:", e.message); res.end() }`,
+  // which ends the turn with whatever had been emitted. 97 turns died that way and NONE was
+  // retried: the four loops below all veto on `streamError`, so the guard that correctly stops
+  // us re-asking after an upstream REFUSAL also stopped us re-asking after a dropped socket.
+  //
+  // Retry only while nothing has been emitted. Past the first delta the client already holds
+  // content blocks at fixed indices, and a fresh response would renumber them — resuming is the
+  // truncation loop's job, not this one. A partial turn is still surfaced, but as an ERROR: see
+  // the transportAborted terminal below for why calling it end_turn was the worse bug.
+  const emittedAnything = () => hasTool || textLen > 0 || thinkLen > 0 || items.size > 0;
+  // Set when the transport broke after the client already held content. The turn is NOT a
+  // success and must not be dressed up as one further down: `stop_reason` becomes an explicit
+  // error and any half-built tool call is withheld rather than handed over as executable.
+  let transportAborted = null;
+  let transportRetries = 0;
+  for (;;) {
+    try {
+      // Accumulate inside the loop, adjacent to the consume() it belongs to: a retried pass
+      // still produces tokens on the abandoned attempt's behalf only if it got that far, and
+      // every consume() in this file must be followed by its own accumulation.
+      await consume(upstream);
+      totalOutTokens += usage?.output_tokens || 0;
+      break;
+    } catch (e) {
+      if (!isTransportError(e)) throw e;                 // not ours: let the caller report it
+      if (emittedAnything()) {
+        // Keep what the user already saw, but tell the truth about it. Reporting end_turn here
+        // presented a severed turn as a finished answer — and a tool call whose arguments were
+        // still mid-flight could go out with `stop_reason: tool_use`, inviting the agent to
+        // execute a half-parsed call. Both are worse than an honest failure.
+        transportAborted = e.message || "terminated";
+        log(`  ! upstream transport failed mid-turn (${transportAborted}) after content was sent` +
+            ` — surfacing the partial turn as an error, not a completion`);
+        break;
+      }
+      if (transportRetries >= MAX_TRANSPORT_RETRIES) {
+        // Nothing was emitted, so there is no partial answer to keep — but message_start is
+        // already on the wire, so ending here would look like a normal empty turn. Say so.
+        transportAborted = e.message || "terminated";
+        log(`  ! upstream transport failed (${transportAborted}); no retries left after ` +
+            `${transportRetries} — reporting an error to the client`);
+        break;
+      }
+      // Same shape as the Anthropic SDK's own connection-error backoff: 0.5s doubling, capped,
+      // with jitter so concurrent turns dropped by one upstream blip do not return in lockstep.
+      const waitMs = Math.min(500 * 2 ** transportRetries, 4000) * (1 - Math.random() * 0.25);
+      transportRetries++;
+      log(`  -> upstream transport failed (${e.message}) before any output — retry ` +
+          `${transportRetries}/${MAX_TRANSPORT_RETRIES} in ${Math.round(waitMs)}ms`);
+      await sleep(waitMs);
+      if (!payload) { log("  ! no payload to retry with; giving up"); transportAborted = e.message; break; }
+      let up;
+      // isCls matters: a classifier turn has its own reserved connection pool precisely so a
+      // verdict cannot queue behind agent traffic and blow the CLI's 60s fail-closed deadline.
+      // The first call passed it; dropping it on the retry silently demoted the retry to the
+      // shared pool — the exact starvation this pool exists to prevent.
+      try { up = await callResponses(payload, isClassifierPayload); }
+      catch (err) { log(`  -> transport retry fetch failed: ${err.message}`); transportAborted = err.message || e.message; break; }
+      if (!up.ok) { log(`  -> transport retry got ${up.status}; giving up`); transportAborted = `upstream ${up.status} on retry`; break; }
+      // Replay what was ACCEPTED, not what we first asked for. The initial call may have had its
+      // images stripped, effort lowered, a parameter dropped or its context compacted to be
+      // accepted at all; retrying the original re-triggers every one of those rejections.
+      if (up.effectivePayload && up.effectivePayload !== payload) {
+        payload = up.effectivePayload;
+        log("  -> retry adopted the upstream-accepted payload (post-fallback), not the original");
+      }
+      upstream = up;
+      sawTerminal = null; streamError = null; incomplete = false; incompleteReason = null;
+    }
+  }
+  // A severed turn skips every recovery loop below. Those loops read `incomplete`/`streamError`
+  // and would otherwise try to "continue" a stream whose upstream is gone.
+  if (transportAborted) {
+    // Withhold any tool call still mid-assembly: its arguments never finished arriving, so the
+    // client must not be able to run it. Blocks already closed by consume() stay as they are.
+    let withheld = 0;
+    for (const [id, it] of items) {
+      if (it.argBuf !== undefined && it.opened && !it.closed) { withheld++; it.argBuf = undefined; }
+      close(id);
+    }
+    if (withheld) log(`  ! withheld ${withheld} incomplete tool call(s) from the client`);
+    const detail = `The upstream connection dropped mid-response (${transportAborted}). ` +
+      (emittedAnything() ? "The partial output above is incomplete." : "No output was produced.") +
+      (transportRetries ? ` Retried ${transportRetries} time(s).` : "");
+    log(`  <- responses stream ABORTED after ${Date.now() - turnStart}ms` +
+        ` retries=${transportRetries} text=${textLen}ch tools=${toolCount}`);
+    recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens,
+                usage?.output_tokens_details?.reasoning_tokens,
+                usage?.input_tokens_details?.cached_tokens);
+    // Anthropic's stream carries in-band errors as an `error` event; a bare res.end() after
+    // message_start is a silent EOF the client cannot distinguish from success.
+    sse(res, "error", { type: "error", error: { type: "api_error", message: detail } });
+    sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: "error", stop_sequence: null }, usage: mapUsage(usage, "responses") });
+    sse(res, "message_stop", { type: "message_stop" });
+    res.end();
+    return;
+  }
 
   // Continue the turn in place when it was cut off by the output cap (issue #8). The client
   // otherwise surfaces a truncated answer, or errors outright, and the user has to ask again.
@@ -2204,7 +2346,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     // Reset the per-pass flags so the next consume() reports its own outcome.
     incomplete = false; incompleteReason = null;
     let up;
-    try { up = await callResponses(next); } catch (e) { log(`  -> continue-on-truncation fetch failed: ${e.message}`); break; }
+    try { up = await callResponses(next, isClassifierPayload); } catch (e) { log(`  -> continue-on-truncation fetch failed: ${e.message}`); break; }
     if (!up.ok) { log(`  -> continue-on-truncation got ${up.status}; keeping the truncated turn`); break; }
     payload = next;
     await consume(up);
@@ -2234,7 +2376,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
               { role: "user", content: [{ type: "input_text", text: nudge }] }],
     };
     let up;
-    try { up = await callResponses(next); } catch (e) { log(`  -> auto-continue fetch failed: ${e.message}`); break; }
+    try { up = await callResponses(next, isClassifierPayload); } catch (e) { log(`  -> auto-continue fetch failed: ${e.message}`); break; }
     if (!up.ok) { log(`  -> auto-continue got ${up.status}; keeping the original turn`); break; }
     payload = next;
     await consume(up);
@@ -2282,7 +2424,10 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
         ` (keeping last ${keep}); retrying`);
     payload = { ...payload, input };
     let up;
-    try { up = await callResponses(payload); }
+    // Unreachable for classifiers today (this loop is gated on allowContinue, which is false for
+    // them) — passed anyway so the "every upstream call keeps its pool" invariant holds locally
+    // rather than depending on a guard 150 lines away.
+    try { up = await callResponses(payload, isClassifierPayload); }
     catch (e) { log(`  -> compaction retry fetch failed: ${e.message}`); break; }
     if (!up.ok) { log(`  -> compaction retry got ${up.status}; giving up`); break; }
     streamError = null; sawTerminal = null; incomplete = false; incompleteReason = null;
@@ -2307,7 +2452,7 @@ async function streamResponses(res, upstream, reqModel, nameMap, payload = null,
     // certainly spent reasoning, and asking for the same hidden reasoning again reproduces it.
     const { reasoning, ...retry } = payload;
     let up;
-    try { up = await callResponses(retry); } catch (e) { log(`  -> empty-turn retry fetch failed: ${e.message}`); break; }
+    try { up = await callResponses(retry, isClassifierPayload); } catch (e) { log(`  -> empty-turn retry fetch failed: ${e.message}`); break; }
     if (!up.ok) { log(`  -> empty-turn retry got ${up.status}; giving up on the retry`); break; }
     sawTerminal = null; streamError = null; incomplete = false; incompleteReason = null;
     await consume(up);
@@ -2418,7 +2563,11 @@ const server = http.createServer(async (req, res) => {
       if (payload.stream) {
         const mayContinue = !isCls && !!payload.tools?.length;
         const taskState = TASK_ECHO && !isCls ? collectPriorTasks(body) : null;
-        try { await streamResponses(res, upstream, reqModel, nameMap, payload, mayContinue, schemas, taskState); }
+        // Hand the stream the body the upstream ACCEPTED. This first call is where the fallbacks
+        // actually fire (images stripped, effort lowered, context compacted), so a later transport
+        // retry inside the stream must not resurrect the pre-fallback request.
+        const accepted = upstream.effectivePayload || payload;
+        try { await streamResponses(res, upstream, reqModel, nameMap, accepted, mayContinue, schemas, taskState, isCls); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
@@ -2431,7 +2580,10 @@ const server = http.createServer(async (req, res) => {
           log("  ! empty answer with status=incomplete/max_output_tokens — retrying without reasoning");
           const { reasoning, ...noThink } = payload;
           try {
-            const retry = await callResponses(noThink);
+            // isCls: classifiers take this non-streaming path, so the reserved-pool flag has to
+            // ride the retry too. (It cannot fire for them today — a classifier payload carries
+            // no `reasoning` — but the routing must not depend on that staying true.)
+            const retry = await callResponses(noThink, isCls);
             if (retry.ok) rj = await retry.json();
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
         }
@@ -2502,7 +2654,48 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          toResponses, toOpenAI, pickModel,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
          newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
-         rememberUnsupported, stripUnsupported };
+         rememberUnsupported, stripUnsupported,
+         isTransportError, TRANSPORT_ERROR_CODES, MAX_TRANSPORT_RETRIES,
+         // Exported so a test can bind it to an ephemeral port and drive a real request through
+         // the whole path — the transport retry lives in the streaming loop and cannot be
+         // exercised by calling a pure function.
+         server };
+
+// ---------- do not let one broken socket kill every other session ----------
+//
+// Measured, not theoretical. On 08-13 at 05:32:47 this proxy died outright:
+//
+//   TypeError: terminated
+//       at Fetch.onAborted (undici/lib/web/fetch/index.js:2132:49)
+//     [cause]: Error: read ETIMEDOUT { errno: -60, syscall: 'read' }
+//   Node.js v26.5.0
+//
+// A single upstream read timed out on ONE long turn. undici turned that socket error into a
+// rejection on the fetch's own internal task — not on anything this code was awaiting — so Node
+// applied its default --unhandled-rejections=throw and terminated the process. The app, the
+// launcher and four live Claude Code agents stayed up pointing at a dead port, and every OpenAI
+// turn failed to connect until the proxy was restarted by hand.
+//
+// The transport retry below cannot prevent that: it only sees errors thrown out of `await`. This
+// is the backstop that turns "the proxy is gone" into "that one turn failed". It deliberately
+// does NOT exit on a transport error, because the cost is asymmetric — one abandoned turn versus
+// every concurrent session. A genuine bug (TypeError in our own translation, for instance) still
+// exits, because continuing on unknown corrupt state is worse than a restart.
+const fatal = (kind, err) => {
+  const e = err instanceof Error ? err : new Error(String(err));
+  if (isTransportError(e)) {
+    // An in-flight turn already got, or will get, its own error path. Nothing to salvage here.
+    log(`! ${kind} from a dropped upstream connection (${e.message}) — that turn is lost, staying up`);
+    return;
+  }
+  log(`!! ${kind}: ${e.stack || e.message} — exiting so the supervisor can restart cleanly`);
+  process.exitCode = 1;
+  // Flush the log before dying: the previous crash's evidence survived only because stdout was
+  // already appended to proxy.log. Give the write a beat, then leave.
+  setTimeout(() => process.exit(1), 50).unref?.();
+};
+process.on("unhandledRejection", (err) => fatal("unhandledRejection", err));
+process.on("uncaughtException", (err) => fatal("uncaughtException", err));
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);

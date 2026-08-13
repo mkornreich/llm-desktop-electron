@@ -4,7 +4,8 @@
   "private": true,
   "description": "Runs the unpacked Claude Desktop app.asar under a stock Electron runtime.",
   "scripts": {
-    "start": "electron app"
+    "start": "electron app",
+    "test": "node --test openai-proxy/*.test.mjs settings/config.test.js scripts/*.test.mjs"
   },
   "devDependencies": {
     "classic-level": "^3.0.0",
