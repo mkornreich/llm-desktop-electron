@@ -25,7 +25,7 @@ test("with nothing configured, every setting resolves to its documented default"
   assert.equal(v.OPENAI_BASE_URL, "https://api.openai.com/v1");
   assert.equal(v.PORT, 8123);
   assert.equal(v.OPENAI_CLASSIFIER_MODEL, "");
-  assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4");
+  assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4-2026-03-05");   // a pinned snapshot
   assert.equal(v.OPENAI_CLASSIFIER_MAX_TOOLS, 4);
   assert.equal(v.OPENAI_DEFAULT_MAX_TOKENS, 8192);
   assert.equal(v.OPENAI_MAX_OUTPUT_TOKENS, 32768);
@@ -69,12 +69,38 @@ test("the legacy project key `model` is still honoured, below the current name",
 });
 
 test("an empty value is treated as absent, exactly as `||` did", () => {
-  // This is why `OPENAI_CLASSIFIER_SAFETY_MODEL=` in the file does NOT mean "use the main
-  // model" today, despite the settings help saying so. Pinned as a defect, not as intent.
-  assert.equal(R({}, { OPENAI_CLASSIFIER_SAFETY_MODEL: "" }).OPENAI_CLASSIFIER_SAFETY_MODEL,
-    "gpt-5.4");
   assert.equal(R({ OPENAI_MODEL: "" }, { OPENAI_MODEL: "project" }).OPENAI_MODEL, "project");
   assert.equal(R({ OPENAI_VERBOSITY: "" }).OPENAI_VERBOSITY, "high");
+});
+
+test("a setting that opts into blankOk keeps an explicitly empty value", () => {
+  // The one exception, and the reason the exception exists. Blank
+  // OPENAI_CLASSIFIER_SAFETY_MODEL means "use the main model and accept the latency", which the
+  // settings help has always promised — and which `||` could never express, because blank is
+  // falsy and fell through to the default. ABSENT still takes the default; only a defined,
+  // empty value survives, so the two cannot be confused.
+  assert.equal(R().OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4-2026-03-05", "absent -> default");
+  assert.equal(R({}, { OPENAI_CLASSIFIER_SAFETY_MODEL: "" }).OPENAI_CLASSIFIER_SAFETY_MODEL, "",
+    "defined-but-empty -> blank, meaning the main model");
+  assert.equal(R({ OPENAI_CLASSIFIER_SAFETY_MODEL: "" }).OPENAI_CLASSIFIER_SAFETY_MODEL, "",
+    "including from the environment");
+  assert.equal(S({}, { OPENAI_CLASSIFIER_SAFETY_MODEL: "" }).OPENAI_CLASSIFIER_SAFETY_MODEL,
+    "project", "and the source says where the blank came from");
+  // Nothing else opts in: an empty value everywhere else still means "absent".
+  const optedIn = SETTINGS.filter((s) => s.blankOk).map((s) => s.name);
+  assert.deepEqual(optedIn, ["OPENAI_CLASSIFIER_SAFETY_MODEL"],
+    "blankOk changes what an empty value means, so it must stay deliberate and rare");
+});
+
+test("a blank safety model is legal, and warned about", () => {
+  // It is the configuration measured to miss the CLI's deadline, so it must be a visible choice
+  // rather than an accident: median 12.2s, p90 54s, 2 of 27 past the 60s fail-closed cliff.
+  const r = validate({ resolved: resolve({
+    env: { OPENAI_API_KEY: "k", OPENAI_API: "responses" },
+    project: { OPENAI_CLASSIFIER_SAFETY_MODEL: "" }, home: {} }) });
+  assert.deepEqual(r.errors, [], "blank is legal");
+  assert.match(r.warnings.join(" "), /safety verdicts run on the main model/);
+  assert.match(r.warnings.join(" "), /DENIES the action/);
 });
 
 test("the API surface is auto-selected from the model name, and overridable", () => {
@@ -319,8 +345,9 @@ test("every table entry is well formed", () => {
     assert.ok(!names.has(s.name), `duplicate setting ${s.name}`);
     names.add(s.name);
     if (s.derived) continue;
-    assert.ok(["str", "int", "bool01", "flag1"].includes(s.type), `${s.name} has type '${s.type}'`);
-    if (s.type === "int" || s.type === "str" || s.type === "bool01")
+    assert.ok(["str", "strBlankOk", "int", "bool01", "flag1"].includes(s.type),
+      `${s.name} has type '${s.type}'`);
+    if (s.type === "int" || s.type === "str" || s.type === "strBlankOk" || s.type === "bool01")
       assert.equal(typeof s.default, "string", `${s.name} default must be the raw string form`);
     if (s.type === "int" && "zero" in s)
       assert.ok(typeof s.zero === "number", `${s.name} zero must be numeric`);

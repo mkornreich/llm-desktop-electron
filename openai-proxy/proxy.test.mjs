@@ -7,6 +7,7 @@ import fs from "node:fs";
 // reading the developer's own ~/.dbeaver-ai-complete or .openai-model would make the result
 // depend on the machine. `resolve({env:{},project:{},home:{}})` is the shipped default.
 import { resolve as resolveConfig } from "./config.mjs";
+import { ROUTE, modelForRoute, policyFor, routeFor } from "./routes.mjs";
 const DEFAULTS = resolveConfig({ env: {}, project: {}, home: {} }).values;
 
 process.env.PROXY_NO_LISTEN = "1";
@@ -979,12 +980,54 @@ test("issue #6: the two classifier families are told apart", () => {
 });
 
 test("issue #6: the two classifier families get separately chosen models", () => {
-  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /family === "prefix" && OPENAI_CLASSIFIER_MODEL/);
-  assert.match(src, /family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL/,
+  // Asserted through the resolver rather than as the shape of two `family === ...` lines: the
+  // expressions moved into routes.mjs, and what matters is which model comes out.
+  const cfg = { main: "MAIN", prefixModel: "PFX", safetyModel: "SAFE" };
+  assert.equal(modelForRoute(ROUTE.PREFIX, cfg), "PFX");
+  assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, cfg), "SAFE",
     "the safety verdict must never inherit the prefix-detection model");
+  assert.equal(modelForRoute(ROUTE.SAFETY_SEVERITY, cfg), "SAFE");
+  assert.equal(modelForRoute(ROUTE.MAIN, cfg), "MAIN");
   // and no classifier call may ever be continued: a verdict is one turn
-  assert.match(src, /const mayContinue = !isCls && !!payload\.tools\?\.length/);
+  assert.equal(policyFor(ROUTE.SAFETY_BLOCK).continuation, false);
+  assert.equal(policyFor(ROUTE.PREFIX).continuation, false);
+  assert.equal(policyFor(ROUTE.MAIN).continuation, true);
+});
+
+test("a classifier can never inherit a requested, picked or forwarded model", () => {
+  // THE ORDERING FIX. pickModel checked for a requested OpenAI model id FIRST and returned it,
+  // before ever looking at the family — so a safety verdict inherited whatever the request named.
+  // The gateway picker is enabled here and its default list contains gpt-4.1-mini, the model
+  // measured to allow an action gpt-5.3-codex blocked. Latent in practice (all 20,160 logged
+  // safety verdicts arrived asking for a claude-* identity) but the mechanism is live: the log
+  // contains `model=gpt-4.1-mini[1m]->gpt-4.1-mini[1m]`.
+  const cfg = { main: "MAIN", prefixModel: "PFX", safetyModel: "SAFE" };
+  for (const requestedModel of ["gpt-4.1-mini", "gpt-5.4-nano", "o3", "chatgpt-4o-latest",
+                                "ft:gpt-4.1:acme::abc", "gpt-4.1-mini[1m]"]) {
+    assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, { ...cfg, requestedModel }), "SAFE",
+      `a safety verdict must not inherit ${requestedModel}`);
+    assert.equal(modelForRoute(ROUTE.SAFETY_SEVERITY, { ...cfg, requestedModel }), "SAFE");
+    assert.equal(modelForRoute(ROUTE.PREFIX, { ...cfg, requestedModel }), "PFX",
+      `prefix detection must not inherit ${requestedModel}`);
+    // An ordinary agent turn still honours it — that is the feature the picker depends on.
+    assert.equal(modelForRoute(ROUTE.MAIN, { ...cfg, requestedModel }), requestedModel);
+  }
+  // A claude-* identity is not an OpenAI model id and never passes through.
+  assert.equal(modelForRoute(ROUTE.MAIN, { ...cfg, requestedModel: "claude-opus-4-8" }), "MAIN");
+});
+
+test("an explicitly blank safety model means the main model, and absent means the default", () => {
+  // The settings help promised this and the code could not deliver it: blank is falsy, so `||`
+  // walked past it to the default. Now `blankOk` keeps a defined-but-empty value distinguishable
+  // from having said nothing at all.
+  const cfg = { main: "MAIN", prefixModel: "PFX" };
+  assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, { ...cfg, safetyModel: "", safetyModelIsBlank: true }),
+    "MAIN", "blank means the main model");
+  assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, { ...cfg, safetyModel: "SAFE" }), "SAFE");
+  // Resolution-level: absent takes the pinned default, blank survives as blank.
+  const R = (project) => resolveConfig({ env: {}, project, home: {} }).values.OPENAI_CLASSIFIER_SAFETY_MODEL;
+  assert.equal(R({}), "gpt-5.4-2026-03-05");
+  assert.equal(R({ OPENAI_CLASSIFIER_SAFETY_MODEL: "" }), "");
 });
 
 test("issue #6/#11: the safety verdict never uses a model measured to be more permissive", () => {
@@ -1005,8 +1048,13 @@ test("issue #6: safety and prefix resolve to different models from the main one"
   // a safety verdict must never land on the prefix-detection model
   assert.notEqual(safety, prefix, "safety must not inherit the small prefix model");
   assert.ok(!/^gpt-4\.1/.test(safety), `safety must not be a gpt-4.1 variant (got ${safety})`);
-  // blank config falls back to the main model; the shipped default is faster than it
-  assert.ok(safety === main || safety === "gpt-5.4", `unexpected safety model ${safety}`);
+  // Either the main model (blank config) or the pinned safety snapshot. Pinned rather than the
+  // floating `gpt-5.4` alias because this model decides whether a risky action runs, and an alias
+  // moves under you — the behaviour that was measured is not necessarily next month's behaviour.
+  assert.ok(safety === main || safety === DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL,
+    `unexpected safety model ${safety}`);
+  assert.match(DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL, /^gpt-5\.4-\d{4}-\d{2}-\d{2}$/,
+    "the safety default must be a dated snapshot, not a floating alias");
 });
 
 test("issue #6: the verdict is never fabricated by the proxy", () => {
@@ -1370,7 +1418,10 @@ test("issue #11: a classifier verdict is timed, and warns before the CLI's cliff
   assert.ok(DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS > 0 && DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS < 60000,
     `the slow-verdict warning must land before the CLI's 60s fail-closed deadline ` +
     `(got ${DEFAULTS.OPENAI_CLASSIFIER_SLOW_MS}ms)`);
-  assert.match(src, /classifier=\$\{family\} verdict in \$\{ms\}ms/);
+  // The log line now names the ROUTE, so a prefix detection and a safety verdict are told apart
+  // in the log. `classifier=yes` — two variants ago — could not distinguish them at all.
+  assert.match(src, /verdict in \$\{ms\}ms/);
+  assert.match(src, /routeLabel\(route\)/, "the label must come from the route, not a boolean");
   assert.match(src, /The CLI aborts its classifier at 60s and then DENIES the action/);
 });
 
@@ -1386,17 +1437,22 @@ test("issue #11: the safety verdict uses a model that fits the CLI's deadline", 
   // verdicts on gpt-5.3-codex: median 12.2s, p90 54s, max 287s, 2 past the cliff. gpt-5.4
   // answered the four largest real prompts in 1.4-3.5s and was never more permissive.
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.equal(DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4",
-    "the safety model must default to the one measured to answer inside the deadline");
+  // Pinned to the dated snapshot of the model that was measured, not to the `gpt-5.4` alias:
+  // an alias moves, and a safety decision must not change behaviour because someone else shipped.
+  // Verified to exist before pinning — `GET /v1/models` lists gpt-5.4-2026-03-05 — because an id
+  // that does not exist would 400 every verdict and the CLI fails CLOSED, denying every action.
+  assert.equal(DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4-2026-03-05",
+    "the safety model must default to the measured snapshot, not a floating alias");
   // and the measurement that justifies it must stay next to the decision
   assert.match(src, /b6e29189\s+YES \/ 37667ms/);
   assert.match(src, /4\.1 too permissive/);
 });
 
 test("issue #11: the safety model is still overridable, and prefix stays separate", () => {
-  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL/);
-  assert.match(src, /family === "prefix" && OPENAI_CLASSIFIER_MODEL/);
+  const cfg = { main: "MAIN", prefixModel: "PFX", safetyModel: "OVERRIDE" };
+  assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, cfg), "OVERRIDE", "an override must be honoured");
+  assert.notEqual(modelForRoute(ROUTE.SAFETY_BLOCK, cfg), modelForRoute(ROUTE.PREFIX, cfg),
+    "the two families stay separately configurable");
 });
 
 test("an unsupported parameter is dropped by name and retried, on both surfaces", () => {
@@ -1664,9 +1720,13 @@ test("both call paths route classifier traffic to the reserved pool", () => {
   assert.match(src, /async function callResponses\(payload, isClassifier = false\)/);
   assert.match(src, /async function callOpenAI\(payload, isClassifier = false\)/);
   assert.equal((src.match(/const f = isClassifier \? classifierFetch : fetch;/g) || []).length, 2);
-  // and the handler actually passes the flag, or the pool would never be used
-  assert.match(src, /callResponses\(payload, isCls\)/);
-  assert.match(src, /callOpenAI\(payload, isCls\)/);
+  // The handler passes the POLICY field now, not a bare boolean — same value, but named after the
+  // thing it controls, so a future route cannot silently forget it.
+  assert.match(src, /callResponses\(payload, policy\.reservedPool\)/);
+  assert.match(src, /callOpenAI\(payload, policy\.reservedPool\)/);
+  assert.equal(policyFor(ROUTE.SAFETY_BLOCK).reservedPool, true);
+  assert.equal(policyFor(ROUTE.PREFIX).reservedPool, true);
+  assert.equal(policyFor(ROUTE.MAIN).reservedPool, false);
 });
 
 test("a missing undici degrades instead of breaking the proxy", () => {

@@ -71,6 +71,10 @@ const TYPES = {
   bool01: (raw, s) => (raw === undefined || raw === "" ? s.default : raw) !== "0",
   // Opt-IN diagnostics: only the exact string "1" enables them.
   flag1: (raw) => raw === "1",
+  // Like `str`, except an explicitly-empty value SURVIVES instead of falling through to the
+  // default. Needed for exactly one setting, where blank has its own meaning ("use the main
+  // model") that `||` could never express — see the safety-model entry below.
+  strBlankOk: (raw, s) => (raw === undefined ? s.default : raw),
 };
 
 // ---------- the table ----------
@@ -99,15 +103,22 @@ export const SETTINGS = [
 
   { name: "OPENAI_CLASSIFIER_MODEL", env: "OPENAI_CLASSIFIER_MODEL",
     project: ["OPENAI_CLASSIFIER_MODEL"], type: "str", default: "" },
-  // KNOWN DEFECT, preserved here and fixed in the classifier-routing phase. Both the settings
-  // help and this setting's own comment history promise that blank means "use the main model
-  // and accept the latency". It does not: blank is falsy, so `||` walks past it to the default
-  // and you silently get gpt-5.4. Honouring blank needs "defined but empty" to be
-  // distinguishable from absent, which is a resolver change with a safety-critical blast
-  // radius, so it belongs in the phase that owns classifier routing — not smuggled into a
-  // config extraction that is supposed to change nothing.
+  // PINNED TO A SNAPSHOT, not the floating `gpt-5.4` alias. This model decides whether a risky
+  // action is allowed to run, and an alias moves under you: the behaviour that was measured is
+  // not necessarily the behaviour you get next month. The snapshot was verified to exist
+  // (`GET /v1/models` lists gpt-5.4, gpt-5.4-2026-03-05, -mini, -nano, -pro and their
+  // snapshots), because pinning an id that does not exist would 400 every verdict and the CLI
+  // fails CLOSED — every risky action denied.
+  //
+  // `strBlankOk`: an explicitly blank value now means "use the main model and accept the
+  // latency", which is what the settings help has always promised and what the previous `str`
+  // type could not express — blank is falsy, so `||` walked past it to the default and you
+  // silently got gpt-5.4 instead. An ABSENT setting still takes the default; only a defined,
+  // empty one selects the main model. That is a measurably worse configuration (median 12.2s,
+  // p90 54s, 2 of 27 past the CLI's 60s fail-closed cliff), so validate() warns about it.
   { name: "OPENAI_CLASSIFIER_SAFETY_MODEL", env: "OPENAI_CLASSIFIER_SAFETY_MODEL",
-    project: ["OPENAI_CLASSIFIER_SAFETY_MODEL"], type: "str", default: "gpt-5.4" },
+    project: ["OPENAI_CLASSIFIER_SAFETY_MODEL"], type: "strBlankOk",
+    default: "gpt-5.4-2026-03-05", blankOk: true },
   // zero: 0 — "0 would be defensible" is the comment on the original, and 0 tools is a
   // coherent setting, so a literal 0 must survive rather than snapping back to 4.
   { name: "OPENAI_CLASSIFIER_MAX_TOOLS", env: "OPENAI_CLASSIFIER_MAX_TOOLS",
@@ -206,13 +217,16 @@ export function resolve({ env = process.env, project, home } = {}) {
   const values = {};
   const sources = {};
 
-  // First non-empty wins. Empty string counts as absent, matching `||`.
+  // First non-empty wins. Empty string counts as absent, matching `||` — EXCEPT where the
+  // setting opts into `blankOk`, for which a defined-but-empty value is a real choice and must
+  // not be confused with having said nothing.
   const pick = (s) => {
-    if (s.env && env[s.env] !== undefined && env[s.env] !== "") return [env[s.env], "env"];
+    const usable = (v) => v !== undefined && (s.blankOk || v !== "");
+    if (s.env && usable(env[s.env])) return [env[s.env], "env"];
     for (const k of s.project || []) {
-      if (P[k] !== undefined && P[k] !== "") return [P[k], "project"];
+      if (usable(P[k])) return [P[k], "project"];
     }
-    if (s.home && H[s.home] !== undefined && H[s.home] !== "") return [H[s.home], "home"];
+    if (s.home && usable(H[s.home])) return [H[s.home], "home"];
     return [undefined, "default"];
   };
 
@@ -364,6 +378,12 @@ export function validate(opts = {}) {
   if (v.OPENAI_API === "chat" && !/codex/i.test(v.OPENAI_MODEL))
     warnings.push(`OPENAI_API=chat drops tools above ${v.OPENAI_MAX_TOOLS}; this app sends over 200. ` +
       `Set OPENAI_API=responses unless you specifically need Chat Completions`);
+  // Blank is legal and documented, and it is also the configuration measured to miss the CLI's
+  // deadline. Saying so is the difference between a choice and an accident.
+  if (v.OPENAI_CLASSIFIER_SAFETY_MODEL === "")
+    warnings.push(`OPENAI_CLASSIFIER_SAFETY_MODEL is blank, so auto-mode safety verdicts run on ` +
+      `the main model (${v.OPENAI_MODEL}). Measured over 27 live verdicts on a main model: ` +
+      `median 12.2s, p90 54s, 2 past the CLI's 60s deadline, after which it DENIES the action`);
   if (v.OPENAI_CLASSIFIER_SLOW_MS >= 60000)
     warnings.push(`OPENAI_CLASSIFIER_SLOW_MS=${v.OPENAI_CLASSIFIER_SLOW_MS} is at or past the CLI's ` +
       `60s fail-closed classifier deadline, so the warning can never fire before the denial`);
