@@ -14,7 +14,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
-        rememberUnsupported, stripUnsupported,
+        rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
@@ -2094,4 +2094,46 @@ test("every recordUsage call site passes the cached figure and the resolved mode
   // reqModel is the CLIENT's id (claude-opus-4-8); the ledger is keyed on the OpenAI model.
   assert.ok(!/recordUsage\(reqModel\b/.test(src),
     "usage must not be filed under the client-requested model");
+});
+
+// ---------- transport-error retry ----------
+//
+// 97 turns in the log ended as "stream error: terminated" and none was retried, because the four
+// retry loops in streamResponses all veto on `streamError`. That guard is right for an upstream
+// REFUSAL and wrong for a dropped socket, so transport failures now get their own bounded retry.
+
+test("classifies a dropped socket as transport, and an API refusal as not", () => {
+  // Exactly the shape undici throws: TypeError("terminated") wrapping UND_ERR_SOCKET.
+  const dropped = new TypeError("terminated");
+  dropped.cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+  assert.equal(isTransportError(dropped), true);
+
+  for (const code of ["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "UND_ERR_BODY_TIMEOUT"]) {
+    assert.equal(isTransportError(Object.assign(new Error("x"), { code })), true, code);
+  }
+  // Nested one level deeper — fetch wraps the socket error in its own cause chain.
+  const nested = new TypeError("fetch failed");
+  nested.cause = { message: "terminated", cause: { code: "UND_ERR_SOCKET" } };
+  assert.equal(isTransportError(nested), true);
+
+  // Things that must NOT be retried: they are answers, not transport faults.
+  assert.equal(isTransportError(new Error("Your input exceeds the context window of this model")), false);
+  assert.equal(isTransportError(new Error("insufficient_quota")), false);
+  assert.equal(isTransportError(Object.assign(new Error("aborted"), { name: "AbortError" })), false);
+  assert.equal(isTransportError(null), false);
+  // "terminated" must match the whole message, so prose mentioning it is not swept in.
+  assert.equal(isTransportError(new Error("the run was terminated by policy")), false);
+});
+
+test("the transport retry is bounded and stops once output has been emitted", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.ok(MAX_TRANSPORT_RETRIES >= 1 && MAX_TRANSPORT_RETRIES <= 5,
+    `unreasonable bound: ${MAX_TRANSPORT_RETRIES}`);
+  // Retrying after content is already on the wire would renumber the client's content blocks,
+  // so the guard must exist and must be checked before any retry.
+  assert.match(src, /emittedAnything\s*=\s*\(\)\s*=>/, "needs an emitted-output guard");
+  assert.match(src, /if \(emittedAnything\(\)\)[\s\S]{0,220}keeping the partial turn/,
+    "must keep the partial turn instead of restarting it");
+  assert.match(src, /if \(!isTransportError\(e\)\) throw e/,
+    "a non-transport error must propagate unchanged");
 });
