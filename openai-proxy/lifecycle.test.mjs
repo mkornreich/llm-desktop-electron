@@ -440,10 +440,15 @@ test("the launcher converges on a port other than the default", async () => {
   // Run on a non-default port, twice: the first call must converge, and the second must REUSE
   // rather than restart, which is the property the hash exists to provide.
   const port = await freePort();
+  // Its own manifest. Several test files start real proxies at once, and a single shared ownership
+  // record makes them contend over who owns what — which is how this passed alone and failed in the
+  // suite.
+  const manifest = path.join(scratch, "converge-manifest.json");
   const run = () => new Promise((resolve) => {
     const p = spawn(process.execPath, [path.join(HERE, "..", "scripts", "ensure-proxy.mjs"),
                                        "--port", String(port)],
-      { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, OPENAI_API_KEY: "test-not-real" } });
+      { stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, OPENAI_API_KEY: "test-not-real", PROXY_MANIFEST_FILE: manifest } });
     let out = "";
     p.stdout.on("data", (d) => (out += d));
     p.stderr.on("data", (d) => (out += d));

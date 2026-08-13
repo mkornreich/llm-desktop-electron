@@ -33,6 +33,12 @@ import { execFileSync } from "node:child_process";
 import { processList } from "./procs.mjs";
 
 export const REPO = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
+// Resolved LAZILY for the same reason the provenance store is: a module-level constant is captured
+// before a test can redirect it. It also has to be redirectable at all — several test files start
+// real proxies concurrently, and a single shared manifest makes them fight over ownership, which
+// showed up as a launcher test that passed alone and failed in the suite.
+export const defaultManifest = () =>
+  process.env.PROXY_MANIFEST_FILE || path.join(REPO, "openai-proxy", "proxy-runtime.json");
 export const MANIFEST = path.join(REPO, "openai-proxy", "proxy-runtime.json");
 
 // A process running THIS repository's proxy. Matched on the absolute script path so a proxy
@@ -46,18 +52,18 @@ export function newInstanceId() {
 // Atomic: write a sibling temp file, then rename. A crash mid-write must not leave a truncated
 // manifest, because a truncated manifest is unparseable and unparseable reads as "not mine" —
 // which would strand a perfectly healthy proxy as unownable.
-export function writeManifest(m, file = MANIFEST) {
+export function writeManifest(m, file = defaultManifest()) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(m, null, 2) + "\n");
   fs.renameSync(tmp, file);
   return m;
 }
 
-export function readManifest(file = MANIFEST) {
+export function readManifest(file = defaultManifest()) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
 
-export function clearManifest(file = MANIFEST) {
+export function clearManifest(file = defaultManifest()) {
   try { fs.unlinkSync(file); } catch { /* already gone */ }
 }
 
@@ -131,7 +137,7 @@ export function pidIsOurProxy(pid, ps = null, cwdOf = processCwd) {
 //          "ours"     ours, and current
 //
 // `fetchImpl` is injectable so the tests do not need a socket.
-export async function probe({ port, configHash, codeVersion, file = MANIFEST,
+export async function probe({ port, configHash, codeVersion, file = defaultManifest(),
                               fetchImpl = fetch, timeoutMs = 1500, ps = null,
                               cwdOf = processCwd, listener = listenerPid } = {}) {
   const manifest = readManifest(file);
