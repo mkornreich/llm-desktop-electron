@@ -5,7 +5,10 @@
   "description": "Runs the unpacked Claude Desktop app.asar under a stock Electron runtime.",
   "scripts": {
     "start": "electron app",
-    "test": "node --test openai-proxy/*.test.mjs settings/*.test.js scripts/*.test.mjs"
+    "test": "node --test openai-proxy/*.test.mjs settings/*.test.js scripts/*.test.mjs eval/*.test.mjs",
+    "eval": "node eval/report.mjs",
+    "eval:freeze": "node eval/report.mjs --freeze",
+    "eval:json": "node eval/report.mjs --json"
   },
   "devDependencies": {
     "classic-level": "^3.0.0",

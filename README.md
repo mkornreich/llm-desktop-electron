@@ -163,6 +163,38 @@ computed from Anthropic's price list and are meaningless when proxied.
 
 [issue #13]: https://github.com/mkornreich/llm-desktop-electron/issues/13
 
+### Evaluation baseline
+
+```bash
+npm run eval           # run the corpus, diff against the frozen baseline
+npm run eval:freeze    # overwrite the baseline with what the code does NOW
+```
+
+`eval/` holds a synthetic corpus — 13 cases across the slices that matter: agent tool selection, a
+utility helper, prefix and both safety stages, a renderer tool last in a 238-tool catalogue, a long
+tool loop, forks, client compaction, media in a tool result, and a coding task. Each case runs through
+the real proxy against a fake upstream, and what gets recorded is the payload the proxy **decided** to
+send: resolved model, tool count, whether a late tool survived, `tool_choice`, hint injection,
+reasoning, verbosity, output cap, cache key, pricing tier.
+
+It is **network-free**, and that is what makes it a baseline rather than a sample. Every one of those
+decisions is settled before a token is generated, so a real model would add cost and variance without
+adding information. Model *quality* is a separate question that needs paired live runs and can only
+justify a change to a default — `--live` explains that and refuses.
+
+Why it exists now rather than later: the remaining work changes tool exposure, effort, continuity,
+compaction and model defaults, and each of those can only be stated as a difference from what came
+before. A baseline frozen *after* the change measures nothing. `npm test` checks the frozen baseline
+on every run, so a behaviour change cannot arrive unnoticed inside a commit about something else.
+
+Alongside the recorded behaviour are invariants the baseline is **not allowed to encode away** — a
+classifier is never given tools or hints, a safety verdict never resolves to the main or prefix model,
+an agent turn that merely quotes the classifier contract keeps its full catalogue. Freezing a wrong
+behaviour cannot legitimise it.
+
+Every fixture is synthesised. No real transcript, prompt, path or command from this machine is in the
+corpus, and a standing check keeps it that way.
+
 ### Tests
 
 ```bash

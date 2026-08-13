@@ -1,0 +1,415 @@
+{
+  "meta": {
+    "formatVersion": 1,
+    "corpusCases": 13,
+    "slices": [
+      "agent tool selection",
+      "renderer/file tools late in the catalogue",
+      "long tool loops",
+      "utility / structured helpers",
+      "prefix classifier",
+      "safety stage 1",
+      "safety stage 2",
+      "safety stage 2 — tool exposure",
+      "agent turn that quotes the contract",
+      "client compaction",
+      "media / document tasks",
+      "forks / concurrency",
+      "representative coding task"
+    ],
+    "proxyCodeVersion": "d1d7e9004bee",
+    "configHash": "377aa423fa469cc2",
+    "provider": "openai",
+    "rateTableVersion": "2026-08-13",
+    "node": "v26.5.0"
+  },
+  "results": [
+    {
+      "id": "agent/tool-selection",
+      "slice": "agent tool selection",
+      "status": 200,
+      "error": null,
+      "ms": 18,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 238,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "agent/renderer-tool-last-in-catalogue",
+      "slice": "renderer/file tools late in the catalogue",
+      "status": 200,
+      "error": null,
+      "ms": 4,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 238,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": "mcp__visualize__show_widget",
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "agent/long-tool-loop",
+      "slice": "long tool loops",
+      "status": 200,
+      "error": null,
+      "ms": 4,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 238,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 242,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "utility/small-structured-helper",
+      "slice": "utility / structured helpers",
+      "status": 200,
+      "error": null,
+      "ms": 4,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 3941,
+        "reasoning": null,
+        "reasoningSummary": null,
+        "verbosity": "high",
+        "maxOutputTokens": 64,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "classifier/prefix",
+      "slice": "prefix classifier",
+      "status": 200,
+      "error": null,
+      "ms": 4,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.4-nano",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": false,
+        "instructionsChars": 78,
+        "reasoning": null,
+        "reasoningSummary": null,
+        "verbosity": null,
+        "maxOutputTokens": 32,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "classifier/safety-stage-1",
+      "slice": "safety stage 1",
+      "status": 200,
+      "error": null,
+      "ms": 3,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.4-2026-03-05",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": false,
+        "instructionsChars": 76,
+        "reasoning": null,
+        "reasoningSummary": null,
+        "verbosity": null,
+        "maxOutputTokens": 32,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "classifier/safety-stage-2",
+      "slice": "safety stage 2",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.4-2026-03-05",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": false,
+        "instructionsChars": 134,
+        "reasoning": null,
+        "reasoningSummary": null,
+        "verbosity": null,
+        "maxOutputTokens": 32,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "classifier/safety-with-tools-present",
+      "slice": "safety stage 2 — tool exposure",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.4-2026-03-05",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": false,
+        "instructionsChars": 134,
+        "reasoning": null,
+        "reasoningSummary": null,
+        "verbosity": null,
+        "maxOutputTokens": 32,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "classifier/contract-quoted-by-an-agent-turn",
+      "slice": "agent turn that quotes the contract",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 238,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4428,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "compaction/client-asks-for-a-summary",
+      "slice": "client compaction",
+      "status": 200,
+      "error": null,
+      "ms": 3,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 3926,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 11,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "media/image-in-a-tool-result",
+      "slice": "media / document tasks",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 22,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 3,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "concurrency/fork-of-the-same-prefix",
+      "slice": "forks / concurrency",
+      "status": 200,
+      "error": null,
+      "ms": 1,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 22,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 19,
+        "longContextTier": false
+      }
+    },
+    {
+      "id": "coding/deterministic-task",
+      "slice": "representative coding task",
+      "status": 200,
+      "error": null,
+      "ms": 4,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": true,
+        "toolCount": 42,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "longContextTier": false
+      }
+    }
+  ]
+}
