@@ -131,3 +131,55 @@ test("an unrelated edit is not blocked by a pre-existing problem", async () => {
     assert.equal(r.status, 200, `expected the write to be allowed, got ${JSON.stringify(r.body)}`);
   } finally { s.stop(); }
 });
+
+test("provenance is exposed, and a cross-provider session is flagged", async () => {
+  // The inspector this phase calls for. A session's own stored `model` is what the CLIENT selected,
+  // which in OpenAI mode is never what answered — so the window has to read the sidecar instead.
+  const os = require("node:os");
+  const fs = require("node:fs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prov-http-"));
+  const base = {
+    version: 1, cliSessionId: "aaaa-1111", sessionId: null, droppedEpochs: 0,
+    created: { at: "2026-08-01T00:00:00Z", provider: "anthropic", resolvedModel: "claude-opus-4-8" },
+    epochs: [
+      { at: "2026-08-01T00:00:00Z", kind: "created", provider: "anthropic", resolvedModel: "claude-opus-4-8" },
+      { at: "2026-08-02T00:00:00Z", kind: "provider-switch", provider: "openai",
+        resolvedModel: "gpt-5.6-sol", wireModel: "claude-opus-4-8", apiSurface: "responses" },
+    ],
+  };
+  fs.writeFileSync(path.join(dir, "aaaa-1111.json"), JSON.stringify(base));
+
+  const s = await boot({ PROXY_PROVENANCE_DIR: dir });
+  try {
+    const { status, body } = await s.api("/api/provenance");
+    assert.equal(status, 200);
+    assert.equal(body.sessions.length, 1);
+    const row = body.sessions[0];
+    assert.equal(row.cliSessionId, "aaaa-1111");
+    assert.equal(row.resolvedModel, "gpt-5.6-sol", "the model that actually answered last");
+    assert.equal(row.crossProvider, true, "a session answered by both must be flagged, not flattened");
+    assert.deepEqual(row.providersSeen.sort(), ["anthropic", "openai"]);
+    assert.equal(row.epochs, 2);
+    // Whether it matches what is configured NOW is a separate question from what answered then.
+    assert.equal(typeof row.staleForCurrentProvider, "boolean");
+    assert.ok(["openai", "anthropic"].includes(body.configured));
+    // No prompt text, and no key material, ever reaches this endpoint.
+    const text = JSON.stringify(body);
+    assert.ok(!text.includes("sk-"));
+    assert.ok(!/messages|content|system/.test(text.replace(/\bcrossProvider\b/g, "")));
+  } finally { s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an empty provenance store is reported as empty, not as an error", async () => {
+  // Absence is not evidence of Anthropic: in Anthropic mode the proxy never runs, so nothing is
+  // recorded at all. The endpoint says so rather than implying there were no turns.
+  const os = require("node:os");
+  const fs = require("node:fs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prov-empty-"));
+  const s = await boot({ PROXY_PROVENANCE_DIR: dir });
+  try {
+    const { status, body } = await s.api("/api/provenance");
+    assert.equal(status, 200);
+    assert.deepEqual(body.sessions, []);
+  } finally { s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});

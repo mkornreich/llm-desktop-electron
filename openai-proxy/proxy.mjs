@@ -34,6 +34,7 @@ import {
   ROUTE, routeFor, policyFor, modelForRoute, routeLabel, isClassifier, isSafety,
   PREFIX_RE, SAFETY_RE, CLASSIFIER_RE, SEVERITY_RE, BLOCK_RE, OPENAI_MODEL_RE,
 } from "./routes.mjs";
+import * as provenance from "../scripts/lib/provenance.mjs";
 
 // ---------- config ----------
 // Every setting, its precedence and its coercion now live in config.mjs, which also produces
@@ -2627,6 +2628,61 @@ function readBody(req) {
 function sendJSON(res, code, obj) { const s = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json" }); res.end(s); }
 function anthropicError(res, code, type, message) { sendJSON(res, code, { type: "error", error: { type, message } }); }
 
+// ---------- provenance ----------
+//
+// The client identifies its session on every request:
+//   x-claude-code-session-id: 0bfac150-a1d5-4253-86c7-2236cb2f8768
+// This was being thrown away, which is why nothing could answer "which model actually wrote this
+// session?" after the fact — the stored `model` is the identity the CLIENT selected, not what
+// answered, and in OpenAI mode those are never the same thing.
+//
+// Recorded to a repo-owned sidecar, never into the session files: that directory is a symlink to
+// the real Claude Desktop install (issue #3), so both apps write it, and adding unknown keys there
+// would be betting that two proprietary apps preserve them through a round trip.
+//
+// Only writes when something CHANGED. A busy session makes thousands of requests and one epoch.
+function recordProvenance(req, body, { route, model, surface }) {
+  const sid = req.headers["x-claude-code-session-id"];
+  if (!sid) return;
+  try {
+    // The beta list is the client's OWN account of the capabilities it negotiated, which is
+    // stronger evidence than what the launcher configured — those can disagree, and when they do
+    // the observed one is what set the context window. Kept separate for exactly that reason.
+    const betas = String(req.headers["anthropic-beta"] || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const r = provenance.record(sid, {
+      kind: "turn",
+      provider: provider(),
+      wireModel: body.model || null,               // what arrived
+      resolvedModel: model,                        // what will answer
+      apiSurface: surface,
+      route,
+      capabilityIdentity: CLAUDE_CODE_INTERNAL_MODEL || null,   // what the launcher configured
+      contextBeta: betas.find((b) => /^context-1m-/.test(b)) || null,   // what the client negotiated
+      effortBeta: betas.find((b) => /^effort-/.test(b)) || null,
+      contextBound: CLAUDE_CODE_CONTEXT_BOUND || null,
+      clientVersion: (String(req.headers["user-agent"] || "").match(/claude-cli\/([\d.]+)/) || [])[1] || null,
+      configHash: CONFIG_HASH,
+      codeVersion: codeVersion(),
+      // A launch-time override resolves identically to a persisted value, so without this a
+      // temporary `OPENAI_MODEL=x ./run.sh` is indistinguishable from a saved setting forever.
+      source: CFG_SOURCES.OPENAI_MODEL === "env" ? "launch override" : "persisted",
+    });
+    if (r.providerSwitch)
+      // Loud, because it means the earlier half of this session was answered by something else.
+      // Resuming across providers also carries a persisted model id that is meaningless under the
+      // new one, and nothing else in the system says so.
+      log(`  !! CROSS-PROVIDER RESUME on session ${sid}: this session was previously answered by ` +
+          `${r.providerSwitch.from} and is now being answered by ${r.providerSwitch.to}. Earlier ` +
+          `turns are NOT attributable to the current provider or model.`);
+    else if (r.written)
+      log(`  provenance: ${r.reason} for session ${sid} (${body.model || "?"} -> ${model} via ${surface})`);
+  } catch (e) {
+    // Never fatal. Losing a provenance record costs a diagnostic; failing a turn over it would
+    // trade the thing the user asked for against bookkeeping about it.
+    log(`  ! could not record provenance (${e.message})`);
+  }
+}
+
 // How many turns are being served right now. Reported on /health so a restart can say what it
 // would interrupt: a turn is often minutes of real work, and the settings window used to discard
 // them without a word. Counted on the response's close rather than after the handler returns,
@@ -2727,12 +2783,14 @@ const server = http.createServer(async (req, res) => {
       // `msgs=`, not `input=`: the old name read like a token count and was a message count.
       // ~total includes the tool schemas, biggest= names the single largest item, and the
       // compaction line below fires when the client is asking us to summarise its own transcript.
+      recordProvenance(req, body, { route, model, surface: "responses" });
       const shape = requestShape(body);
       const compacting = compactionKind(body);
       log(`/v1/messages [responses] model=${reqModel}->${model} ${contextFields(shape)}` +
         ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
         `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
-        `${routeLabel(route)}${isCls ? " reasoning=off tools=none" : ""}`);
+        `${routeLabel(route)}${isCls ? " reasoning=off tools=none" : ""}` +
+        `${req.headers["x-claude-code-session-id"] ? ` session=${String(req.headers["x-claude-code-session-id"]).slice(0, 8)}` : ""}`);
       if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
       let upstream;
       const startedAt = Date.now();
@@ -2802,6 +2860,7 @@ const server = http.createServer(async (req, res) => {
     try { ({ payload, registry, imagesSent } = toOpenAI(body, model, route)); }
     catch (e) {
       const r = errorResponse(e);
+    recordProvenance(req, body, { route, model, surface: "chat" });
       log(`/v1/messages [chat] rejected: ${r.body.error.message}`);
       return sendJSON(res, r.status, r.body);
     }
