@@ -74,6 +74,11 @@ function observe(surface, payload) {
     maxOutputTokens: p.max_output_tokens ?? p.max_tokens ?? null,
     promptCacheKeyPresent: !!p.prompt_cache_key,
     messageCount: (p.input || p.messages || []).length,
+    // Media fidelity, so a change that starts dropping an attachment shows up as a number rather than
+    // as a wrong answer about a picture nobody sent.
+    imageParts: JSON.stringify(p.input || p.messages || []).split('"input_image"').length - 1
+      + (JSON.stringify(p.messages || []).split('"image_url"').length - 1),
+    fileParts: JSON.stringify(p.input || p.messages || []).split('"input_file"').length - 1,
     // Pricing tier, so a change that grows requests past 272K shows up as a cost change rather than
     // as a surprise on the bill.
     longContextTier: isLongContext(grossInput, p.model),

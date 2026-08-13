@@ -1,7 +1,7 @@
 {
   "meta": {
     "formatVersion": 1,
-    "corpusCases": 15,
+    "corpusCases": 17,
     "slices": [
       "agent tool selection",
       "renderer/file tools late in the catalogue",
@@ -17,8 +17,8 @@
       "forks / concurrency",
       "representative coding task"
     ],
-    "proxyCodeVersion": "66a0e255e11d",
-    "configHash": "c874472acabcc655",
+    "proxyCodeVersion": "8c89a61235fe",
+    "configHash": "d2b321e274cedfc5",
     "provider": "openai",
     "rateTableVersion": "2026-08-13",
     "node": "v26.5.0"
@@ -29,7 +29,7 @@
       "slice": "agent tool selection",
       "status": 200,
       "error": null,
-      "ms": 18,
+      "ms": 17,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -54,6 +54,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "0c0e0fcca853"
       }
@@ -88,6 +90,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "0c0e0fcca853"
       }
@@ -97,7 +101,7 @@
       "slice": "long tool loops",
       "status": 200,
       "error": null,
-      "ms": 5,
+      "ms": 4,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -122,6 +126,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 242,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "0c0e0fcca853"
       }
@@ -131,7 +137,7 @@
       "slice": "utility / structured helpers",
       "status": 200,
       "error": null,
-      "ms": 2,
+      "ms": 3,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.6-sol",
@@ -149,6 +155,8 @@
         "maxOutputTokens": 64,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "15119fbc81aa"
       }
@@ -176,6 +184,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "15119fbc81aa"
       }
@@ -185,7 +195,7 @@
       "slice": "safety stage 1",
       "status": 200,
       "error": null,
-      "ms": 2,
+      "ms": 3,
       "observed": {
         "surface": "responses",
         "model": "gpt-5.4-2026-03-05",
@@ -203,6 +213,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "15119fbc81aa"
       }
@@ -210,6 +222,35 @@
     {
       "id": "classifier/safety-stage-2",
       "slice": "safety stage 2",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.4-2026-03-05",
+        "stream": false,
+        "toolCount": 0,
+        "firstTools": [],
+        "lastTools": [],
+        "hasRendererTool": false,
+        "toolChoice": null,
+        "hints": false,
+        "instructionsChars": 134,
+        "reasoning": null,
+        "reasoningSummary": null,
+        "verbosity": null,
+        "maxOutputTokens": 32,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
+        "longContextTier": false,
+        "exposureFingerprint": "15119fbc81aa"
+      }
+    },
+    {
+      "id": "classifier/safety-with-tools-present",
+      "slice": "safety stage 2 — tool exposure",
       "status": 200,
       "error": null,
       "ms": 1,
@@ -230,33 +271,8 @@
         "maxOutputTokens": 32,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
-        "longContextTier": false,
-        "exposureFingerprint": "15119fbc81aa"
-      }
-    },
-    {
-      "id": "classifier/safety-with-tools-present",
-      "slice": "safety stage 2 — tool exposure",
-      "status": 200,
-      "error": null,
-      "ms": 2,
-      "observed": {
-        "surface": "responses",
-        "model": "gpt-5.4-2026-03-05",
-        "stream": false,
-        "toolCount": 0,
-        "firstTools": [],
-        "lastTools": [],
-        "hasRendererTool": false,
-        "toolChoice": null,
-        "hints": false,
-        "instructionsChars": 134,
-        "reasoning": null,
-        "reasoningSummary": null,
-        "verbosity": null,
-        "maxOutputTokens": 32,
-        "promptCacheKeyPresent": true,
-        "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "15119fbc81aa"
       }
@@ -291,6 +307,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "0c0e0fcca853"
       }
@@ -318,6 +336,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 11,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "15119fbc81aa"
       }
@@ -352,6 +372,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 15,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "5d1542c8c86b"
       }
@@ -386,12 +408,86 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "52a9a0752f9b"
       }
     },
     {
       "id": "media/image-in-a-tool-result",
+      "slice": "media / document tasks",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 22,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 4,
+        "imageParts": 1,
+        "fileParts": 0,
+        "longContextTier": false,
+        "exposureFingerprint": "52a9a0752f9b"
+      }
+    },
+    {
+      "id": "media/pdf-attachment",
+      "slice": "media / document tasks",
+      "status": 200,
+      "error": null,
+      "ms": 2,
+      "observed": {
+        "surface": "responses",
+        "model": "gpt-5.6-sol",
+        "stream": false,
+        "toolCount": 22,
+        "firstTools": [
+          "Read",
+          "Write",
+          "Edit"
+        ],
+        "lastTools": [
+          "mcp__visualize__show_widget",
+          "mcp__01039c8e-a5f1-4b5a-83d5-caf692a1bbab__read_file_content"
+        ],
+        "hasRendererTool": true,
+        "toolChoice": null,
+        "hints": true,
+        "instructionsChars": 4263,
+        "reasoning": "max",
+        "reasoningSummary": "detailed",
+        "verbosity": "high",
+        "maxOutputTokens": 4096,
+        "promptCacheKeyPresent": true,
+        "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 1,
+        "longContextTier": false,
+        "exposureFingerprint": "52a9a0752f9b"
+      }
+    },
+    {
+      "id": "media/unrepresentable-parts-are-disclosed",
       "slice": "media / document tasks",
       "status": 200,
       "error": null,
@@ -419,7 +515,9 @@
         "verbosity": "high",
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
-        "messageCount": 3,
+        "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "52a9a0752f9b"
       }
@@ -454,6 +552,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 19,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "52a9a0752f9b"
       }
@@ -488,6 +588,8 @@
         "maxOutputTokens": 4096,
         "promptCacheKeyPresent": true,
         "messageCount": 1,
+        "imageParts": 0,
+        "fileParts": 0,
         "longContextTier": false,
         "exposureFingerprint": "7ce18c07e718"
       }

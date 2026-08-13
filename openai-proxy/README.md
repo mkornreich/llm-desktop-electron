@@ -87,6 +87,50 @@ the proxy asked twice.
 whether it is exact. The pre-existing aggregate is carried as a labelled **floor**, never folded into
 the new totals — mixing an exact figure with an estimate produces something that is neither.
 
+## Attachments do not disappear
+
+Content was collected into four separate buckets — text, tool calls, tool results, images — and
+re-emitted bucket by bucket. Anything matching no bucket fell out of the loop with no `else`. Verified
+by translating a message and reading the output:
+
+| Input | Old output |
+|---|---|
+| `[image(A), text("what is in this picture?"), image(B)]` | `[text, image(A), image(B)]` — the question moved in front of both pictures |
+| a message containing one `document` (PDF) | **nothing at all** — the whole message vanished |
+| `{type:"image", source:{}}` | **nothing at all** — same reason: no URL, no image, no content, message skipped |
+| a `tool_result` carrying an image (what `Read` gives for a screenshot) | `[image omitted by proxy]` — labelled, but lost |
+| any future block type | silently dropped |
+
+Two entire user messages disappeared without trace. A wrong answer about a picture nobody sent is far
+harder to diagnose than an answer saying the picture is missing.
+
+`content.mjs` replaces the buckets with **one ordered pass**:
+
+- **Order is preserved.** `[image, text, image]` stays in that order on both surfaces.
+- **A PDF becomes `input_file`** with a filename, which is the documented Responses shape. Chat has no
+  file part, so it gets a labelled note that names the file and the fix (`OPENAI_API=responses`) rather
+  than silently sending nothing.
+- **Media in a tool result** follows as a companion user message, while the text stays **paired with
+  its call** — breaking that pairing makes the transcript describe something that never happened. The
+  paired text says where the attachment went, so the model does not read it as unrelated.
+- **Anything unrepresentable becomes a labelled note** saying what was dropped and why: an unreadable
+  image, an unknown block type, a file on a surface that cannot carry one.
+- **Remote URLs are never fetched.** A proxy that downloads whatever a message points at is a
+  request-forgery engine aimed at the user's own network. A URL goes upstream as a URL.
+
+Live traffic for scale: **687 requests carried images, 2,856 image parts** — this path is well used.
+Documents have never appeared, but the failure mode was silent loss, and translating a documented shape
+is strictly better than discarding it: if the mapping is wrong the API says so, where a drop says
+nothing.
+
+`thinking` and `redacted_thinking` blocks are still dropped — deliberately, and named in the code so
+the drop is a decision rather than an accident.
+
+One thing deliberately unchanged: the automatic image-strip retry when a model rejects vision. The plan
+asks for fail-by-default with opt-in degradation, but the current behaviour already **discloses** the
+omission in the reply, and zero rejections have occurred in production — so switching the default would
+be a behaviour change with no evidence behind it.
+
 ## A rejection must not be allowed to change what was asked
 
 When the upstream rejects a parameter, the proxy drops it by name and retries. That was built for a
