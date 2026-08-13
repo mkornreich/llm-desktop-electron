@@ -105,6 +105,7 @@ window.settings = {
   read:     ()        => api("/api/config"),
   write:    (updates) => api("/api/config", { method: "POST", body: JSON.stringify(updates) }),
   status:   ()        => api("/api/status"),
+  provenance: ()      => api("/api/provenance?limit=200"),
   relaunch: ()        => api("/api/relaunch", { method: "POST" }),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
 };
@@ -282,6 +283,23 @@ async function refreshStatus() {
   if (cfg.envOverrides?.length)
     el.append(chip("env override", cfg.envOverrides.join(", "), "warn"));
   for (const e of st.validation?.errors || []) el.append(chip("config error", e, "warn"));
+
+  // Which model actually answered. The session's own stored `model` is what the CLIENT selected,
+  // which in OpenAI mode is never what answered — so a count of sessions whose recorded provider
+  // differs from the configured one is the only honest way to see it from here.
+  try {
+    const p = await window.settings.provenance();
+    const n = p.sessions.length;
+    if (n) {
+      el.append(chip("sessions recorded", String(n)));
+      const mixed = p.sessions.filter((s) => s.crossProvider).length;
+      if (mixed) el.append(chip("cross-provider sessions", String(mixed), "warn"));
+      const stale = p.sessions.filter((s) => s.staleForCurrentProvider).length;
+      if (stale) el.append(chip("answered by another provider", String(stale), "warn"));
+      const last = p.sessions[0];
+      if (last?.resolvedModel) el.append(chip("last answered by", last.resolvedModel));
+    }
+  } catch { /* provenance is a diagnostic; never let it break the status line */ }
   if (st.usage && st.usage.total) {
     const t = st.usage.total;
     el.append(chip("tokens this proxy", `${(t.tokens || 0).toLocaleString()}`));

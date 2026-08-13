@@ -54,12 +54,13 @@ async function readJson(req) {
 let esm = null;
 async function mods() {
   if (esm) return esm;
-  const [procs, runtime, cfg] = await Promise.all([
+  const [procs, runtime, cfg, prov] = await Promise.all([
     import("../scripts/lib/procs.mjs"),
     import("../scripts/lib/proxy-runtime.mjs"),
     import("../openai-proxy/config.mjs"),
+    import("../scripts/lib/provenance.mjs"),
   ]);
-  return (esm = { procs, runtime, cfg });
+  return (esm = { procs, runtime, cfg, prov });
 }
 
 // Processes belonging to THIS build's app. Chromium spawns a main process plus a renderer, a GPU
@@ -264,6 +265,34 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/status" && req.method === "GET")
       return send(res, 200, await status());
+
+    // Which model actually answered each session. The session store is shared with the real Claude
+    // Desktop, so this comes from a repo-owned sidecar rather than from the session files — see
+    // scripts/lib/provenance.mjs. This is the inspector the phase calls for; a sidebar badge would
+    // need a version-gated patch into the app's own UI, which adding JSON fields does not achieve.
+    if (url.pathname === "/api/provenance" && req.method === "GET") {
+      const { prov, cfg } = await mods();
+      const configured = cfg.provider();
+      const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 500);
+      const sessions = prov.list({ limit }).map((s) => ({
+        ...s,
+        // A session answered by one provider and resumed under another is the case a single
+        // "current provider" field would have erased. Resuming it also carries a persisted model id
+        // that is meaningless under the new provider, and nothing else says so.
+        crossProvider: s.providersSeen.length > 1,
+        staleForCurrentProvider: !!s.provider && s.provider !== configured,
+      }));
+      return send(res, 200, {
+        configured,
+        sessions,
+        // Absence is not evidence of Anthropic. In Anthropic mode the proxy never runs, so nothing
+        // records anything — saying so is the difference between "no record" and "no OpenAI turns".
+        note: configured === "anthropic"
+          ? "The agent is set to Anthropic, so no proxy is running and nothing new is being recorded. " +
+            "Sessions below are historical."
+          : null,
+      });
+    }
 
     if (url.pathname === "/api/relaunch" && req.method === "POST")
       return send(res, 200, await relaunch());

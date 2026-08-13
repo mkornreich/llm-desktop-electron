@@ -47,6 +47,77 @@ shapes available there are pull-before-launch and push-after-quit.
 
 ---
 
+## Which model actually answered a session
+
+A session's stored `model` is the identity the **client selected**. In OpenAI mode that is never
+what answered, and six distinct things were collapsed into that one field:
+
+| Dimension | Example | What it decides |
+|---|---|---|
+| session-selected model | `claude-opus-4-8` | what the picker showed |
+| capability identity | `claude-opus-4-8[1m]` | the context window |
+| wire model | `claude-opus-4-8` | what arrived on `/v1/messages` |
+| resolved upstream model | `gpt-5.6-sol` | what actually answered |
+| API surface | `responses` | which translation ran |
+| route | `main`, `safety:block` | which policy applied |
+
+So "which model wrote this?" could not be answered after the fact, and neither could "was this
+session Anthropic or OpenAI?" — the transcript looks identical either way. Three sessions in this
+repository's own history were misattributed while investigating exactly that.
+
+### Keyed by the session id the client already sends
+
+The client identifies its session on every request:
+
+```
+x-claude-code-session-id: 0bfac150-a1d5-4253-86c7-2236cb2f8768
+anthropic-beta: claude-code-20250219,context-1m-2025-08-07,…,effort-2025-11-24
+```
+
+Captured from the real client against a header-logging server. The proxy had been discarding both.
+The `anthropic-beta` list is the client's **own** account of the capabilities it negotiated, which is
+stronger evidence than what the launcher configured — those can disagree, and when they do the
+negotiated one is what set the window. They are recorded separately for that reason.
+
+A prompt-cache hash is **not** session identity: it collides across forks and changes within a
+session. It is never used as one.
+
+### A sidecar, not the session files
+
+`user-data/claude-code-sessions` is a **symlink** to the real Claude Desktop install's store, so both
+applications read and write the same files. Adding fields there means betting that two proprietary
+apps preserve unknown keys through a round trip — untested here, and proving it needs an isolated
+fixture copy and a run of both apps, not an experiment against the live shared store. So
+`provenance/` is **authoritative** and nothing is mirrored into session JSON.
+
+```bash
+node scripts/lib/provenance.mjs                 # every session: what answered, and when it changed
+node scripts/lib/provenance.mjs <cli-session-id> # one session's full epoch history
+```
+
+Records are **append-only**. Creation provenance is immutable; every later change appends an epoch,
+because rewriting a session's provider to "current" would erase the fact that half of it was
+answered by something else. A write only happens when something actually changed, so a session with
+thousands of turns holds one epoch, not thousands. The list is bounded at 200 and truncation is
+recorded, so a shortened history never reads as a complete one.
+
+A **cross-provider resume** — the same session answered by Anthropic and then OpenAI, or the reverse
+— is logged loudly by the proxy and flagged in the settings window. It matters twice: the earlier
+turns are not attributable to the current provider, and a model id persisted under one provider is
+meaningless under the other.
+
+### What is not covered
+
+**Anthropic mode records nothing.** The proxy is the only component that sees a session id, and in
+Anthropic mode it does not run. Recording there would mean adding work to the disclaimer helper's
+Anthropic path, which is deliberately a byte-for-byte passthrough. So an absent record means "no
+OpenAI turns were served", not "this session was Anthropic" — the settings window says so rather
+than implying the stronger claim.
+
+**No automatic model remapping.** Resuming an OpenAI-era session in Anthropic mode carries a
+persisted `gpt-*` id that Anthropic will reject. Rewriting it would mean writing to the shared
+session store, which is exactly what this design refuses to do. The mismatch is surfaced instead.
+
 ## Sessions and memory
 
 ### Memory and config — already shared, nothing to sync
