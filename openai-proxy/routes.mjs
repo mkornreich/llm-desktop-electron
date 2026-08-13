@@ -205,3 +205,46 @@ export function routeLabel(route) {
     default: return "";
   }
 }
+
+// ---------- route-specific effort and output ----------
+//
+// Effort, verbosity and output ceilings were applied globally: one `OPENAI_REASONING_EFFORT` for
+// every call, and a single output cap. That is wrong in both directions — a verdict wants no
+// reasoning and eleven tokens, a hard agent task wants everything available — but it is also the
+// incumbent behaviour, so the tables below REPRODUCE IT EXACTLY.
+//
+// That is deliberate. This phase adds the mechanism; it does not move a default. A default may only
+// change on paired evaluation showing zero safety or tool regression plus either a credible quality
+// win or non-inferiority with a real speed gain, and none of that evidence exists yet. Shipping a
+// tuned table here would be changing behaviour on taste, and the evaluation baseline would record it
+// as a diff with no measurement behind it.
+//
+// What the mechanism buys now is that the decision has ONE home. `effortFor(model)` consulted a
+// process-global memo; the route never entered into it, so "which effort did this call use, and why"
+// had no answer that named the call.
+
+// null means "do not request reasoning at all" — distinct from an effort of "none", which asks the
+// model for reasoning at the lowest setting and still pays for the parameter.
+const ROUTE_EFFORT = {
+  [ROUTE.MAIN]: "global",          // whatever OPENAI_REASONING_EFFORT resolves to
+  [ROUTE.COMPACTION]: "global",    // fact retention is a measured question; see the phase note
+  [ROUTE.PREFIX]: null,
+  [ROUTE.SAFETY_SEVERITY]: null,
+  [ROUTE.SAFETY_BLOCK]: null,
+};
+
+// Target effort for a route, before the model's own ceiling is applied. The two are separate on
+// purpose: a route asking for `max` and a model that caps at `xhigh` are different facts, and
+// collapsing them is what made a single rejection look like a configuration change.
+export function effortForRoute(route, globalEffort) {
+  const t = Object.hasOwn(ROUTE_EFFORT, route) ? ROUTE_EFFORT[route] : "global";
+  return t === "global" ? globalEffort : t;
+}
+
+// A verdict is about eleven output tokens. It has never been given a smaller ceiling than an agent
+// turn, and it does not need one — the client already asks for a small max_tokens on those calls, and
+// imposing a tighter cap here could truncate a contract this proxy does not own. So: no route-specific
+// output ceiling today, and the reason recorded rather than the knob added.
+export function outputCeilingForRoute(route, requested, hardCap) {
+  return Math.min(requested, hardCap);
+}
