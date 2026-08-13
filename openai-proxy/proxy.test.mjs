@@ -1540,15 +1540,25 @@ test("issue #13: a url source is passed through unchanged", () => {
     "https://example.com/a.png");
 });
 
-test("issue #13: a malformed image is skipped, never sent as undefined", () => {
+test("issue #13: a malformed image is disclosed, never sent as undefined and never dropped", () => {
+  // The original property — nothing goes out as `undefined` — still holds. What changed is the other
+  // half: the image used to be SKIPPED, and a skip is a silent drop. A message whose only content was
+  // a malformed image disappeared entirely, and the model answered as though nothing was attached.
   const body = { model: "m", max_tokens: 10, messages: [{ role: "user", content: [
     { type: "text", text: "hi" }, { type: "image" }, { type: "image", source: {} }] }] };
   const chat = toOpenAI(body, "gpt-4.1");
-  assert.equal(chat.imagesSent, 0);
-  assert.equal(chat.payload.messages[0].content, "hi", "falls back to the plain string form");
+  assert.equal(chat.imagesSent, 0, "an unreadable image is still not counted as sent");
+  assert.ok(!JSON.stringify(chat.payload).includes("undefined"));
+  const chatText = JSON.stringify(chat.payload.messages[0].content);
+  assert.match(chatText, /hi/, "the question survives");
+  assert.match(chatText, /could not be read/, "and the failure is stated rather than hidden");
+  assert.equal(chat.notesEmitted, 2, "one note per unreadable part");
+
   const resp = toResponses(body, "gpt-5.3-codex");
   assert.equal(resp.imagesSent, 0);
   assert.ok(!JSON.stringify(resp.payload).includes("undefined"));
+  assert.match(JSON.stringify(resp.payload.input), /could not be read/);
+  assert.equal(resp.notesEmitted, 2);
 });
 
 test("issue #13: a text-only turn is unchanged by the image work", () => {

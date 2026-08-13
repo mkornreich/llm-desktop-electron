@@ -42,6 +42,9 @@ import {
   exposureFor, resolveToolChoice, exposureFingerprint, partition, VISIBILITY,
 } from "./tool-policy.mjs";
 import {
+  decodeBlocks, decodeToolResult, partsToResponses, partsToChat, countImages, countFiles, countNotes,
+} from "./content.mjs";
+import {
   makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
   newId as newTurnId,
 } from "./attempts.mjs";
@@ -1493,7 +1496,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
         return tools;
       })();
   const messages = [];
-  let imagesSent = 0;
+  let imagesSent = 0, filesSent = 0, notesEmitted = 0;
   if (body.system) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
@@ -1507,30 +1510,43 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
     const content = m.content;
     if (typeof content === "string") { messages.push({ role: m.role, content }); continue; }
     if (!Array.isArray(content)) continue;
-    const text = [], toolCalls = [], toolResults = [], images = [];
+    // Same ordered model as the Responses path — see content.mjs. The buckets this replaces lost the
+    // interleaving of text and images and dropped anything they had no bucket for.
+    const toolCalls = [], toolResults = [], companions = [];
+    const parts = decodeBlocks(content);
     for (const blk of content) {
-      if (blk.type === "text") text.push(blk.text);
-      else if (blk.type === "tool_use")
+      if (blk.type === "tool_use")
         toolCalls.push({ id: blk.id, type: "function", function: { name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) } });
-      else if (blk.type === "tool_result")
-        toolResults.push({ tool_call_id: blk.tool_use_id, content: toolResultText(blk) });
-      else if (blk.type === "image") {
-        const url = imageUrl(blk);
-        if (url) images.push({ type: "image_url", image_url: { url } });
+      else if (blk.type === "tool_result") {
+        const { text: resultText, media } = decodeToolResult(blk);
+        toolResults.push({ tool_call_id: blk.tool_use_id,
+                           content: blk.is_error ? `[tool error] ${resultText}` : resultText });
+        // A tool-role message cannot carry media on this surface either, so it follows as a companion
+        // user message while the text stays paired with its call.
+        if (media.length) companions.push(media);
       }
     }
     if (m.role === "assistant") {
       // Only user turns may carry images on this surface.
-      const msg = { role: "assistant", content: text.join("\n") || null };
+      const textOnly = parts.filter((p) => p.kind === "text" || p.kind === "note");
+      const msg = { role: "assistant", content: textOnly.map((p) => p.text).join("\n") || null };
       if (toolCalls.length) msg.tool_calls = toolCalls;
       messages.push(msg);
     } else {
       for (const tr of toolResults) messages.push({ role: "tool", tool_call_id: tr.tool_call_id, content: tr.content });
-      if (images.length) {
-        imagesSent += images.length;
-        messages.push({ role: "user", content: [...text.map((t) => ({ type: "text", text: t })), ...images] });
-      } else if (text.length) {
-        messages.push({ role: "user", content: text.join("\n") });
+      if (parts.length) {
+        imagesSent += countImages(parts);
+        filesSent += countFiles(parts);
+        notesEmitted += countNotes(parts);
+        const serialised = partsToChat(parts);
+        // A single text part stays a plain string: that is the shape this surface has always received
+        // for an ordinary message, and changing it for every turn would be a gratuitous diff.
+        messages.push({ role: "user", content: serialised.length === 1 && serialised[0].type === "text"
+          ? serialised[0].text : serialised });
+      }
+      for (const media of companions) {
+        imagesSent += countImages(media);
+        messages.push({ role: "user", content: partsToChat(media) });
       }
     }
   }
@@ -1570,7 +1586,9 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   // Same cache routing as the Responses path; both surfaces accept the field.
   const cacheKey = cacheKeyFor(body);
   if (cacheKey) out.prompt_cache_key = cacheKey;
-  return { payload: out, registry, imagesSent };
+  if (notesEmitted) log(`  ! ${notesEmitted} content part(s) could not be translated and were replaced ` +
+    `with a labelled note rather than dropped`);
+  return { payload: out, registry, imagesSent, filesSent, notesEmitted };
 }
 
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
@@ -1811,7 +1829,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
         return tools;
       })();
   const input = [];
-  let imagesSent = 0;
+  let imagesSent = 0, filesSent = 0, notesEmitted = 0;
   for (const m of body.messages || []) {
     const content = m.content;
     if (typeof content === "string") {
@@ -1819,27 +1837,42 @@ function toResponses(body, model, route = routeForRequest(body)) {
       continue;
     }
     if (!Array.isArray(content)) continue;
-    const text = [], toolCalls = [], toolResults = [], images = [];
+    // ONE ORDERED PASS. The four separate buckets this replaces re-emitted content bucket by bucket,
+    // so `[image, text, image]` came out as `[text, image, image]` — the question moved in front of
+    // both pictures and which one it referred to was gone. Anything matching no bucket fell out of the
+    // loop entirely: a `document` block took its whole message with it. See content.mjs.
+    const toolCalls = [], toolResults = [], companions = [];
+    const parts = decodeBlocks(content);
     for (const blk of content) {
-      if (blk.type === "text") text.push(blk.text);
-      else if (blk.type === "tool_use") toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
-      else if (blk.type === "tool_result") toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id, output: toolResultText(blk) });
-      else if (blk.type === "image") {
-        const url = imageUrl(blk);
-        if (url) images.push({ type: "input_image", image_url: url });
+      if (blk.type === "tool_use")
+        toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
+      else if (blk.type === "tool_result") {
+        const { text: resultText, media } = decodeToolResult(blk);
+        toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id,
+                           output: blk.is_error ? `[tool error] ${resultText}` : resultText });
+        // A function_call_output takes a string, so media cannot live there. The text stays PAIRED
+        // with its call — breaking that pairing makes the transcript describe something that never
+        // happened — and the media follows as a companion message in deterministic order.
+        if (media.length) companions.push(media);
       }
     }
     if (m.role === "assistant") {
-      if (text.length) input.push({ role: "assistant", content: [{ type: "output_text", text: text.join("\n") }] });
+      const textOnly = parts.filter((p) => p.kind === "text" || p.kind === "note");
+      if (textOnly.length)
+        input.push({ role: "assistant", content: [{ type: "output_text", text: textOnly.map((p) => p.text).join("\n") }] });
       for (const tc of toolCalls) input.push(tc);
     } else {
       for (const tr of toolResults) input.push(tr); // tool results are top-level items, not user content
-      if (text.length || images.length) {
-        imagesSent += images.length;
-        input.push({ role: "user", content: [
-          ...(text.length ? [{ type: "input_text", text: text.join("\n") }] : []),
-          ...images,
-        ] });
+      if (parts.length) {
+        imagesSent += countImages(parts);
+        filesSent += countFiles(parts);
+        notesEmitted += countNotes(parts);
+        input.push({ role: "user", content: partsToResponses(parts) });
+      }
+      for (const media of companions) {
+        imagesSent += countImages(media);
+        filesSent += countFiles(media);
+        input.push({ role: "user", content: partsToResponses(media) });
       }
     }
   }
@@ -1879,7 +1912,9 @@ function toResponses(body, model, route = routeForRequest(body)) {
       out.tool_choice = { type: "function", name: registry.wireName(choice.name) };
   }
   // temperature intentionally omitted — codex/reasoning models only accept the default.
-  return { payload: out, registry, imagesSent };
+  if (notesEmitted) log(`  ! ${notesEmitted} content part(s) could not be translated and were replaced ` +
+    `with a labelled note rather than dropped`);
+  return { payload: out, registry, imagesSent, filesSent, notesEmitted };
 }
 
 // Returns the Response, and records which body was ACCEPTED on `res.effectivePayload`.

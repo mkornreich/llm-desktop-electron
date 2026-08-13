@@ -218,6 +218,33 @@ export const CASES = [
     }),
   },
   {
+    id: "media/pdf-attachment",
+    slice: "media / document tasks",
+    // A PDF used to vanish along with its entire message: no marker, no error, and the model answered
+    // as though nothing had been attached.
+    body: () => ({
+      model: "claude-opus-4-8", max_tokens: 4096, stream: false, system: AGENT_SYS,
+      messages: [{ role: "user", content: [
+        { type: "text", text: "summarise the attached spec" },
+        { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" }, title: "spec.pdf" },
+      ] }],
+      tools: bigCatalogue(20),
+    }),
+  },
+  {
+    id: "media/unrepresentable-parts-are-disclosed",
+    slice: "media / document tasks",
+    body: () => ({
+      model: "claude-opus-4-8", max_tokens: 4096, stream: false, system: AGENT_SYS,
+      messages: [{ role: "user", content: [
+        { type: "image", source: {} },                    // unreadable
+        { type: "text", text: "and this one?" },
+        { type: "some_future_block", data: 1 },            // unknown to this proxy
+      ] }],
+      tools: bigCatalogue(20),
+    }),
+  },
+  {
     id: "concurrency/fork-of-the-same-prefix",
     slice: "forks / concurrency",
     // Two requests sharing a long prefix and diverging at the tail. Cache routing must key them
