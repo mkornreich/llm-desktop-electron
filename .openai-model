@@ -109,8 +109,9 @@ OPENAI_MAX_TURN_OUTPUT_TOKENS=56000
 
 # Claude Code's INTERNAL model identity in OpenAI mode (issue #17). This is a client
 # capability identity, not the model that answers the request. run.sh gives it only to the
-# repository-owned disclaimer helper, which rewrites the exact bundled/cache Claude main-model
-# argument without modifying Claude Code or the app bundle:
+# repository-owned disclaimer helper, which ignores whichever claude-* model Desktop selected
+# and rewrites the bundled/cache Claude main-model argument without modifying Claude Code or the
+# app bundle:
 #
 #   Claude Code init/session identity:  claude-opus-4-8[1m]
 #   /v1/messages model after normalization: claude-opus-4-8
@@ -120,6 +121,14 @@ OPENAI_MAX_TURN_OUTPUT_TOKENS=56000
 # its own capacity, then strips it before sending the Anthropic-compatible request. Do not put
 # an OpenAI model id here: proxy-side model mapping happens too late to affect the client's
 # context resolver. Anthropic mode does not export this setting and remains an exact passthrough.
+#
+# The helper also gives SUBAGENTS this identity, via CLAUDE_CODE_SUBAGENT_MODEL. Task/Explore/
+# teammate spawns run inside the session process and have no argv, so the rewrite above cannot
+# reach them: they were going out as claude-sonnet-5 (the desktop's own getDefaultSubagentModel),
+# resolving Sonnet's ordinary window. Measured before the fix: subagent requests never exceeded
+# ~299k tokens and caused 344 of 402 client-side compactions, while the main loop ran to ~883k.
+# That variable has to be set by the helper rather than run.sh because the desktop bundle
+# composes the agent env itself and would overwrite an exported value.
 OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]
 
 # Upper bound for Claude Code's client-side context accounting (issues #14 and #17).

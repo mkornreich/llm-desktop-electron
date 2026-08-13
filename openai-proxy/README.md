@@ -1208,12 +1208,34 @@ patching the Claude Code binary (proprietary, and out of bounds), and wrapping t
 executable path (fails the CLI's own Mach-O validation and gets the version directory purged).
 
 What remains is the `disclaimer` boundary the app already spawns everything through.
-`scripts/claude-code-disclaimer.sh` rewrites `--model claude-opus-4-8` →
-`--model claude-opus-4-8[1m]` for the bundled/cached Claude executable *only*, then `exec`s, so
-pid, signals and exit status are unchanged. It is gated on a private OpenAI-mode variable, so
-Anthropic mode is byte-identical argv passthrough, and it matches
+`scripts/claude-code-disclaimer.sh` ignores any `--model claude-*` identity selected by Desktop
+and rewrites it to `--model claude-opus-4-8[1m]` for the bundled/cached Claude executable
+*only*, then `exec`s, so pid, signals and exit status are unchanged. This covers newer Opus,
+Sonnet, Haiku, and future Claude labels: every `--model claude-*` argument receives the same 1M
+client capability in OpenAI mode. It is gated on a private OpenAI-mode variable, so Anthropic
+mode is byte-identical argv passthrough, and it matches
 `user-data/claude-code/*/claude.app/Contents/MacOS/claude` so a future pinned version keeps
 working.
+
+That covers the session process, and **only** the session process. Subagents — `Task`,
+the built-in `Explore` agents, teammate spawns — are not separate processes: they run inside the
+session and pick their model from Claude Code's own resolver, so no argv rewrite can reach them.
+They were resolving `claude-sonnet-5` at Sonnet's ordinary window, visible in the log as
+`model=claude-sonnet-5->gpt-5.6-sol` requests that never exceed ~299k tokens and account for
+**344 of 402** `CLIENT-SIDE COMPACTION` events, against 42 for the 1M main loop.
+
+The resolver reads `CLAUDE_CODE_SUBAGENT_MODEL` first — ahead of the Task tool's `model`
+argument and an agent definition's `model:` frontmatter — so the helper exports it alongside the
+argv rewrite. It cannot be exported from `run.sh`: the desktop bundle builds the agent env itself
+and sets `CLAUDE_CODE_SUBAGENT_MODEL: getDefaultSubagentModel()`, which is where
+`claude-sonnet-5` came from and which would clobber an inherited value. The helper is the CLI's
+direct parent, so it assigns last and wins. Verified against the real 2.1.219 binary on the
+cache path: with the desktop's `claude-sonnet-5` preset in the environment, the process still
+receives `claude-opus-4-8[1m]`.
+
+`CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP` is deliberately left unset. The Explore cap it
+disables is guarded by a first-party base-URL check, so it is already inert against a localhost
+proxy, and `CLAUDE_CODE_SUBAGENT_MODEL` outranks it in any case.
 
 Three identities, deliberately distinct:
 
