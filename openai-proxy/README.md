@@ -24,6 +24,76 @@ Claude Code hardcodes that in its system prompt and requests
 `model: claude-opus-4-8`, so the model just reads it back. The proxy log and the
 child's env are the ground truth; both say OpenAI.
 
+## A classifier cannot inherit a model
+
+Claude Code asks the proxy whether a risky action is allowed, gives the answer a **60-second
+budget**, and **denies the action** if no parseable verdict arrives. Every failure on this path has
+one of two shapes: a verdict rendered by the wrong model, or no verdict at all. Both were reachable.
+
+**Model resolution ran in the wrong order.** `pickModel` returned a requested OpenAI model id
+*before* it looked at the classifier family:
+
+```js
+if (OPENAI_MODEL_RE.test(req)) return req;                    // <- passthrough won
+if (family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL) …  // <- never reached
+```
+
+So any request naming an OpenAI model inherited it, including a safety verdict. The gateway picker
+is enabled here (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) and its default list contains
+`gpt-4.1-mini` — the model measured to *allow* an `ssh backend-prod` that `gpt-5.3-codex` blocked,
+and to emit no parseable verdict at all on another real prompt. Picking a fast model in the UI would
+have silently downgraded the safety classifier to it.
+
+Across 47k logged requests, all **20,160** real safety verdicts arrived asking for a `claude-*`
+identity, so the passthrough never fired for safety in practice. The mechanism is demonstrably live
+though — the log contains `model=gpt-4.1-mini[1m]->gpt-4.1-mini[1m]`. Latent, not theoretical.
+Resolution is now **family-first**: only an ordinary agent turn honours a requested model.
+
+**Tools reached classifiers.** Neither encoder gated its tools block on the route, so a verdict
+carrying up to `OPENAI_CLASSIFIER_MAX_TOOLS` (4) tools sent them upstream with `tool_choice`. A
+verdict has a rigid output contract; offering a tool invites a tool call *instead of* the verdict,
+which is unparseable, which makes the CLI retry and then deny.
+
+**The two surfaces disagreed on overflow.** The streaming path refused to compact for a classifier
+(it gates on `allowContinue`), but `callResponses`/`callOpenAI` compacted regardless — so an
+HTTP-path overflow shortened the transcript and re-asked, rendering a verdict on evidence the proxy
+had just discarded, with the dangerous part possibly among what was trimmed. Both now fail closed.
+
+### Typed routes
+
+| Route | Model | Tools | Hints | Reasoning | Continue | Compact on overflow | Pool |
+|---|---|---|---|---|---|---|---|
+| `main` | requested, else `OPENAI_MODEL` | ✅ | ✅ | ✅ | ✅ | ✅ | shared |
+| `compaction` | as `main` | ✅ | ✅ | ✅ | ✅ | ✅ | shared |
+| `prefix` | `OPENAI_CLASSIFIER_MODEL` | ❌ | ❌ | ❌ | ❌ | ❌ | reserved |
+| `safety:severity` | `OPENAI_CLASSIFIER_SAFETY_MODEL` | ❌ | ❌ | ❌ | ❌ | ❌ | reserved |
+| `safety:block` | `OPENAI_CLASSIFIER_SAFETY_MODEL` | ❌ | ❌ | ❌ | ❌ | ❌ | reserved |
+
+`compaction` deliberately matches `main` today: changing how a transcript is summarised is a
+fact-retention question that belongs to the compaction phase. It is typed and logged so the
+distinction exists.
+
+**The stage split is diagnostic, not behavioural** — deliberately. All 13 real classifier prompts
+recovered from the CLI's own error dumps are stage 2, each opening its *system* prompt with
+`security monitor for autonomous AI coding agents` (at fraction 0.00–0.03 of the request). Three of
+them also contain `<severity>N</severity>`, but at 0.21, 0.89 and 0.91 — inside the **user
+transcript**, where the conversation quotes an earlier stage-1 exchange. With no stage-1 corpus to
+validate against, the stages resolve to the same model and the same policy, so a mislabel can only
+mislabel a log line. The discriminator is anchored to the system text for the same reason.
+
+### The safety model is pinned to a snapshot
+
+The default is `gpt-5.4-2026-03-05`, not the floating `gpt-5.4` alias: an alias moves, and a
+decision about whether a risky action runs should not change behaviour because someone else shipped.
+The snapshot was verified to exist before pinning — an id that does not exist would 400 every verdict
+and the CLI fails closed, denying every action.
+
+Setting it **blank** now means "use the main model and accept the latency", which the settings help
+has always promised and the code never delivered: blank is falsy, so `||` walked past it to the
+default. The resolver now distinguishes *defined-but-empty* from *absent* for this one setting, and
+warns at startup when blank is chosen — it is the configuration measured to miss the deadline
+(median 12.2s, p90 54s, 2 of 27 past the 60s cliff).
+
 ## Nothing malformed becomes runnable
 
 A single helper used to parse both the client's request body and the model's tool arguments:

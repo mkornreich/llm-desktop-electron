@@ -30,6 +30,10 @@ import { parseRequestBody, validateMessagesRequest, parseToolArguments } from ".
 // that writes to a response. Importing the body-builder under the same name is how you end up
 // sending a plain object where a response was expected.
 import { RequestError, TranslationError, errorResponse } from "./errors.mjs";
+import {
+  ROUTE, routeFor, policyFor, modelForRoute, routeLabel, isClassifier, isSafety,
+  PREFIX_RE, SAFETY_RE, CLASSIFIER_RE, SEVERITY_RE, BLOCK_RE, OPENAI_MODEL_RE,
+} from "./routes.mjs";
 
 // ---------- config ----------
 // Every setting, its precedence and its coercion now live in config.mjs, which also produces
@@ -1181,7 +1185,9 @@ function appendTaskEcho(msg, body, isCls) {
 }
 
 // ---- per-request model routing ----
-const OPENAI_MODEL_RE = /^(gpt-|o[1-9]|chatgpt|ft:)/i;
+// The needles, the route table, the policy table and the model resolution all live in
+// routes.mjs. What stays here is the glue: pulling the sniffed text out of a request, and
+// supplying the configured models.
 
 // Claude Code makes several LLM calls that are NOT agent turns: classifiers with a rigid
 // output contract. Treating one like an agent turn breaks it, so they are detected here and
@@ -1204,26 +1210,15 @@ const OPENAI_MODEL_RE = /^(gpt-|o[1-9]|chatgpt|ft:)/i;
 // CLOSED: it denies the action and prints "<model> is temporarily unavailable".
 // Needles per family, verified against all 14 real classifier prompts recovered from the
 // CLI's own error dumps in /private/tmp/claude-501/auto-mode-classifier-errors.
-const PREFIX_RE = new RegExp([
-  "risk levels for actions that the Claude Code agent",
-  "broader safety framework",
-  "command_injection_detected",
-].join("|"), "i");
-const SAFETY_RE = new RegExp([
-  "security monitor for autonomous AI coding agents",    // the real stage-2 opener
-  "ENTIRE response MUST begin with <block>",
-  "<block>(?:yes|no)</block>",
-  "Err on the side of blocking",
-  "<severity>N</severity>",
-  "Review the classification process",
-].join("|"), "i");
-const CLASSIFIER_RE = new RegExp(`${PREFIX_RE.source}|${SAFETY_RE.source}`, "i");
-
 // The contract lines sit at the END of a long prompt and a real transcript runs to
 // megabytes, so sniff the head AND the tail instead of scanning everything.
 const SNIFF = 4000;
 const ends = (s) => (s.length <= SNIFF * 2 ? s : `${s.slice(0, SNIFF)}\n${s.slice(-SNIFF)}`);
-function classifierPrompt(body) {
+// System and last-user text, sniffed separately. They have to stay separate: a prompt's own
+// output contract lives in its SYSTEM text, while the user text is a transcript that may quote
+// anything — three of the thirteen real stage-2 prompts contain `<severity>N</severity>`
+// mid-conversation, which would label them stage 1 if the two were concatenated first.
+function classifierTexts(body) {
   const sys = Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : (body.system || "");
   const msgs = body.messages || [];
   const last = msgs[msgs.length - 1];
@@ -1233,49 +1228,64 @@ function classifierPrompt(body) {
     tail = typeof c === "string" ? c
       : Array.isArray(c) ? c.filter((b) => b.type === "text").map((b) => b.text || "").join("\n") : "";
   }
-  return `${ends(String(sys))}\n${ends(tail)}`;
+  return { systemText: ends(String(sys)), tailText: ends(tail) };
+}
+// The concatenation, kept for the family-level checks and for the tests that assert on it.
+function classifierPrompt(body) {
+  const { systemText, tailText } = classifierTexts(body);
+  return `${systemText}\n${tailText}`;
 }
 let vetoLogged = false;
-// Returns "prefix" | "safety" | null. The distinction matters for MODEL choice: see pickModel.
-function classifierFamily(body) {
-  const text = classifierPrompt(body);
-  const family = SAFETY_RE.test(text) ? "safety" : PREFIX_RE.test(text) ? "prefix" : null;
-  if (!family) return null;
-  // Corroboration, because the needles are just text. A verdict-only call carries no tool
-  // list; an agent turn carries the whole toolbox (213 of them here). Without this check a
-  // session that merely QUOTES the contract — debugging this very issue, say — would have
-  // its own turns misrouted and its hints stripped.
-  const n = body.tools?.length ?? 0;
-  if (n > CLASSIFIER_MAX_TOOLS) {
-    if (!vetoLogged) {
+// The typed route for a request. One decision per request, made once, and everything downstream
+// reads it instead of re-deriving a boolean.
+function routeForRequest(body) {
+  const { systemText, tailText } = classifierTexts(body);
+  return routeFor({
+    systemText, tailText,
+    toolCount: body.tools?.length ?? 0,
+    maxTools: CLASSIFIER_MAX_TOOLS,
+    isCompaction: !!compactionKind(body),
+    onVeto: (family, n) => {
+      if (vetoLogged) return;
       vetoLogged = true;
       log(`  ! a prompt matched the ${family} classifier contract but carries ${n} tools — treating it as a normal agent turn (logged once)`);
-    }
-    return null;
-  }
-  return family;
+    },
+  });
 }
-const isClassifierRequest = (body) => classifierFamily(body) !== null;
+// "prefix" | "safety" | null, for the log lines and tests that speak in families rather than
+// routes. Both safety stages collapse to "safety" here because they share a model and a policy.
+function classifierFamily(body) {
+  const r = routeForRequest(body);
+  return r === ROUTE.PREFIX ? "prefix" : isSafety(r) ? "safety" : null;
+}
+const isClassifierRequest = (body) => isClassifier(routeForRequest(body));
 
-function pickModel(body, family = classifierFamily(body)) {
-  const req = String(body.model || "");
-  if (OPENAI_MODEL_RE.test(req)) return req;   // agent already asked for an OpenAI model (e.g. via CLAUDE_CODE_BG_CLASSIFIER_MODEL)
-  // Only PREFIX detection goes to the small model. The auto-mode SAFETY verdict keeps the
-  // main model, measured by replaying six real classifier requests recovered from the CLI's
-  // own error dumps through both models:
-  //   - 3 of the 5 <block>-stage requests disagreed, and every disagreement went one way:
-  //     gpt-5.3-codex blocked (Production Reads / Production Deploy), gpt-4.1-mini allowed.
-  //   - on a 6th, gpt-4.1-mini emitted no verdict at all — it echoed the action back as
-  //     {"tool":"Bash","input":"git -C …"} — which is unparseable, so the CLI would retry and
-  //     could end up reporting the model unavailable. The small model can CAUSE issue #6.
-  //   - gpt-5.3-codex answered every request in the expected shape, including the stage-1
-  //     <severity>N</severity> form, in ~2s. Latency was never the problem, so there is
-  //     nothing to buy by trading judgment away.
-  // The classifier's own prompt says to err on the side of blocking, so a more permissive
-  // model is the wrong direction. OPENAI_CLASSIFIER_SAFETY_MODEL overrides this deliberately.
-  if (family === "prefix" && OPENAI_CLASSIFIER_MODEL) return OPENAI_CLASSIFIER_MODEL;
-  if (family === "safety" && OPENAI_CLASSIFIER_SAFETY_MODEL) return OPENAI_CLASSIFIER_SAFETY_MODEL;
-  return OPENAI_MODEL;
+// WHY A SMALL MODEL IS NOT SAFE HERE, measured by replaying six real classifier requests
+// recovered from the CLI's own error dumps through both models:
+//   - 3 of the 5 <block>-stage requests disagreed, and every disagreement went one way:
+//     gpt-5.3-codex blocked (Production Reads / Production Deploy), gpt-4.1-mini allowed.
+//   - on a 6th, gpt-4.1-mini emitted no verdict at all — it echoed the action back as
+//     {"tool":"Bash","input":"git -C …"} — which is unparseable, so the CLI retries and can end
+//     up reporting the model unavailable. The small model can CAUSE issue #6.
+//   - gpt-5.3-codex answered every request in the expected shape, including the stage-1
+//     <severity>N</severity> form, in ~2s. Latency was never the problem there, so there is
+//     nothing to buy by trading judgment away.
+// The classifier's own prompt says to err on the side of blocking, so a more permissive model is
+// the wrong direction. This is why the resolution below refuses to inherit a requested model.
+//
+// Resolve the answering model FROM THE ROUTE. The ordering is the whole point: this used to
+// return a requested OpenAI model id before it ever looked at the classifier family, so a safety
+// verdict could inherit whatever the picker or CLAUDE_CODE_BG_CLASSIFIER_MODEL named — including
+// gpt-4.1-mini, which is in the default picker list and was measured to allow an action
+// gpt-5.3-codex blocked. Only ordinary agent turns honour a directly requested model now.
+function pickModel(body, route = routeForRequest(body)) {
+  return modelForRoute(route, {
+    main: OPENAI_MODEL,
+    prefixModel: OPENAI_CLASSIFIER_MODEL,
+    safetyModel: OPENAI_CLASSIFIER_SAFETY_MODEL,
+    safetyModelIsBlank: OPENAI_CLASSIFIER_SAFETY_MODEL === "",
+    requestedModel: body.model,
+  });
 }
 // Which API surface a model is served on. OPENAI_API overrides it, and that override used to
 // be dead config: USE_RESPONSES was computed at startup and never read, so the documented
@@ -1376,14 +1386,15 @@ function imageUrl(blk) {
 const IMAGE_REJECTED_RE = /image|vision|multimodal|input_image|image_url/i;
 
 // ---------- request translation: Anthropic -> OpenAI ----------
-function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
+function toOpenAI(body, model, route = routeForRequest(body)) {
+  const policy = policyFor(route);
   const messages = [];
   let imagesSent = 0;
   if (body.system) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
       : body.system;
-    if (sys) messages.push({ role: "system", content: withFormatHint(sys, !isCls, body.tools) });
+    if (sys) messages.push({ role: "system", content: withFormatHint(sys, policy.hints, body.tools) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -1432,7 +1443,11 @@ function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
   // cannot depend on which tools happened to survive. It throws, and the caller turns that into a
   // 400 naming both tools — see tool-registry.mjs for why renaming would be worse.
   const registry = ToolRegistry.from(body.tools);
-  if (body.tools?.length) {
+  // A verdict has a rigid output contract and no use for a tool. Offering one invites a tool call
+  // in PLACE of the verdict, which is unparseable, which makes the CLI retry and then DENY. Both
+  // encoders used to send whatever tools a classifier request carried — up to
+  // OPENAI_CLASSIFIER_MAX_TOOLS of them — because the tools block was never gated on the route.
+  if (policy.tools && body.tools?.length) {
     const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
     if (dropped.length) log(`chat cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}: ${dropped.slice(0, 12).join(", ")}${dropped.length > 12 ? ", …" : ""}`);
     out.tools = tools.map((t) => ({
@@ -1440,7 +1455,9 @@ function toOpenAI(body, model, isCls = isClassifierRequest(body)) {
       function: { name: registry.wireName(t.name), description: t.description, parameters: t.input_schema },
     }));
   }
-  if (body.tool_choice) {
+  // tool_choice without tools is either meaningless or a 400, and "required" would demand a call
+  // the model has no tool to make.
+  if (policy.tools && body.tool_choice) {
     const tc = body.tool_choice;
     if (tc.type === "auto") out.tool_choice = "auto";
     else if (tc.type === "any") out.tool_choice = "required";
@@ -1531,7 +1548,12 @@ async function callOpenAI(payload, isClassifier = false) {
     // Context window exceeded -> compact and retry (issue #4).
     if (res.status === 400) {
       const t1 = await res.clone().text();
-      if (CONTEXT_ERROR_RE.test(t1)) {
+      // Same rule as the Responses surface: a classifier is never judged on a shortened
+    // transcript. Fail closed and let Claude Code deny.
+    if (CONTEXT_ERROR_RE.test(t1) && isClassifier) {
+      log(`  ! a classifier request exceeded the context window — failing closed rather than ` +
+          `judging a shortened transcript; Claude Code will deny the action`);
+    } else if (CONTEXT_ERROR_RE.test(t1)) {
         let body = retry || payload;
         for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
           let { messages, trimmed, reclaimed } = compactChatMessages(body.messages, keep);
@@ -1666,7 +1688,8 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
 
 // ================= OpenAI Responses API path (for codex / responses-only models) =================
 // Anthropic Messages -> Responses request
-function toResponses(body, model, isCls = isClassifierRequest(body)) {
+function toResponses(body, model, route = routeForRequest(body)) {
+  const policy = policyFor(route);
   const input = [];
   let imagesSent = 0;
   for (const m of body.messages || []) {
@@ -1712,14 +1735,15 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
   // just useless but a contract violation — the answer must START with the verdict tag. And
   // hidden reasoning is charged to the same output budget, which is how a verdict comes back
   // empty and the CLI concludes the model is unavailable.
-  if (!isCls && SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
+  if (policy.reasoning && SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
     out.reasoning = { effort: effortFor(model), summary: "detailed" };
   }
   // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding.
-  if (VERBOSITY && !isCls) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
-  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, !isCls, body.tools);
+  if (VERBOSITY && policy.verbosity) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
+  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, body.tools);
   const registry = ToolRegistry.from(body.tools);
-  if (body.tools?.length) {
+  // See the note in toOpenAI: a classifier gets no tools, on either surface.
+  if (policy.tools && body.tools?.length) {
     // No cap on this surface (verified up to 512), so the agent keeps every tool.
     const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_RESPONSES);
     if (dropped.length) log(`responses cap ${body.tools.length}->${tools.length}; dropped ${dropped.length}`);
@@ -1729,7 +1753,7 @@ function toResponses(body, model, isCls = isClassifierRequest(body)) {
       description: t.description, parameters: t.input_schema,
     }));
   }
-  if (body.tool_choice) {
+  if (policy.tools && body.tool_choice) {
     const tc = body.tool_choice;
     if (tc.type === "auto") out.tool_choice = "auto";
     else if (tc.type === "any") out.tool_choice = "required";
@@ -1772,6 +1796,18 @@ async function callResponses(payload, isClassifier = false) {
       }
     }
     // Context window exceeded -> compact the conversation and retry (issue #4).
+    //
+    // NOT FOR A CLASSIFIER. This was gated only on the connection pool, so an HTTP-path overflow
+    // on a safety verdict would shorten the transcript and re-ask — rendering a verdict on
+    // evidence the proxy had just discarded, with the dangerous part possibly among what was
+    // trimmed. The streaming path already refused (it gates on allowContinue, false for
+    // classifiers), so the two paths disagreed about the same request depending only on whether
+    // it streamed. Both now fail closed: the error is returned and Claude Code denies the action,
+    // which is the correct outcome for a safety check that cannot be completed.
+    else if (CONTEXT_ERROR_RE.test(txt) && isClassifier) {
+      log(`  ! a classifier request exceeded the context window — failing closed rather than ` +
+          `judging a shortened transcript; Claude Code will deny the action`);
+    }
     else if (CONTEXT_ERROR_RE.test(txt)) {
       let body = payload;
       for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
@@ -2622,7 +2658,10 @@ const server = http.createServer(async (req, res) => {
       instance: INSTANCE, pid: process.pid, startedAt: STARTED_AT, inflight,
       configHash: CONFIG_HASH, codeVersion: codeVersion(), provider: provider(),
       port: PORT, upstream: OPENAI_BASE,
-      safety_model: OPENAI_CLASSIFIER_SAFETY_MODEL || null,
+      // Blank is a real choice now ("use the main model and accept the latency"), so it must not
+      // be reported as null — that reads as "unset" and hides which model is judging safety.
+      safety_model: OPENAI_CLASSIFIER_SAFETY_MODEL === "" ? OPENAI_MODEL : OPENAI_CLASSIFIER_SAFETY_MODEL,
+      safety_model_source: OPENAI_CLASSIFIER_SAFETY_MODEL === "" ? "blank -> main model" : "configured",
       compact_model: COMPACT_MODEL || null,
       claude_code_identity: CLAUDE_CODE_INTERNAL_MODEL || null,
       context_bound: CLAUDE_CODE_CONTEXT_BOUND || null,
@@ -2665,9 +2704,11 @@ const server = http.createServer(async (req, res) => {
     const reqModel = body.model || OPENAI_MODEL;
     // Decided once per request: it drives the model choice, hint injection, reasoning and
     // whether the turn may be continued, and it logs when it vetoes a match.
-    const family = classifierFamily(body);               // "prefix" | "safety" | null
-    const isCls = family !== null;
-    const model = pickModel(body, family);               // main model, fast classifier model, or passthrough
+    const route = routeForRequest(body);                 // one typed decision per request
+    const policy = policyFor(route);
+    const family = route === ROUTE.PREFIX ? "prefix" : isSafety(route) ? "safety" : null;
+    const isCls = isClassifier(route);
+    const model = pickModel(body, route);                // FROM THE ROUTE — never inherited
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
     dumpTools(body.tools);
 
@@ -2676,13 +2717,13 @@ const server = http.createServer(async (req, res) => {
     // wire name means a returned call cannot be attributed — see tool-registry.mjs.
     if (useResp) {
       let payload, registry, imagesSent;
-      try { ({ payload, registry, imagesSent } = toResponses(body, model, isCls)); }
+      try { ({ payload, registry, imagesSent } = toResponses(body, model, route)); }
       catch (e) {
         const r = errorResponse(e);
         log(`/v1/messages [responses] rejected: ${r.body.error.message}`);
         return sendJSON(res, r.status, r.body);
       }
-      const hintOn = !isCls && (OUTPUT_FIXUPS || PERSISTENCE);
+      const hintOn = policy.hints && (OUTPUT_FIXUPS || PERSISTENCE);
       // `msgs=`, not `input=`: the old name read like a token count and was a message count.
       // ~total includes the tool schemas, biggest= names the single largest item, and the
       // compaction line below fires when the client is asking us to summarise its own transcript.
@@ -2691,11 +2732,11 @@ const server = http.createServer(async (req, res) => {
       log(`/v1/messages [responses] model=${reqModel}->${model} ${contextFields(shape)}` +
         ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
         `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
-        `${isCls ? ` classifier=${family} reasoning=off` : ""}`);
+        `${routeLabel(route)}${isCls ? " reasoning=off tools=none" : ""}`);
       if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
       let upstream;
       const startedAt = Date.now();
-      try { upstream = await callResponses(payload, isCls); }
+      try { upstream = await callResponses(payload, policy.reservedPool); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
       if (!upstream.ok) {
         const errTxt = await upstream.text();
@@ -2703,13 +2744,13 @@ const server = http.createServer(async (req, res) => {
         return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
       }
       if (payload.stream) {
-        const mayContinue = !isCls && !!payload.tools?.length;
+        const mayContinue = policy.continuation && !!payload.tools?.length;
         const taskState = TASK_ECHO && !isCls ? collectPriorTasks(body) : null;
         // Hand the stream the body the upstream ACCEPTED. This first call is where the fallbacks
         // actually fire (images stripped, effort lowered, context compacted), so a later transport
         // retry inside the stream must not resurrect the pre-fallback request.
         const accepted = upstream.effectivePayload || payload;
-        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, isCls); }
+        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
@@ -2725,7 +2766,7 @@ const server = http.createServer(async (req, res) => {
             // isCls: classifiers take this non-streaming path, so the reserved-pool flag has to
             // ride the retry too. (It cannot fire for them today — a classifier payload carries
             // no `reasoning` — but the routing must not depend on that staying true.)
-            const retry = await callResponses(noThink, isCls);
+            const retry = await callResponses(noThink, policy.reservedPool);
             if (retry.ok) rj = await retry.json();
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
         }
@@ -2746,7 +2787,7 @@ const server = http.createServer(async (req, res) => {
           // Measured, not inferred: a classifier verdict that approaches the CLI's budget is
           // what produces "temporarily unavailable" and a denied action.
           const ms = Date.now() - startedAt;
-          log(`  <- classifier=${family} verdict in ${ms}ms` +
+          log(`  <- ${routeLabel(route) || "classifier"} verdict in ${ms}ms` +
               (ms >= CLASSIFIER_SLOW_MS
                 ? ` — SLOW. The CLI aborts its classifier at 60s and then DENIES the action.`
                 : ""));
@@ -2758,7 +2799,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     let payload, registry, imagesSent;
-    try { ({ payload, registry, imagesSent } = toOpenAI(body, model, isCls)); }
+    try { ({ payload, registry, imagesSent } = toOpenAI(body, model, route)); }
     catch (e) {
       const r = errorResponse(e);
       log(`/v1/messages [chat] rejected: ${r.body.error.message}`);
@@ -2768,10 +2809,10 @@ const server = http.createServer(async (req, res) => {
     const compacting = compactionKind(body);
     log(`/v1/messages [chat] model=${reqModel}->${model} ${contextFields(shape)}` +
       ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
-      `${imagesSent ? " images=" + imagesSent : ""}${isCls ? ` classifier=${family}` : ""}`);
+      `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}`);
     if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
     let upstream;
-    try { upstream = await callOpenAI(payload, isCls); }
+    try { upstream = await callOpenAI(payload, policy.reservedPool); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
     if (!upstream.ok) {
       const errTxt = await upstream.text();
@@ -2861,7 +2902,14 @@ process.on("unhandledRejection", (err) => fatal("unhandledRejection", err));
 process.on("uncaughtException", (err) => fatal("uncaughtException", err));
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
-  log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API}${OPENAI_CLASSIFIER_MODEL ? `, classifier ${OPENAI_CLASSIFIER_MODEL}` : ""})`);
+  log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API})`);
+  // Both classifier models, always. The safety model decides whether a risky action is allowed to
+  // run, and it did not appear here at all — so the single most consequential routing decision the
+  // proxy makes was invisible in its own startup log.
+  log(`classifier routing: prefix=${OPENAI_CLASSIFIER_MODEL || `(main: ${OPENAI_MODEL})`}` +
+      ` safety=${OPENAI_CLASSIFIER_SAFETY_MODEL === "" ? `(blank -> main: ${OPENAI_MODEL})` : OPENAI_CLASSIFIER_SAFETY_MODEL}` +
+      ` compaction=${COMPACT_MODEL}` +
+      ` — a classifier gets no tools, no hints, no reasoning, and fails closed on overflow`);
   // The identity, on one line, so the log says which configuration produced everything after
   // it. Reconstructing this from a log that only recorded the default model was guesswork.
   log(`instance ${INSTANCE} pid ${process.pid} config ${CONFIG_HASH} code ${codeVersion()} provider ${provider()}`);
