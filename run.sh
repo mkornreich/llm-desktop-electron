@@ -138,9 +138,10 @@ if [ "$PROVIDER" = "openai" ]; then
   export PROXY_ANTHROPIC_BASE_URL="${PROXY_URL}"
   echo "[run] PROXY_ANTHROPIC_BASE_URL=${PROXY_ANTHROPIC_BASE_URL}"
   # Claude Code resolves context capacity from its INTERNAL model identity before it
-  # normalizes that identity for /v1/messages. The repository helper rewrites only the
-  # bundled/cache Claude main-model argv to this supported [1m] identity. Claude Code then
-  # sends claude-opus-4-8 on the wire, which the proxy continues to map to OPENAI_MODEL.
+  # normalizes that identity for /v1/messages. The repository helper ignores whichever
+  # claude-* identity Desktop selected and gives bundled/cache Claude Code this supported
+  # [1m] identity instead. Claude Code then sends claude-opus-4-8 on the wire, which the
+  # proxy continues to map to OPENAI_MODEL.
   OPENAI_CLAUDE_CODE_MODEL=$(sed -n 's/^OPENAI_CLAUDE_CODE_MODEL=//p' .openai-model 2>/dev/null | head -1)
   if [ -z "${OPENAI_CLAUDE_CODE_MODEL:-}" ]; then
     echo "[run] missing OPENAI_CLAUDE_CODE_MODEL in .openai-model"

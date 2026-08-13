@@ -171,9 +171,18 @@ That helper is repository-owned source ([scripts/claude-code-disclaimer.sh](scri
 installed as an absolute symlink by [scripts/install-disclaimer.mjs](scripts/install-disclaimer.mjs)).
 Stock Electron has no equivalent of Claude Desktop's TCC-attribution helper, and the app
 invokes it as `disclaimer <command> <args…>` — which makes it the one supported boundary at
-which this repo can choose the agent's *internal* model identity. In OpenAI mode it rewrites
-only the exact main-model argument of the bundled Claude Code executable; in Anthropic mode it
-is an exact argv passthrough. Nothing patches the Claude Code binary or the app bundle. The
+which this repo can choose the agent's *internal* model identity. In OpenAI mode it ignores
+whichever `claude-*` model Desktop selected and rewrites the bundled Claude Code executable to
+the configured `[1m]` capability identity; in Anthropic mode it is an exact argv passthrough.
+Nothing patches the Claude Code binary or the app bundle.
+
+Subagents need a second lever. `Task`, `Explore` and teammate spawns run *inside* the session
+process, so they have no argv to rewrite, and the desktop sets their model itself — they were
+going out as `claude-sonnet-5` and resolving Sonnet's ordinary window, which produced 344 of 402
+measured client-side compactions while the main loop ran to ~883k tokens. The helper therefore
+also exports `CLAUDE_CODE_SUBAGENT_MODEL`, which Claude Code reads *before* the Task tool's own
+`model` argument and before an agent definition's `model:` frontmatter. It must be set there
+rather than in `run.sh`: the bundle composes the agent env itself and would overwrite it. The
 installer migrates only the two passthrough shims this repo generated in the past and refuses
 to overwrite anything else.
 

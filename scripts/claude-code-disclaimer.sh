@@ -30,14 +30,44 @@ if [[ $command != "$repo"/user-data/claude-code/*/claude.app/Contents/MacOS/clau
   exec "$@"
 fi
 
+# Desktop owns this transport-facing identity and may advance it independently of this
+# repository. In OpenAI mode it must not choose Claude Code's context capability: normalize any
+# current or future Claude identity to the configured [1m] identity before the proxy sees it.
+# OpenAI ids remain meaningful upstream model selections and must pass through unchanged.
+is_desktop_claude_identity() {
+  [[ $1 == claude-* ]]
+}
+
+# Subagents (Task/Explore/teammate spawns) never reach the rewrite below: they run INSIDE the
+# session process, so they have no argv of their own. Claude Code resolves their model from
+# CLAUDE_CODE_SUBAGENT_MODEL first, ahead of the tool's own `model` argument and an agent
+# definition's `model:` frontmatter, so this is where a subagent's capability is decided.
+#
+# It has to be set HERE rather than in run.sh: the desktop bundle composes the agent env
+# itself and sets `CLAUDE_CODE_SUBAGENT_MODEL: getDefaultSubagentModel()`, which would
+# overwrite an exported value. This process is the CLI's direct parent, so it assigns the
+# variable last and wins.
+#
+# Measured: subagent turns went out as claude-sonnet-5, resolved Sonnet's ordinary window and
+# produced 344 of 402 client-side compactions, never exceeding ~299k tokens, while the main
+# loop ran to ~883k. `[1m]` is only honoured for a 1M-capable identity, which is why this
+# reuses the same configured identity as the main loop rather than suffixing Sonnet.
+#
+# The built-in Explore agents are covered too. Their separate
+# CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP knob is deliberately NOT set: that cap only engages
+# for a first-party base URL, so it is already inert against a localhost proxy, and this
+# variable outranks it anyway.
+export CLAUDE_CODE_SUBAGENT_MODEL="$LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL"
+
 args=("$@")
 for ((i = 1; i < ${#args[@]}; i++)); do
   if [[ ${args[i]} == --model ]] &&
      ((i + 1 < ${#args[@]})) &&
-     [[ ${args[i + 1]} == claude-opus-4-8 ]]; then
+     is_desktop_claude_identity "${args[i + 1]}"; then
     args[i + 1]=$LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL
     ((i++))
-  elif [[ ${args[i]} == --model=claude-opus-4-8 ]]; then
+  elif [[ ${args[i]} == --model=* ]] &&
+       is_desktop_claude_identity "${args[i]#--model=}"; then
     args[i]=--model="$LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL"
   fi
 done
