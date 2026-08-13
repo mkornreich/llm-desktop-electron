@@ -87,6 +87,59 @@ the proxy asked twice.
 whether it is exact. The pre-existing aggregate is carried as a labelled **floor**, never folded into
 the new totals — mixing an exact figure with an estimate produces something that is neither.
 
+## The learned compaction level belongs to a conversation
+
+When the context overflows, the proxy walks a ladder — keep the last 96 tool results, then 48, 24, 12,
+6, 2 — and remembers the level that worked so the gentle steps are not paid for repeatedly.
+
+That memory was **one variable for the whole process**, and the comment beside it even said "for this
+session", which it was not:
+
+```js
+let compactStartIndex = 0;      // shared by every session and every model
+```
+
+So whatever one conversation last needed became the starting point for every other. A session with
+enormous tool results overflows and learns `keep=6`; the next session, which would have fitted
+comfortably at `keep=96`, starts at 6 and discards ninety items of its transcript that it never needed
+to lose. Four agents were running against this proxy concurrently while that was being investigated,
+so it is a live effect rather than a hypothetical one.
+
+It is now keyed by `(surface, model, session)`: a transcript's shape is a property of that
+conversation, and a context window is a property of the model. Bounded at 500 entries. The session id
+comes from the header the client already sends (`x-claude-code-session-id`), threaded through both
+call paths — which also fills a gap left earlier, where the streaming path recorded provenance with a
+null session.
+
+## Continuity and native compaction: available, and not enabled
+
+Unlike the structured-output work, the capability here is **real**. Probed directly:
+
+```
+POST /responses/compact   400  "Compaction requires either `input` items or a `previous_response_id`."
+POST /responses (store)   200  id: resp_0ba4fcaf0e90483a…
+```
+
+So `/responses/compact` exists with a real contract, and server-side state via `previous_response_id`
+works. Neither is turned on, for three reasons that are worth stating rather than discovering later:
+
+1. **`store: true` means OpenAI retains the conversation.** This repository ships a privacy posture with
+   telemetry disabled at three levels and *verified zero bytes of egress*. Turning on server-side
+   retention of full agent transcripts is a material change to that, and not one to make silently as a
+   side effect of a performance feature.
+2. **The token saving is marginal here.** Requests already run at a 95.7–96% cache hit rate, so the
+   prefix is nearly free as it stands. Continuity would trade a small further saving for a large new
+   failure surface.
+3. **That failure surface is the worst kind.** Continuity is only valid when the transcript is an exact
+   append-only extension; forks, ambiguous retries, client rewrites, tool or model changes and races
+   all have to fall back to stateless input. A bug in any of those conditions is cross-session
+   contamination — one conversation answering with another's context — which the phase gates list first
+   among the reasons to stop.
+
+The custom trimming and summarisation ladder therefore remains the only compaction path, and it is the
+one that is tested. Whether native compaction retains facts better is a measurable question, and it
+belongs with the paired evaluation that owns changing defaults.
+
 ## Attachments do not disappear
 
 Content was collected into four separate buckets — text, tool calls, tool results, images — and

@@ -21,6 +21,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
+        compactStartFor, rememberCompact,
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
@@ -1606,13 +1607,39 @@ test("issue #14: the ladder starts gently instead of jumping to 12", () => {
 
 test("issue #14: the working level is remembered so gentleness is not paid for repeatedly", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /let compactStartIndex = 0/);
+  // It used to be one `let compactStartIndex = 0` for the whole process — and the comment beside it
+  // even said "for this session", which it was not. Whatever ONE conversation last needed became the
+  // starting point for every other: a session that would have fitted at keep=96 started at keep=6 and
+  // threw away ninety items it never needed to lose. Four agents were running against this proxy
+  // concurrently while that was being investigated.
+  // Comments stripped: the code above EXPLAINS the old `let compactStartIndex = 0`, and a check that
+  // cannot tell prose from code fails on the very comment documenting the fix. Fourth time in this
+  // sequence, so it is a habit rather than an accident.
+  const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  assert.ok(!/let compactStartIndex = 0/.test(code), "the process-global must be gone");
+  assert.match(src, /const compactLearned = new Map\(\)/);
   assert.match(src, /remembering keep=\$\{keep\} as the working compaction level/);
-  // every ladder walk must honour it, including the mid-stream one
-  assert.equal((src.match(/COMPACT_STEPS\.slice\(compactStartIndex\)/g) || []).length, 2);
-  assert.match(src, /COMPACT_STEPS\[compactStartIndex \+ ctxCompacted\+\+\]/);
-  // and the memo is only set on an actual success
-  assert.equal((src.match(/\{ rememberCompact\(keep\); break; \}/g) || []).length, 2);
+  // Every ladder walk must read the keyed value, including the mid-stream one.
+  assert.equal((src.match(/COMPACT_STEPS\.slice\(compactStartFor\(/g) || []).length, 2);
+  assert.match(src, /COMPACT_STEPS\[compactStartFor\("responses", payload\?\.model, sessionId\) \+ ctxCompacted\+\+\]/);
+  // The memo is only set on an actual success, and it records WHOSE success.
+  const sets = src.match(/rememberCompact\(keep, "(chat|responses)", payload\?\.model, sessionId\); break;/g) || [];
+  assert.equal(sets.length, 2, "one per surface, each keyed by model and session");
+  // Bounded, or one entry per session would grow for the life of the process.
+  assert.match(src, /compactLearned\.size > \d+/);
+});
+
+test("issue #14: one session's compaction level does not become another's", () => {
+  // The behavioural half of the above, through the exported helpers.
+  const STEPS = COMPACT_STEPS;
+  assert.equal(compactStartFor("responses", "m", "session-A"), 0, "a new conversation starts gentle");
+  rememberCompact(STEPS[4], "responses", "m", "session-A");        // A learns an aggressive level
+  assert.equal(compactStartFor("responses", "m", "session-A"), 4, "A remembers it");
+  assert.equal(compactStartFor("responses", "m", "session-B"), 0,
+    "B is unaffected — it would have fitted at the gentlest level and must still start there");
+  assert.equal(compactStartFor("chat", "m", "session-A"), 0, "and a different surface is its own fact");
+  assert.equal(compactStartFor("responses", "other-model", "session-A"), 0,
+    "as is a different model, whose context window is its own property");
 });
 
 test("issue #14: the measured context limits are recorded next to the ladder", () => {
@@ -1727,13 +1754,15 @@ test("classifier calls get a reserved connection pool", () => {
 
 test("both call paths route classifier traffic to the reserved pool", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  assert.match(src, /async function callResponses\(payload, isClassifier = false\)/);
-  assert.match(src, /async function callOpenAI\(payload, isClassifier = false\)/);
+  // The session is threaded through both, so the learned compaction level belongs to a conversation
+  // rather than to the whole process.
+  assert.match(src, /async function callResponses\(payload, isClassifier = false, sessionId = null\)/);
+  assert.match(src, /async function callOpenAI\(payload, isClassifier = false, sessionId = null\)/);
   assert.equal((src.match(/const f = isClassifier \? classifierFetch : fetch;/g) || []).length, 2);
   // The handler passes the POLICY field now, not a bare boolean — same value, but named after the
   // thing it controls, so a future route cannot silently forget it.
-  assert.match(src, /callResponses\(payload, policy\.reservedPool\)/);
-  assert.match(src, /callOpenAI\(payload, policy\.reservedPool\)/);
+  assert.match(src, /callResponses\(payload, policy\.reservedPool, sessionId\)/);
+  assert.match(src, /callOpenAI\(payload, policy\.reservedPool, sessionId\)/);
   assert.equal(policyFor(ROUTE.SAFETY_BLOCK).reservedPool, true);
   assert.equal(policyFor(ROUTE.PREFIX).reservedPool, true);
   assert.equal(policyFor(ROUTE.MAIN).reservedPool, false);

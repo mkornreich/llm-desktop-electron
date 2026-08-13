@@ -814,12 +814,36 @@ function compactChatMessages(messages, keepRecent) {
 // The app believes it is talking to a 1M-context Claude and packs accordingly, so on codex
 // the overflow is routine rather than exceptional.
 const COMPACT_STEPS = [96, 48, 24, 12, 6, 2];
-let compactStartIndex = 0;
-const rememberCompact = (keep) => {
+// KEYED, not process-global.
+//
+// This was one `let compactStartIndex = 0` for the whole process, and the comment even called it
+// "for this session" — which it was not. The proxy serves several sessions and more than one model at
+// once, so whatever ONE conversation last needed became the starting point for every other:
+//
+//   session A has enormous tool results, overflows, and learns keep=6
+//   session B would have fitted comfortably at keep=96 — and now starts at 6,
+//   discarding ninety items of its transcript that it never needed to lose
+//
+// Four agents were running against this proxy concurrently while this was being investigated, so it
+// is a live effect rather than a hypothetical one. Keyed by surface, model and session: a transcript's
+// shape is a property of that conversation, and a model's context window is a property of the model.
+const compactLearned = new Map();
+const compactKey = (surface, model, sessionId) =>
+  `${surface || "?"}|${model || "?"}|${sessionId || "unknown"}`;
+const compactStartFor = (surface, model, sessionId) =>
+  compactLearned.get(compactKey(surface, model, sessionId)) || 0;
+const rememberCompact = (keep, surface, model, sessionId) => {
   const i = COMPACT_STEPS.indexOf(keep);
-  if (i > -1 && i !== compactStartIndex) {
-    compactStartIndex = i;
-    log(`  ! remembering keep=${keep} as the working compaction level for this session`);
+  const key = compactKey(surface, model, sessionId);
+  if (i > -1 && i !== (compactLearned.get(key) || 0)) {
+    compactLearned.set(key, i);
+    log(`  ! remembering keep=${keep} as the working compaction level for ${key}`);
+  }
+  // Bounded: one entry per (surface, model, session) would otherwise grow for the life of the
+  // process. Sessions are long-lived and few, so a generous cap that is still a cap.
+  if (compactLearned.size > 500) {
+    const oldest = compactLearned.keys().next().value;
+    compactLearned.delete(oldest);
   }
 };
 
@@ -1615,7 +1639,7 @@ function toAnthropic(oai, reqModel, registry) {
 }
 
 // ---------- OpenAI call with a max_tokens/param fallback ----------
-async function callOpenAI(payload, isClassifier = false) {
+async function callOpenAI(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   const doFetch = (body) => f(`${OPENAI_BASE}/chat/completions`, {
     method: "POST",
@@ -1682,7 +1706,7 @@ async function callOpenAI(payload, isClassifier = false) {
           `judging a shortened transcript; Claude Code will deny the action`);
     } else if (CONTEXT_ERROR_RE.test(t1)) {
         let body = retry || payload;
-        for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
+        for (const keep of COMPACT_STEPS.slice(compactStartFor("chat", payload?.model, sessionId))) {
           let { messages, trimmed, reclaimed } = compactChatMessages(body.messages, keep);
           if (!trimmed) {
             ({ messages, trimmed, reclaimed } = compactOversizedChatText(body.messages));
@@ -1692,7 +1716,7 @@ async function callOpenAI(payload, isClassifier = false) {
           log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} messages); retrying`);
           body = { ...body, messages };
           res = await doFetch(body);
-          if (res.status !== 400) { rememberCompact(keep); break; }
+          if (res.status !== 400) { rememberCompact(keep, "chat", payload?.model, sessionId); break; }
           const t2 = await res.clone().text();
           if (!CONTEXT_ERROR_RE.test(t2)) break;
         }
@@ -1925,7 +1949,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
 // so a caller that later retried handed over the ORIGINAL payload and re-triggered every
 // rejection it had already worked around (and re-compacted context that was already compacted).
 // Attaching the accepted body lets the transport retry replay what actually worked.
-async function callResponses(payload, isClassifier = false) {
+async function callResponses(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   let accepted = payload;                        // updated by each fallback that gets used
   const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) }); };
@@ -1968,7 +1992,7 @@ async function callResponses(payload, isClassifier = false) {
     }
     else if (CONTEXT_ERROR_RE.test(txt)) {
       let body = payload;
-      for (const keep of COMPACT_STEPS.slice(compactStartIndex)) {
+      for (const keep of COMPACT_STEPS.slice(compactStartFor("responses", payload?.model, sessionId))) {
         let { input, trimmed, reclaimed, summarised } = await compactResponsesInputSummarised(body.input, keep);
         if (!trimmed) {
           ({ input, trimmed, reclaimed } = compactOversizedResponsesText(body.input));
@@ -1978,7 +2002,7 @@ async function callResponses(payload, isClassifier = false) {
         log(`  ! context exceeded — compacted ${trimmed} tool result(s)${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
         body = { ...body, input };
         res = await doFetch(body);
-        if (res.status !== 400) { rememberCompact(keep); break; }
+        if (res.status !== 400) { rememberCompact(keep, "responses", payload?.model, sessionId); break; }
         const t2 = await res.clone().text();
         if (!CONTEXT_ERROR_RE.test(t2)) break;
       }
@@ -2289,7 +2313,7 @@ function fromResponses(resp, reqModel, registry) {
 // makes (transport retry, truncation continuation, auto-continue, context recovery, empty retry)
 // must keep using the classifier's reserved connection pool, or a verdict can queue behind agent
 // traffic and miss the CLI's fail-closed 60s deadline.
-async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false) {
+async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false, sessionId = null) {
   // Measured, not inferred. Pairing a request line with a completion line in this log is
   // unreliable because turns overlap — two earlier attempts to answer "how slow is a turn"
   // from the log produced confidently wrong medians (34s, then 483s) before that was noticed.
@@ -2311,7 +2335,7 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
   // One turn, one id, so every attempt under it can be grouped and the two meters told apart.
   const turnId = newTurnId();
   const turnRoute = isClassifierPayload ? "classifier" : "main";
-  const turnSessionId = null;
+  const turnSessionId = sessionId;   // the real session, for provenance and compaction memory
   let totalOutTokens = 0;                        // cumulative across continuations
   // The index is assigned HERE, at open time, not when the item first appears. That is what lets a
   // tool block be deferred until its arguments parse: an item can exist, accumulate arguments, and
@@ -2718,8 +2742,8 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
   // judged on a silently shortened transcript (issue #6).
   let ctxCompacted = 0;
   while (payload && allowContinue && streamError && CONTEXT_ERROR_RE.test(streamError) &&
-         !hasTool && textLen === 0 && compactStartIndex + ctxCompacted < COMPACT_STEPS.length) {
-    const keep = COMPACT_STEPS[compactStartIndex + ctxCompacted++];
+         !hasTool && textLen === 0 && compactStartFor("responses", payload?.model, sessionId) + ctxCompacted < COMPACT_STEPS.length) {
+    const keep = COMPACT_STEPS[compactStartFor("responses", payload?.model, sessionId) + ctxCompacted++];
     let { input, trimmed, reclaimed, summarised } =
       await compactResponsesInputSummarised(payload.input, keep);
     if (!trimmed) {
@@ -2960,6 +2984,9 @@ const server = http.createServer(async (req, res) => {
     const reqModel = body.model || OPENAI_MODEL;
     // Decided once per request: it drives the model choice, hint injection, reasoning and
     // whether the turn may be continued, and it logs when it vetoes a match.
+    // The session the client named. Used for provenance and to key the learned compaction level to a
+    // conversation rather than to the whole process.
+    const sessionId = req.headers["x-claude-code-session-id"] || null;
     const route = routeForRequest(body);                 // one typed decision per request
     const policy = policyFor(route);
     const family = route === ROUTE.PREFIX ? "prefix" : isSafety(route) ? "safety" : null;
@@ -2994,7 +3021,7 @@ const server = http.createServer(async (req, res) => {
       if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
       let upstream;
       const startedAt = Date.now();
-      try { upstream = await callResponses(payload, policy.reservedPool); }
+      try { upstream = await callResponses(payload, policy.reservedPool, sessionId); }
       catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
       if (!upstream.ok) {
         const errTxt = await upstream.text();
@@ -3008,7 +3035,7 @@ const server = http.createServer(async (req, res) => {
         // actually fire (images stripped, effort lowered, context compacted), so a later transport
         // retry inside the stream must not resurrect the pre-fallback request.
         const accepted = upstream.effectivePayload || payload;
-        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool); }
+        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool, sessionId); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
@@ -3024,7 +3051,7 @@ const server = http.createServer(async (req, res) => {
             // isCls: classifiers take this non-streaming path, so the reserved-pool flag has to
             // ride the retry too. (It cannot fire for them today — a classifier payload carries
             // no `reasoning` — but the routing must not depend on that staying true.)
-            const retry = await callResponses(noThink, policy.reservedPool);
+            const retry = await callResponses(noThink, policy.reservedPool, sessionId);
             if (retry.ok) rj = await retry.json();
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
         }
@@ -3072,7 +3099,7 @@ const server = http.createServer(async (req, res) => {
       `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}`);
     if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
     let upstream;
-    try { upstream = await callOpenAI(payload, policy.reservedPool); }
+    try { upstream = await callOpenAI(payload, policy.reservedPool, sessionId); }
     catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
     if (!upstream.ok) {
       const errTxt = await upstream.text();
@@ -3113,6 +3140,7 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice, toolArgs, pruneByName,
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
+         compactStartFor, rememberCompact,
          compactResponsesInputSummarised, summariseDropped,
          compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
