@@ -1893,7 +1893,11 @@ test("both surfaces log context through the one shared formatter", () => {
   // These two lines were assembled independently and had already drifted apart — one reported a
   // field the other did not. A single builder is what keeps them honest.
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
-  const sites = src.match(/log\(`\/v1\/messages \[[a-z]+\][^`]*`/g) || [];
+  // `rejected:` lines are excluded: a request refused for a malformed body or an unrepresentable
+  // tool catalog never gets as far as having a context shape to report, so requiring the shared
+  // formatter there would be requiring a field that does not exist yet.
+  const sites = (src.match(/log\(`\/v1\/messages \[[a-z]+\][^`]*`/g) || [])
+    .filter((s) => !/rejected/.test(s));
   assert.equal(sites.length, 2, `expected exactly the responses and chat sites, found ${sites.length}`);
   for (const s of sites) {
     assert.match(s, /\$\{contextFields\(shape\)\}/, `site must use the shared formatter: ${s.slice(0, 60)}`);
@@ -2202,8 +2206,40 @@ test("an aborted transport never reports a normal stop reason", () => {
   assert.match(terminal, /sse\(res, "error"/,
     "the client needs an in-band error event, not a silent EOF after message_start");
   // A tool call still mid-assembly must be withheld rather than handed over as executable.
-  assert.match(abortBlock, /argBuf !== undefined[\s\S]{0,200}withheld/,
+  assert.match(abortBlock, /pending[\s\S]{0,240}withheld/,
     "incomplete tool calls must be withheld from the client");
+});
+
+test("a tool_use block is never opened before its arguments have parsed", () => {
+  // The structural reason the client can never receive a malformed call: the block does not exist
+  // until the arguments are in hand. While `output_item.added` opened it immediately, the only
+  // remaining question was WHICH input to put in an already-open block, and `{}` was the answer —
+  // an executable Bash({}) or Write({}) indistinguishable from a call the model meant to make.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // Comments stripped first. The code here EXPLAINS what it must not do ("No index, no
+  // content_block_start"), and a check that cannot tell prose from code fails on the very comment
+  // documenting the invariant it is testing.
+  const codeOnly = (s) => s.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const fn = codeOnly(src.slice(src.indexOf("async function streamResponses"),
+                                src.indexOf("// ---------- server ----------")));
+  const added = fn.slice(fn.indexOf('case "response.output_item.added"'),
+                         fn.indexOf('case "response.reasoning_summary_part.added"'));
+  assert.match(added, /function_call/, "the added handler is the one that sees a tool call");
+  assert.ok(!/open\(/.test(added),
+    "output_item.added must not open a block — the arguments have not arrived yet");
+  assert.ok(!/content_block_start/.test(added), "and must emit nothing");
+
+  const done = fn.slice(fn.indexOf('case "response.output_item.done"'),
+                        fn.indexOf('case "response.completed"'));
+  const parseAt = done.indexOf("toolArgs(");
+  const openAt = done.indexOf("open(");
+  assert.ok(parseAt > -1 && openAt > -1, "the done handler must both parse and open");
+  assert.ok(parseAt < openAt,
+    "the arguments must be parsed BEFORE the block is opened, or a parse failure has nowhere to go");
+  // And the failure path must not open it at all.
+  const fail = done.slice(done.indexOf("catch"), openAt);
+  assert.match(fail, /toolWithheld/, "a parse failure must record a withheld call");
+  assert.ok(!/content_block_start/.test(fail), "and must emit nothing for it");
 });
 
 test("every upstream call in the stream keeps the classifier's reserved pool", () => {
