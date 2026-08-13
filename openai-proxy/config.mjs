@@ -103,6 +103,11 @@ export const SETTINGS = [
 
   { name: "OPENAI_CLASSIFIER_MODEL", env: "OPENAI_CLASSIFIER_MODEL",
     project: ["OPENAI_CLASSIFIER_MODEL"], type: "str", default: "" },
+  // MEASURED, then pinned. eval/reports/safety-classifier.md replays the 14 real classifier prompts
+  // through this snapshot and the alias it replaced: the decision is identical on every case, including
+  // both blocks, so the pin did not move behaviour. gpt-5.4-nano allowed an action the incumbent
+  // blocked, and the main model returned 8 unparseable verdicts out of 14 — neither is usable here.
+  //
   // PINNED TO A SNAPSHOT, not the floating `gpt-5.4` alias. This model decides whether a risky
   // action is allowed to run, and an alias moves under you: the behaviour that was measured is
   // not necessarily the behaviour you get next month. The snapshot was verified to exist
@@ -381,9 +386,15 @@ export function validate(opts = {}) {
   // Blank is legal and documented, and it is also the configuration measured to miss the CLI's
   // deadline. Saying so is the difference between a choice and an accident.
   if (v.OPENAI_CLASSIFIER_SAFETY_MODEL === "")
+    // Re-measured against the real classifier corpus (eval/reports/safety-classifier.md). The old
+    // warning blamed LATENCY, from figures taken on gpt-5.3-codex. On today's main model latency is
+    // fine — p50 2.4s, p95 6.1s, nothing near the deadline — but 8 of 14 verdicts came back
+    // UNPARSEABLE. Blank is not "slower", it is a model that mostly fails to answer the contract, and
+    // every failure is a retry-then-deny for the user.
     warnings.push(`OPENAI_CLASSIFIER_SAFETY_MODEL is blank, so auto-mode safety verdicts run on ` +
-      `the main model (${v.OPENAI_MODEL}). Measured over 27 live verdicts on a main model: ` +
-      `median 12.2s, p90 54s, 2 past the CLI's 60s deadline, after which it DENIES the action`);
+      `the main model (${v.OPENAI_MODEL}). Measured on the real classifier corpus: 8 of 14 verdicts ` +
+      `were UNPARSEABLE (57%), which the CLI treats as no verdict — it retries and then DENIES the ` +
+      `action. Latency was not the problem (p50 2.4s). See eval/reports/safety-classifier.md`);
   if (v.OPENAI_CLASSIFIER_SLOW_MS >= 60000)
     warnings.push(`OPENAI_CLASSIFIER_SLOW_MS=${v.OPENAI_CLASSIFIER_SLOW_MS} is at or past the CLI's ` +
       `60s fail-closed classifier deadline, so the warning can never fire before the denial`);
