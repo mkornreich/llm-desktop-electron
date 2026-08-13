@@ -35,6 +35,11 @@ import {
   PREFIX_RE, SAFETY_RE, CLASSIFIER_RE, SEVERITY_RE, BLOCK_RE, OPENAI_MODEL_RE,
 } from "./routes.mjs";
 import * as provenance from "../scripts/lib/provenance.mjs";
+import {
+  makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
+  newId as newTurnId,
+} from "./attempts.mjs";
+import { formatMicros, unpricedAmong, RATE_TABLE_VERSION, RATES_SOURCE } from "./model-registry.mjs";
 
 // ---------- config ----------
 // Every setting, its precedence and its coercion now live in config.mjs, which also produces
@@ -433,55 +438,111 @@ if (!OPENAI_API_KEY) {
 // recordUsage() is exported and exercised directly, and it debounce-writes to disk, so tests
 // would otherwise inject fake models into the real accounting file — which they did, until
 // this was added.
-const USAGE_FILE = process.env.PROXY_NO_LISTEN === "1"
-  ? fileURLToPath(new URL("./usage.test-scratch.json", import.meta.url))
-  : fileURLToPath(new URL("./usage.json", import.meta.url));
-let usageState = { since: null, byModel: {} };
-if (process.env.PROXY_NO_LISTEN !== "1") {
-  try { usageState = JSON.parse(fs.readFileSync(USAGE_FILE, "utf8")); } catch { /* first run */ }
-}
-if (!usageState.byModel) usageState = { since: null, byModel: {} };
+// The ledger is v2: per-attempt, tier-aware, integer money. See attempts.mjs for why one
+// reassigned `usage` variable meant a retried turn recorded only its final attempt, and
+// model-registry.mjs for why an aggregate cannot be priced at all.
+let ledger = loadLedger();
 let usageDirty = false, usageTimer = null;
-// `inTok` is OpenAI's convention: cache reads INCLUDED. `cachedTok` is the subset of it that
-// was served from cache, recorded separately because it is the difference between what this
-// proxy moved and what the account is actually billed for — measured at ~96% of input, so a
-// ledger without it overstates billable input by more than an order of magnitude. Note this
-// is the opposite convention to the Anthropic-facing numbers mapUsage() produces, where
-// input_tokens EXCLUDES cache reads; usageSummary() below spells that out.
-function recordUsage(model, inTok, outTok, reasoningTok = 0, cachedTok = 0) {
-  if (!model) return;
-  if (!usageState.since) usageState.since = new Date().toISOString();
-  const m = (usageState.byModel[model] ||= { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_input_tokens: 0 });
-  // A ledger written before cached_input_tokens existed has no such key.
-  if (m.cached_input_tokens === undefined) m.cached_input_tokens = 0;
-  m.requests += 1;
-  m.input_tokens += inTok || 0;
-  m.output_tokens += outTok || 0;
-  m.reasoning_tokens += reasoningTok || 0;
-  m.cached_input_tokens += cachedTok || 0;
+function persistLedger() {
   usageDirty = true;
   // Debounced: a busy agent turn would otherwise rewrite this file dozens of times.
   if (!usageTimer) usageTimer = setTimeout(() => {
     usageTimer = null;
     if (!usageDirty) return;
     usageDirty = false;
-    try { fs.writeFileSync(USAGE_FILE, JSON.stringify(usageState, null, 2)); } catch { /* non-fatal */ }
+    try { saveLedger(ledger); } catch { /* non-fatal: accounting must never fail a turn */ }
   }, 3000);
 }
+
+// Record one upstream request. THE unit of accounting — every call to the API goes through here,
+// including the retries that used to be invisible.
+function recordAttempt(fields) {
+  try {
+    const a = makeAttempt(fields);
+    applyAttempt(ledger, a);
+    persistLedger();
+    return a;
+  } catch (e) {
+    log(`  ! could not record an attempt (${e.message})`);
+    return null;
+  }
+}
+
+// The original signature, kept so existing call sites and tests keep working. `inTok` follows
+// OpenAI's convention with cache reads INCLUDED; `cachedTok` is the subset served from cache.
+//
+// Attributed as `initial` unless the caller says otherwise, which is why the streaming path passes
+// its own kind: a continuation recorded as `initial` would be counted but not explained.
+function recordUsage(model, inTok, outTok, reasoningTok = 0, cachedTok = 0, extra = {}) {
+  if (!model) return;
+  recordAttempt({
+    turnId: extra.turnId || "unknown",
+    kind: extra.kind || KIND.INITIAL,
+    route: extra.route || null,
+    sessionId: extra.sessionId || null,
+    surface: extra.surface || null,
+    requestedModel: extra.requestedModel || null,
+    resolvedModel: model,
+    status: extra.status || "completed",
+    usage: {
+      grossInput: inTok ?? null,
+      cached: cachedTok || 0,
+      output: outTok ?? null,
+      reasoning: reasoningTok || 0,
+    },
+  });
+}
+
 function usageSummary() {
+  // v1-shaped fields are kept alongside the new ones: the settings window and several tests read
+  // them, and a reporting change is not a reason to lose the old vocabulary.
   const totals = { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_input_tokens: 0 };
-  for (const m of Object.values(usageState.byModel)) for (const k of Object.keys(totals)) totals[k] += m[k] || 0;
-  // The figure that actually predicts the bill. Cache reads are a fraction of the price of
-  // fresh input, and they are the overwhelming majority of what this proxy sends, so
-  // input_tokens on its own is not a cost signal.
+  const by_model = {};
+  let micros = 0, unpricedModels = 0;
+  for (const [model, m] of Object.entries(ledger.byModel)) {
+    const b = { requests: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_input_tokens: 0 };
+    for (const tier of ["short", "long"]) {
+      b.requests += m[tier].requests;
+      b.input_tokens += m[tier].grossInput;
+      b.output_tokens += m[tier].output;
+      b.reasoning_tokens += m[tier].reasoning;
+      b.cached_input_tokens += m[tier].cached;
+      micros += m[tier].micros;
+    }
+    if (m.unpriced) unpricedModels++;
+    by_model[model] = { ...b, short: m.short, long: m.long, unpriced: !!m.unpriced };
+    for (const k of Object.keys(totals)) totals[k] += b[k];
+  }
   const fresh = Math.max(0, totals.input_tokens - totals.cached_input_tokens);
   const hitRate = totals.input_tokens ? Math.round((totals.cached_input_tokens / totals.input_tokens) * 1000) / 10 : 0;
-  return { since: usageState.since,
-           total: { ...totals, tokens: totals.input_tokens + totals.output_tokens,
-                    uncached_input_tokens: fresh, cache_hit_rate_pct: hitRate },
-           by_model: usageState.byModel,
-           note: "Counted by this proxy only. input_tokens follows OpenAI's convention and INCLUDES cache reads (the opposite of the Anthropic-facing input_tokens this proxy returns to the client, which excludes them); uncached_input_tokens is the part billed at the full rate. OpenAI has no token allowance to report; the account limit is per-minute (see x-ratelimit-* headers) plus dollar billing. This key cannot read the org usage API." };
+  const exact = unpricedModels === 0 && ledger.attempts.unknownUsage === 0;
+  return {
+    since: ledger.since,
+    total: { ...totals, tokens: totals.input_tokens + totals.output_tokens,
+             uncached_input_tokens: fresh, cache_hit_rate_pct: hitRate },
+    by_model,
+    // The new reporting. Attempts and turns are separate meters; a cost that rests on unknown or
+    // unpriced data says so instead of presenting itself as exact.
+    accounting: {
+      attempts: ledger.attempts,
+      turns: ledger.turns.total,
+      by_route: ledger.byRoute,
+      cost: {
+        micros: exact ? micros : null,
+        formatted: exact ? formatMicros(micros) : `at least ${formatMicros(micros)}`,
+        exact,
+        rateTableVersion: ledger.rateTableVersion || RATE_TABLE_VERSION,
+        source: RATES_SOURCE,
+        longContextAttempts: ledger.attempts.longContext,
+        note: "Long-context pricing (>272,000 input tokens: 2x input, 1.5x output for the whole " +
+          "request) is applied PER REQUEST, which is the only place it can be applied correctly.",
+      },
+    },
+    legacy: ledger.legacy,
+    note: "Counted by this proxy only. input_tokens follows OpenAI's convention and INCLUDES cache reads (the opposite of the Anthropic-facing input_tokens this proxy returns to the client, which excludes them); uncached_input_tokens is the part billed at the full rate. OpenAI has no token allowance to report; the account limit is per-minute (see x-ratelimit-* headers) plus dollar billing. This key cannot read the org usage API.",
+  };
 }
+
 
 // ---------- helpers ----------
 const rid = (p) => p + crypto.randomBytes(16).toString("hex");
@@ -768,7 +829,7 @@ async function summariseDropped(pieces) {
     // ledger never saw — /usage claimed to cover every path while silently omitting it.
     recordUsage(COMPACT_MODEL, j?.usage?.input_tokens, j?.usage?.output_tokens,
                 j?.usage?.output_tokens_details?.reasoning_tokens,
-                j?.usage?.input_tokens_details?.cached_tokens);
+                j?.usage?.input_tokens_details?.cached_tokens, { kind: KIND.COMPACTION_SUMMARY, route: "compaction", surface: "responses" });
     let text = "";
     for (const it of j.output || [])
       if (it.type === "message") for (const c of it.content || []) if (c.type === "output_text") text += c.text || "";
@@ -1671,7 +1732,7 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     emittedTools++;
   }
   recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
-              usage?.prompt_tokens_details?.cached_tokens);
+              usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
   // input_tokens goes in the FINAL delta, not message_start: at message_start the upstream has
   // not reported usage yet, and a placeholder there would be double counted by any client that
   // sums the two events. 0 + the truth is the truth either way.
@@ -2151,6 +2212,10 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
   const unknownEvents = new Set();               // SSE event types this proxy does not handle
   let incompleteReason = null;                   // as reported by the API, never assumed
   let toolWithheld = null;                       // a tool call whose arguments could not be parsed
+  // One turn, one id, so every attempt under it can be grouped and the two meters told apart.
+  const turnId = newTurnId();
+  const turnRoute = isClassifierPayload ? "classifier" : "main";
+  const turnSessionId = null;
   let totalOutTokens = 0;                        // cumulative across continuations
   // The index is assigned HERE, at open time, not when the item first appears. That is what lets a
   // tool block be deferred until its arguments parse: an item can exist, accumulate arguments, and
@@ -2340,6 +2405,14 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
       // every consume() in this file must be followed by its own accumulation.
       await consume(upstream);
       totalOutTokens += usage?.output_tokens || 0;
+      // One upstream response = one attempt. Recorded HERE rather than at the terminal, because
+      // the terminal only ever saw the last `usage` and every earlier attempt was billed and lost.
+      recordAttempt({ turnId, sessionId: turnSessionId, kind: KIND.INITIAL, route: turnRoute,
+                      surface: "responses", resolvedModel: payload?.model,
+                      status: "completed", usage: {
+                        grossInput: usage?.input_tokens ?? null, cached: usage?.input_tokens_details?.cached_tokens || 0,
+                        output: usage?.output_tokens ?? null,
+                        reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
       break;
     } catch (e) {
       if (!isTransportError(e)) throw e;                 // not ours: let the caller report it
@@ -2406,9 +2479,9 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
       (transportRetries ? ` Retried ${transportRetries} time(s).` : "");
     log(`  <- responses stream ABORTED after ${Date.now() - turnStart}ms` +
         ` retries=${transportRetries} text=${textLen}ch tools=${toolCount}`);
-    recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens,
-                usage?.output_tokens_details?.reasoning_tokens,
-                usage?.input_tokens_details?.cached_tokens);
+    // NOT recorded here. Each consume() already recorded its own attempt; recording again at the
+    // terminal would double-count the final one — and recording ONLY here is what lost all the
+    // others.
     // Anthropic's stream carries in-band errors as an `error` event; a bare res.end() after
     // message_start is a silent EOF the client cannot distinguish from success.
     sse(res, "error", { type: "error", error: { type: "api_error", message: detail } });
@@ -2430,9 +2503,9 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     for (const [id] of items) close(id);
     log(`  <- responses stream WITHHELD a tool call after ${Date.now() - turnStart}ms` +
         ` text=${textLen}ch tools=${toolCount}`);
-    recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens,
-                usage?.output_tokens_details?.reasoning_tokens,
-                usage?.input_tokens_details?.cached_tokens);
+    // NOT recorded here. Each consume() already recorded its own attempt; recording again at the
+    // terminal would double-count the final one — and recording ONLY here is what lost all the
+    // others.
     sse(res, "error", { type: "error", error: { type: "api_error", message: toolWithheld.message } });
     sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: "error", stop_sequence: null }, usage: mapUsage(usage, "responses") });
     sse(res, "message_stop", { type: "message_stop" });
@@ -2474,6 +2547,14 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     payload = next;
     await consume(up);
     totalOutTokens += usage?.output_tokens || 0;
+    // One upstream response = one attempt. Recorded HERE rather than at the terminal, because
+    // the terminal only ever saw the last `usage` and every earlier attempt was billed and lost.
+    recordAttempt({ turnId, sessionId: turnSessionId, kind: KIND.TRUNCATION_CONTINUE, route: turnRoute,
+                    surface: "responses", resolvedModel: payload?.model,
+                    status: "completed", usage: {
+                      grossInput: usage?.input_tokens ?? null, cached: usage?.input_tokens_details?.cached_tokens || 0,
+                      output: usage?.output_tokens ?? null,
+                      reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
   }
   if (incomplete && incompleteReason === "max_output_tokens" && totalOutTokens >= MAX_TURN_OUTPUT_TOKENS) {
     log(`  ! stopped continuing at ${totalOutTokens} output tokens (ceiling ${MAX_TURN_OUTPUT_TOKENS}) to stay under the client's per-response maximum`);
@@ -2506,6 +2587,14 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     // This was missing: an auto-continued pass produced tokens that were never added to the
     // turn total, so out_tokens under-reported every time this loop fired.
     totalOutTokens += usage?.output_tokens || 0;
+    // One upstream response = one attempt. Recorded HERE rather than at the terminal, because
+    // the terminal only ever saw the last `usage` and every earlier attempt was billed and lost.
+    recordAttempt({ turnId, sessionId: turnSessionId, kind: KIND.AUTO_CONTINUE, route: turnRoute,
+                    surface: "responses", resolvedModel: payload?.model,
+                    status: "completed", usage: {
+                      grossInput: usage?.input_tokens ?? null, cached: usage?.input_tokens_details?.cached_tokens || 0,
+                      output: usage?.output_tokens ?? null,
+                      reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
   }
 
   // Show the list the agent just changed, since nothing downstream will (issue #7). Emitted
@@ -2556,6 +2645,14 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     streamError = null; sawTerminal = null; incomplete = false; incompleteReason = null;
     await consume(up);
     totalOutTokens += usage?.output_tokens || 0;
+    // One upstream response = one attempt. Recorded HERE rather than at the terminal, because
+    // the terminal only ever saw the last `usage` and every earlier attempt was billed and lost.
+    recordAttempt({ turnId, sessionId: turnSessionId, kind: KIND.CONTEXT_RETRY, route: turnRoute,
+                    surface: "responses", resolvedModel: payload?.model,
+                    status: "completed", usage: {
+                      grossInput: usage?.input_tokens ?? null, cached: usage?.input_tokens_details?.cached_tokens || 0,
+                      output: usage?.output_tokens ?? null,
+                      reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
   }
 
   // An empty turn used to be reported and then abandoned, which stalls the session: the user
@@ -2580,6 +2677,14 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     sawTerminal = null; streamError = null; incomplete = false; incompleteReason = null;
     await consume(up);
     totalOutTokens += usage?.output_tokens || 0;
+    // One upstream response = one attempt. Recorded HERE rather than at the terminal, because
+    // the terminal only ever saw the last `usage` and every earlier attempt was billed and lost.
+    recordAttempt({ turnId, sessionId: turnSessionId, kind: KIND.EMPTY_RETRY, route: turnRoute,
+                    surface: "responses", resolvedModel: payload?.model,
+                    status: "completed", usage: {
+                      grossInput: usage?.input_tokens ?? null, cached: usage?.input_tokens_details?.cached_tokens || 0,
+                      output: usage?.output_tokens ?? null,
+                      reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
   }
 
   // Never hand back a blank turn (issue #1).
@@ -2604,8 +2709,7 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
   } else if (emptyRetries) {
     log(`  -> recovered after ${emptyRetries} empty-turn retr${emptyRetries === 1 ? "y" : "ies"}`);
   }
-  recordUsage(payload?.model, usage?.input_tokens, usage?.output_tokens, usage?.output_tokens_details?.reasoning_tokens,
-              usage?.input_tokens_details?.cached_tokens);
+  // Also not recorded here, for the same reason: consume() owns attempt accounting now.
   const stop = hasTool ? "tool_use" : (incomplete ? "max_tokens" : "end_turn");
   // in_tokens is the authoritative context size for this turn — the same number the client's context
   // meter uses. Logged on the STREAMING path too, which is every real turn; without it the log
@@ -2829,7 +2933,8 @@ const server = http.createServer(async (req, res) => {
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
         }
         recordUsage(model, rj?.usage?.input_tokens, rj?.usage?.output_tokens, rj?.usage?.output_tokens_details?.reasoning_tokens,
-                    rj?.usage?.input_tokens_details?.cached_tokens);
+                    rj?.usage?.input_tokens_details?.cached_tokens, { route, surface: "responses", requestedModel: reqModel,
+                  sessionId: req.headers["x-claude-code-session-id"] || null });
         // fromResponses throws when a tool call's arguments cannot be parsed. Nothing has been
         // sent yet on this path, so the failure becomes a clean error response rather than a
         // tool_use block the agent would execute with empty input.
@@ -2882,7 +2987,8 @@ const server = http.createServer(async (req, res) => {
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
                 oai?.usage?.completion_tokens_details?.reasoning_tokens,
-                oai?.usage?.prompt_tokens_details?.cached_tokens);
+                oai?.usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat", requestedModel: reqModel,
+                sessionId: req.headers["x-claude-code-session-id"] || null });
     logTurnEnd("chat", { usage: { input_tokens: oai?.usage?.prompt_tokens,
                                   output_tokens: oai?.usage?.completion_tokens,
                                   input_tokens_details: { cached_tokens: oai?.usage?.prompt_tokens_details?.cached_tokens } } },
@@ -2965,6 +3071,15 @@ if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   // Both classifier models, always. The safety model decides whether a risky action is allowed to
   // run, and it did not appear here at all — so the single most consequential routing decision the
   // proxy makes was invisible in its own startup log.
+  // A model that will actually be used but has no published rate makes every request through it
+  // unpriced. Worth knowing before the bill rather than after.
+  {
+    const unpriced = unpricedAmong([OPENAI_MODEL, OPENAI_CLASSIFIER_MODEL,
+                                    OPENAI_CLASSIFIER_SAFETY_MODEL || OPENAI_MODEL, COMPACT_MODEL]);
+    if (unpriced.length)
+      log(`  ? no published rate for ${unpriced.join(", ")} — requests on ${unpriced.length > 1 ? "those models" : "that model"} ` +
+          `will be counted but not priced (rate table ${RATE_TABLE_VERSION})`);
+  }
   log(`classifier routing: prefix=${OPENAI_CLASSIFIER_MODEL || `(main: ${OPENAI_MODEL})`}` +
       ` safety=${OPENAI_CLASSIFIER_SAFETY_MODEL === "" ? `(blank -> main: ${OPENAI_MODEL})` : OPENAI_CLASSIFIER_SAFETY_MODEL}` +
       ` compaction=${COMPACT_MODEL}` +

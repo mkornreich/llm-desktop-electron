@@ -575,20 +575,20 @@ test("issue #1: both response paths substitute the notice", () => {
   // non-streaming
   assert.match(src, /if \(!content\.length\) \{\s*\n\s*content\.push\(\{ type: "text", text: emptyTurnNotice\(resp\) \}\)/,
     "non-streaming path must guard empty turns");
-  // Usage must be recorded exactly once per stream. This used to count occurrences of
-  // `recordUsage(payload?.model` in the source and require exactly 1 — which broke the moment a
-  // second, MUTUALLY EXCLUSIVE terminal path was added (the transport-abort path, which ends in
-  // `res.end(); return;` before the normal accounting can run). Counting text cannot tell an
-  // exclusive branch from a duplicate, so assert the property that actually matters: every such
-  // call site is immediately followed by a terminal sequence ending the response.
-  const sites = [...src.matchAll(/recordUsage\(payload\?\.model[\s\S]{0,400}?\n/g)].map((m) => m.index);
-  assert.ok(sites.length >= 1, "the streaming path must record usage");
-  for (const at of sites) {
-    const after = src.slice(at, at + 1400);
-    assert.match(after, /sse\(res, "message_stop"[\s\S]{0,200}res\.end\(\)/,
-      "each streaming recordUsage must belong to a path that terminates the response, so no " +
-      "two of them can run for one turn");
-  }
+  // ACCOUNTING MOVED, and the invariant with it. It used to be "record once per stream, at a
+  // terminating path" — which was the wrong shape: one record per stream is exactly what lost every
+  // attempt but the last on a retried turn. It is now one record per UPSTREAM RESPONSE, taken where
+  // the response is consumed, and the terminals record nothing at all.
+  const consumes = (src.match(/await consume\(/g) || []).length;
+  const attemptRecords = (src.match(/recordAttempt\(\{ turnId/g) || []).length;
+  assert.ok(consumes >= 5, `expected the consume sites to still exist, found ${consumes}`);
+  assert.equal(attemptRecords, consumes,
+    `every consume() must record exactly one attempt: ${consumes} consumes, ${attemptRecords} records`);
+  // And no terminal may record usage, or the final attempt would be counted twice.
+  const fn = src.slice(src.indexOf("async function streamResponses"),
+                       src.indexOf("// ---------- server ----------"));
+  assert.ok(!/recordUsage\(payload\?\.model/.test(fn),
+    "a terminal must not record usage: consume() already did, and doing both double-counts");
   // The abort path must return, or it would fall through into the normal accounting below it.
   assert.match(src, /sse\(res, "message_stop", \{ type: "message_stop" \}\);\s*\n\s*res\.end\(\);\s*\n\s*return;/,
     "the transport-abort terminal must return rather than fall through");
@@ -2197,10 +2197,21 @@ test("every recordUsage call site passes the cached figure and the resolved mode
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   // Require a real first argument, so the function's own definition and any prose mentioning
   // `recordUsage()` are not counted as call sites.
-  const calls = [...src.matchAll(/recordUsage\([A-Za-z][\w?.]*,[^;]*?\);/gs)].map((m) => m[0]);
+  // Both accounting entry points, since the streaming path now records attempts directly. The
+  // property is the same either way: the cached split and the RESOLVED model must be passed, or the
+  // ledger overstates billable input by more than an order of magnitude (~96% of input is cached).
+  const calls = [
+    ...[...src.matchAll(/recordUsage\([A-Za-z][\w?.]*,[^;]*?\);/gs)].map((m) => m[0]),
+    ...[...src.matchAll(/recordAttempt\(\{ turnId[\s\S]{0,600}?\}\);/g)].map((m) => m[0]),
+  ];
   assert.ok(calls.length >= 5, `expected at least five call sites, found ${calls.length}`);
   for (const c of calls) {
     assert.match(c, /cached_tokens/, `call site must pass the cached split: ${c.slice(0, 70)}`);
+  }
+  for (const c of calls.filter((c) => c.startsWith("recordAttempt"))) {
+    assert.match(c, /resolvedModel: payload\?\.model/,
+      "an attempt must be filed under the model that answered it");
+    assert.match(c, /kind: KIND\./, "and must say what caused it, or a retry looks like an initial call");
   }
   // reqModel is the CLIENT's id (claude-opus-4-8); the ledger is keyed on the OpenAI model.
   assert.ok(!/recordUsage\(reqModel\b/.test(src),

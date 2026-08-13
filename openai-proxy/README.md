@@ -24,6 +24,69 @@ Claude Code hardcodes that in its system prompt and requests
 `model: claude-opus-4-8`, so the model just reads it back. The proxy log and the
 child's env are the ground truth; both say OpenAI.
 
+## What it cost, and why the old number was wrong
+
+The ledger counted tokens per model and nothing else. Two things were wrong with pricing it.
+
+### The long-context tier is per request
+
+From the gpt-5.6-sol model page:
+
+> "Prompts with >272K input tokens are priced at 2x input and 1.5x output for the full request."
+
+So a 300K request is not "roughly a 200K request" — every token in it, cached ones included, costs
+double, and output costs half again as much. Measured over 44,571 logged turns from this app:
+
+| | share of requests | share of input tokens |
+|---|---|---|
+| ≤ 272K input | 83.7% | 47.7% |
+| **> 272K input** | **16.3%** | **52.3%** |
+
+A minority of requests carry the majority of the volume. Pricing the aggregate at short-context
+rates therefore understated the measured figure by **43%** — $13,250 against roughly $19,007.
+
+And because the tier is a property of an *individual* request, an aggregate cannot be priced at all:
+once totals are summed the information is gone. That is why accounting is now per attempt. The first
+version of the legacy migration made exactly this mistake in the other direction — it passed the
+6.15-billion-token aggregate through the per-request pricer, which duly reported "greater than
+272,000" and priced the entire history at 2×, producing a $23,536 "lower bound" *above* the real
+figure. Choosing the tier is now explicit at the call site and cannot be reached by accident.
+
+### Retries were never counted
+
+`usage` was a single variable, reassigned by each `consume()`, and the ledger read it once at the
+end of the turn. So a turn that retried recorded **only its last attempt**; the parameter, image,
+effort and context retries inside `callResponses` were never recorded at all. Measured: 206 such
+requests across 45,442 turns — **0.5%**, so worth fixing but never the headline. The tier was.
+
+### Two meters, deliberately not added together
+
+| Meter | Answers | Retries |
+|---|---|---|
+| **attempt** | what the account was billed | included — they were charged |
+| **turn** | what the client was given | excluded from input; output is stitched |
+
+A retry does not multiply the client's context meter: the conversation did not get bigger because
+the proxy asked twice.
+
+### Rules the ledger will not break
+
+- **Unknown is never zero.** An interrupted stream reports no usage; recording 0 would claim it was
+  free. It records `unknown` and counts how often, so a total can never quietly rest on absent data.
+- **A rejected request is known-zero, not unknown.** A 400 for an unsupported parameter generated no
+  tokens. Conflating it with a real unknown would hide the genuine ones in a crowd.
+- **An unknown model is unpriced, never estimated.** A plausible number nobody verified looks like an
+  answer and cannot be corrected. The startup log warns if a configured model has no rate.
+- **Reasoning is never charged twice.** OpenAI bills it inside `output_tokens`; at effort `max`
+  reasoning is ~57% of output here, so adding it would inflate every agent turn.
+- **Integer micro-dollars.** A total that changes with the order it was summed in is not a total.
+- **The rate-table version travels with the figures**, so totals priced under different tables are
+  distinguishable rather than silently mixed.
+
+`GET /usage` reports attempts by kind, by route, per model split by tier, and a cost that says
+whether it is exact. The pre-existing aggregate is carried as a labelled **floor**, never folded into
+the new totals — mixing an exact figure with an estimate produces something that is neither.
+
 ## A classifier cannot inherit a model
 
 Claude Code asks the proxy whether a risky action is allowed, gives the answer a **60-second
