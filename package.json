@@ -12,6 +12,6 @@
   },
   "devDependencies": {
     "classic-level": "^3.0.0",
-    "electron": "43.2.0"
+    "electron": "42.9.2"
   }
 }

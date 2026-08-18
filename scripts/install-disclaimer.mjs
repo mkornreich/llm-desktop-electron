@@ -75,7 +75,17 @@ export function main(argv = process.argv.slice(2)) {
     "..",
   );
   const repo = path.resolve(argv[0] ?? ownRepo);
-  const result = installDisclaimer({ repo });
+  // The app resolves the helper as join(dirname(process.resourcesPath), "Helpers",
+  // "disclaimer"). resourcesPath differs by platform, so the Helpers dir does too:
+  //   macOS  <dist>/Electron.app/Contents/Resources -> <dist>/Electron.app/Contents/Helpers
+  //   linux  <dist>/resources                        -> <dist>/Helpers
+  //   win32  <dist>/resources                        -> <dist>/Helpers
+  const dist = path.join(repo, "node_modules/electron/dist");
+  const helpersDir =
+    process.platform === "darwin"
+      ? path.join(dist, "Electron.app/Contents/Helpers")
+      : path.join(dist, "Helpers");
+  const result = installDisclaimer({ repo, helpersDir });
   console.log(
     `[disclaimer] ${result.action}: ${result.destination} -> ${result.source}`,
   );
