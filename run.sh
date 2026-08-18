@@ -18,7 +18,21 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ELECTRON=./node_modules/.bin/electron
-RES="node_modules/electron/dist/Electron.app/Contents/Resources"
+
+# Platform-specific layout. The macOS Electron nests everything under Electron.app/Contents;
+# a stock Linux (or Windows) Electron uses a flat dist with a top-level resources/ dir, and
+# the app resolves its Helpers dir as dirname(resourcesPath)/Helpers accordingly. The Claude
+# Desktop profile that session-sync reads from also lives in a different place per OS.
+case "$(uname -s)" in
+  Darwin)
+    RES="node_modules/electron/dist/Electron.app/Contents/Resources"
+    CLAUDE_SUPPORT="$HOME/Library/Application Support/Claude"
+    ;;
+  *)  # Linux (and Windows via Git Bash/WSL): flat dist, XDG config dir
+    RES="node_modules/electron/dist/resources"
+    CLAUDE_SUPPORT="$HOME/.config/Claude"
+    ;;
+esac
 
 # Self-heal the layout symlink. A handful of the app's worker paths are resolved
 # as  <electron resourcesPath>/app.asar/...  with no unpacked fallback (e.g. the
@@ -237,7 +251,7 @@ fi
 #   a whole workspace directory, not one json, so it matches every file.
 share_store() {
   local name="$1" pattern="$2" label="$3"
-  local src="$HOME/Library/Application Support/Claude/$name"
+  local src="$CLAUDE_SUPPORT/$name"
   local dst="$PWD/user-data/$name"
   if [ ! -d "$src" ]; then
     echo "[run] NOTE: no Claude Desktop $label store at $src — leaving this build's own alone"
@@ -275,7 +289,7 @@ share_store() {
   fi
 }
 
-SYNC_VAL=$(sed -n 's/^SYNC_CLAUDE_SESSIONS=//p' .sync 2>/dev/null | head -1)
+SYNC_VAL="${SYNC_CLAUDE_SESSIONS:-$(sed -n 's/^SYNC_CLAUDE_SESSIONS=//p' .sync 2>/dev/null | head -1)}"
 if [ "${SYNC_VAL:-1}" != "0" ]; then
   share_store "claude-code-sessions" "local_*.json" "sessions"
   # The cowork / agent-mode store: same <user>/<org> layout, but a session is a whole
@@ -310,7 +324,7 @@ fi
 # other lacked. scripts/sync-grouping.mjs instead merges the union of the two, key by key, and
 # writes only the profiles whose app is closed. At this point in the launch that is always at
 # least this build, and Claude Desktop too if it happens to be shut.
-SYNC_GROUPING=$(sed -n 's/^SYNC_CLAUDE_GROUPING=//p' .sync 2>/dev/null | head -1)
+SYNC_GROUPING="${SYNC_CLAUDE_GROUPING:-$(sed -n 's/^SYNC_CLAUDE_GROUPING=//p' .sync 2>/dev/null | head -1)}"
 if [ "${SYNC_GROUPING:-1}" != "0" ] && command -v node >/dev/null 2>&1; then
   node scripts/sync-grouping.mjs --launch 2>&1 | sed 's/^/[run] /'
 fi
