@@ -15,8 +15,8 @@ import {
 } from "./config.mjs";
 
 // Resolve against explicit sources so the developer's own dotfiles cannot change a result.
-const R = (env = {}, project = {}, home = {}) => resolve({ env, project, home }).values;
-const S = (env = {}, project = {}, home = {}) => resolve({ env, project, home }).sources;
+const R = (env = {}, project = {}, home = {}, keyfile = {}) => resolve({ env, project, home, keyfile }).values;
+const S = (env = {}, project = {}, home = {}, keyfile = {}) => resolve({ env, project, home, keyfile }).sources;
 
 test("with nothing configured, every setting resolves to its documented default", () => {
   const v = R();
@@ -57,10 +57,17 @@ test("environment beats the project file, which beats the home file", () => {
   assert.equal(R({}, project, home).OPENAI_MODEL, "from-project");
   assert.equal(R({}, {}, home).OPENAI_MODEL, "from-home");
   assert.equal(R({}, {}, {}).OPENAI_MODEL, "gpt-4.1");
-  // The key follows the same ladder, and the home file is the one that normally holds it.
-  assert.equal(R({ OPENAI_API_KEY: "e" }, project, home).OPENAI_API_KEY, "e");
-  assert.equal(R({}, project, home).OPENAI_API_KEY, "project-key");
-  assert.equal(R({}, {}, home).OPENAI_API_KEY, "home-key");
+});
+
+test("the API key resolves env > project > its own .openai-key file, not the home file", () => {
+  const project = { apiKey: "project-key" };
+  const keyfile = { apiKey: "keyfile-key" };
+  assert.equal(R({ OPENAI_API_KEY: "e" }, project, {}, keyfile).OPENAI_API_KEY, "e");
+  assert.equal(R({}, project, {}, keyfile).OPENAI_API_KEY, "project-key");
+  assert.equal(R({}, {}, {}, keyfile).OPENAI_API_KEY, "keyfile-key");
+  assert.equal(S({}, {}, {}, keyfile).OPENAI_API_KEY, "keyfile");
+  // The home file (~/.dbeaver-ai-complete) no longer supplies the key: apiKey there is ignored.
+  assert.equal(R({}, {}, { apiKey: "home-key" }, {}).OPENAI_API_KEY, "");
 });
 
 test("the legacy project key `model` is still honoured, below the current name", () => {
@@ -326,9 +333,10 @@ test("validation rejects values that parse but cannot work", () => {
   assert.match(bad({ OPENAI_VERBOSITY: "shouty" }).join(), /VERBOSITY/);
   assert.match(bad({ OPENAI_BASE_URL: "not a url" }).join(), /BASE_URL/);
   // A missing key is an error, and it names every place it looked rather than just failing.
-  const noKey = validate({ resolved: resolve({ env: {}, project: {}, home: {} }) }).errors.join();
+  const noKey = validate({ resolved: resolve({ env: {}, project: {}, home: {}, keyfile: {} }) }).errors.join();
   assert.match(noKey, /API key/);
   assert.match(noKey, /\.openai-model/);
+  assert.match(noKey, /\.openai-key/);
 });
 
 test("validation warns about the tool-dropping configuration, without blocking it", () => {

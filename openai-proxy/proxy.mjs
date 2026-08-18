@@ -5,10 +5,10 @@
 // point ANTHROPIC_BASE_URL at it), and calls OpenAI's Chat Completions API on the
 // back. Handles non-streaming and SSE streaming, plus best-effort tool-calls.
 //
-// Config is read at runtime from ~/.dbeaver-ai-complete (KEY=VALUE):
-//   apiKey=sk-...        (OpenAI key; never logged)
-//   model=gpt-4.1        (target OpenAI model)
-//   maxTokens, temperature  (fallback defaults)
+// Config is read at runtime (KEY=VALUE files):
+//   apiKey=sk-...        (OpenAI key; never logged) from .openai-key, its own gitignored file
+//   model=gpt-4.1        (target OpenAI model) from .openai-model, or ~/.dbeaver-ai-complete
+//   maxTokens, temperature  (fallback defaults) from ~/.dbeaver-ai-complete
 // Env overrides: OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL, PORT.
 //
 // Usage:  node proxy.mjs        (listens on http://127.0.0.1:8123)
@@ -458,7 +458,7 @@ const DEFAULT_TEMP = CFG.DEFAULT_TEMP;
 const PORT = CFG.PORT;
 
 if (!OPENAI_API_KEY) {
-  console.error("[proxy] FATAL: no OpenAI API key (set apiKey in ~/.dbeaver-ai-complete or OPENAI_API_KEY)");
+  console.error("[proxy] FATAL: no OpenAI API key (put `apiKey=sk-...` in .openai-key, or set OPENAI_API_KEY)");
   process.exit(1);
 }
 

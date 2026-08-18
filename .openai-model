@@ -1,6 +1,7 @@
 # OpenAI model config for this project (read by openai-proxy/proxy.mjs).
-# The API key stays in ~/.dbeaver-ai-complete; only model choices live here.
-# Precedence: OPENAI_MODEL env var > this file > ~/.dbeaver-ai-complete > default (gpt-4.1).
+# The API key lives in .openai-key (its own gitignored file in this folder); only model
+# choices live here. Model precedence: OPENAI_MODEL env var > this file > ~/.dbeaver-ai-complete
+# > default (gpt-4.1).
 
 # Main coding model.
 #

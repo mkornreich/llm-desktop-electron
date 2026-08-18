@@ -51,6 +51,10 @@ export function loadKV(path) {
 export const HOME_FILE = os.homedir() + "/.dbeaver-ai-complete";
 export const PROJECT_FILE = fileURLToPath(new URL("../.openai-model", import.meta.url));
 export const PROVIDER_FILE = fileURLToPath(new URL("../.provider", import.meta.url));
+// The secret OpenAI API key lives in its OWN file in the application folder, `.openai-key`
+// (`apiKey=…`, gitignored). Kept out of the committed `.openai-model` and out of DBeaver's
+// `~/.dbeaver-ai-complete`, so the key has a single, private, app-local home on every platform.
+export const KEY_FILE = fileURLToPath(new URL("../.openai-key", import.meta.url));
 
 // ---------- types ----------
 //
@@ -82,9 +86,13 @@ const TYPES = {
 // `env`      environment variable, always highest precedence
 // `project`  key(s) in ./.openai-model, in order — a list where an older key name is still
 //            honoured (OPENAI_MODEL then the legacy `model`)
-// `home`     key in ~/.dbeaver-ai-complete. That file belongs to DBeaver; only the three
-//            keys listed here are read from it, and `maxTokens` is deliberately NOT one of
-//            them (it carries 512, which starves an agent request that omits max_tokens).
+// `keyfile`  key in ./.openai-key, the application-folder file dedicated to the secret API
+//            key. Its own gitignored file — not the committed .openai-model, not DBeaver's
+//            ~/.dbeaver-ai-complete. Only OPENAI_API_KEY reads from it.
+// `home`     key in ~/.dbeaver-ai-complete. That file belongs to DBeaver; only the two keys
+//            still listed here (`model`, `temperature`) are read from it, and `maxTokens` is
+//            deliberately NOT one of them (it carries 512, which starves an agent request that
+//            omits max_tokens). The API key no longer comes from here — see `keyfile`.
 // `secret`   never appears in a snapshot, a log, or the hash input — only its fingerprint
 // `derived`  computed from other settings; see resolve()
 //
@@ -92,7 +100,7 @@ const TYPES = {
 // the wire-level and probe-level knobs that were never meant to be persisted per project,
 // and the settings window does not offer them.
 export const SETTINGS = [
-  { name: "OPENAI_API_KEY", env: "OPENAI_API_KEY", project: ["apiKey"], home: "apiKey",
+  { name: "OPENAI_API_KEY", env: "OPENAI_API_KEY", project: ["apiKey"], keyfile: "apiKey",
     type: "str", default: "", secret: true },
 
   { name: "OPENAI_MODEL", env: "OPENAI_MODEL", project: ["OPENAI_MODEL", "model"], home: "model",
@@ -212,13 +220,15 @@ const BY_NAME = new Map(SETTINGS.map((s) => [s.name, s]));
 
 // ---------- resolution ----------
 
-// Returns { values, sources } where sources[name] is "env" | "project" | "home" | "default",
-// so a snapshot can say WHERE a value came from. That distinction is the whole point of item
-// 6 of the phase: a one-launch `OPENAI_MODEL=x ./run.sh` override and a persisted setting look
-// identical in the resolved value and could not be told apart before.
-export function resolve({ env = process.env, project, home } = {}) {
+// Returns { values, sources } where sources[name] is
+// "env" | "project" | "keyfile" | "home" | "default", so a snapshot can say WHERE a value came
+// from. That distinction is the whole point of item 6 of the phase: a one-launch
+// `OPENAI_MODEL=x ./run.sh` override and a persisted setting look identical in the resolved
+// value and could not be told apart before.
+export function resolve({ env = process.env, project, home, keyfile } = {}) {
   const P = project ?? loadKV(PROJECT_FILE);
   const H = home ?? loadKV(HOME_FILE);
+  const K = keyfile ?? loadKV(KEY_FILE);
   const values = {};
   const sources = {};
 
@@ -231,6 +241,7 @@ export function resolve({ env = process.env, project, home } = {}) {
     for (const k of s.project || []) {
       if (usable(P[k])) return [P[k], "project"];
     }
+    if (s.keyfile && usable(K[s.keyfile])) return [K[s.keyfile], "keyfile"];
     if (s.home && usable(H[s.home])) return [H[s.home], "home"];
     return [undefined, "default"];
   };
@@ -398,7 +409,7 @@ export function validate(opts = {}) {
   if (v.OPENAI_CLASSIFIER_SLOW_MS >= 60000)
     warnings.push(`OPENAI_CLASSIFIER_SLOW_MS=${v.OPENAI_CLASSIFIER_SLOW_MS} is at or past the CLI's ` +
       `60s fail-closed classifier deadline, so the warning can never fire before the denial`);
-  if (!v.OPENAI_API_KEY) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, ${HOME_FILE})`);
+  if (!v.OPENAI_API_KEY) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, .openai-key)`);
 
   return { errors, warnings };
 }

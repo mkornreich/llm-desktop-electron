@@ -72,10 +72,10 @@ The full list — around thirty knobs, each documented with the bug that motivat
 is in [openai-proxy/README.md](openai-proxy/README.md).
 
 Instead of environment variables you can put `KEY=VALUE` lines in
-`.openai-model` at the repo root (checked in, for non-secrets) or in
-`~/.dbeaver-ai-complete` (a pre-existing per-user file this proxy will read an
-`apiKey=` from if it happens to exist). Precedence is env var → project file →
-user file → default.
+`.openai-model` at the repo root (checked in, for non-secrets). The secret
+**API key** goes in its own gitignored file, **`.openai-key`** at the repo root
+(`apiKey=…`; copy `.openai-key.example` to start). Precedence is env var →
+`.openai-model` → `.openai-key` → default.
 
 That precedence lives in exactly one place, [`openai-proxy/config.mjs`](openai-proxy/config.mjs),
 which also produces the config hash below. To see what a launch would actually use:
