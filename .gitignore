@@ -1,3 +1,7 @@
+# The OpenAI API key. Lives in its own app-folder file (openai-proxy/config.mjs reads
+# `apiKey=` from it). A secret — never commit it. Copy .openai-key.example to start.
+.openai-key
+
 # Electron runtime — reinstall with `npm install` (also holds the
 # Resources/app.asar symlink, which run.sh recreates on launch)
 node_modules/

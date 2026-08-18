@@ -8,7 +8,7 @@ import fs from "node:fs";
 // depend on the machine. `resolve({env:{},project:{},home:{}})` is the shipped default.
 import { resolve as resolveConfig } from "./config.mjs";
 import { ROUTE, modelForRoute, policyFor, routeFor } from "./routes.mjs";
-const DEFAULTS = resolveConfig({ env: {}, project: {}, home: {} }).values;
+const DEFAULTS = resolveConfig({ env: {}, project: {}, home: {}, keyfile: {} }).values;
 
 process.env.PROXY_NO_LISTEN = "1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
@@ -1026,7 +1026,7 @@ test("an explicitly blank safety model means the main model, and absent means th
     "MAIN", "blank means the main model");
   assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, { ...cfg, safetyModel: "SAFE" }), "SAFE");
   // Resolution-level: absent takes the pinned default, blank survives as blank.
-  const R = (project) => resolveConfig({ env: {}, project, home: {} }).values.OPENAI_CLASSIFIER_SAFETY_MODEL;
+  const R = (project) => resolveConfig({ env: {}, project, home: {}, keyfile: {} }).values.OPENAI_CLASSIFIER_SAFETY_MODEL;
   assert.equal(R({}), "gpt-5.4-2026-03-05");
   assert.equal(R({ OPENAI_CLASSIFIER_SAFETY_MODEL: "" }), "");
 });

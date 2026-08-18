@@ -1,0 +1,15 @@
+# OpenAI API key for the translation proxy (PROVIDER=openai mode).
+#
+# This is the key's own file, in the application folder. To use it:
+#
+#     cp .openai-key.example .openai-key
+#     # then edit .openai-key and paste your real key after apiKey=
+#
+# `.openai-key` is gitignored, so the secret never gets committed. Same on macOS and Linux.
+# Format is KEY=VALUE (the same parser as .openai-model / .provider). Only `apiKey` is read.
+#
+# Resolution precedence for the key (highest first): the OPENAI_API_KEY env var, then an
+# `apiKey=` in the checked-in .openai-model, then this file. It is no longer read from
+# ~/.dbeaver-ai-complete.
+
+apiKey=sk-your-key-here
