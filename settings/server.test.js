@@ -75,7 +75,7 @@ test("status separates what is configured from what is actually running", async 
     assert.ok(body.configured, "there must be a configured view");
     assert.match(body.configured.configHash, /^[0-9a-f]{16}$/);
     assert.match(body.configured.codeVersion, /^[0-9a-f]{12}$/);
-    assert.ok(["openai", "anthropic"].includes(body.configured.provider));
+    assert.ok(["openai", "anthropic", "local"].includes(body.configured.provider));
     // And a separate answer for what the running proxy is, which may be none of the above.
     assert.ok(["absent", "foreign", "stale", "ours"].includes(body.proxyState),
       `unexpected proxyState ${body.proxyState}`);
@@ -162,7 +162,7 @@ test("provenance is exposed, and a cross-provider session is flagged", async () 
     assert.equal(row.epochs, 2);
     // Whether it matches what is configured NOW is a separate question from what answered then.
     assert.equal(typeof row.staleForCurrentProvider, "boolean");
-    assert.ok(["openai", "anthropic"].includes(body.configured));
+    assert.ok(["openai", "anthropic", "local"].includes(body.configured));
     // No prompt text, and no key material, ever reaches this endpoint.
     const text = JSON.stringify(body);
     assert.ok(!text.includes("sk-"));

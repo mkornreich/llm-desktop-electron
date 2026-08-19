@@ -19,6 +19,32 @@ const SCHEMA = [
     label: "Model backing the agent",
     help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. Only the agent is affected; the chat window is always remote claude.ai." },
 
+  // The local (on-device) model, its own file. .local-model reuses the OPENAI_MODEL/OPENAI_API
+  // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)
+  // plus a `fileKey` (the actual line written to .local-model) to avoid colliding with the
+  // .openai-model group above.
+  { group: "Local model", file: ".local-model", key: "LOCAL_MODEL", fileKey: "OPENAI_MODEL",
+    type: "ollama", default: "", placeholder: "qwen2.5:7b-instruct",
+    label: "On-device model",
+    help: "The Ollama model the agent runs when PROVIDER=local. The dropdown lists models installed in Ollama (managed :11435 and system :11434); pull more with `ollama pull <name>` and reopen this window. Give a model its context with a CONTEXT_<model>=<tokens> line in .local-model — run.sh sizes the managed instance from it." },
+  { group: "Local model", file: ".local-model", key: "LOCAL_API", fileKey: "OPENAI_API",
+    type: "enum", options: ["chat", "responses"], default: "chat",
+    label: "API surface",
+    help: "Ollama's OpenAI-compatible endpoint speaks Chat Completions, so this is normally 'chat'. Chat caps tools at 128 while this app sends 200+, so some are dropped — a limit of the local server, not the proxy." },
+  { group: "Local model", file: ".local-model", key: "OLLAMA_AUTOSTART", type: "bool",
+    default: "1", label: "Auto-start a managed Ollama",
+    help: "On: run.sh brings up its own Ollama on the managed port with the context and GPU tuning below, sharing the system Ollama's models. Off: you run and size Ollama yourself and the proxy talks to OPENAI_BASE_URL from .local-model." },
+  { group: "Local model", file: ".local-model", key: "LOCAL_CONTEXT", type: "ollama-context",
+    default: "32768", label: "Context window (tokens)",
+    help: "Per model: the tokens the managed Ollama loads the SELECTED model with. Saved as a CONTEXT_<model> line in .local-model — run.sh reads it and it overrides the OLLAMA_CONTEXT_LENGTH default. Picking a different model above shows that model's context. Bigger costs VRAM; the q8_0 KV cache and flash attention roughly halve it." },
+  { group: "Local model", file: ".local-model", key: "OLLAMA_KEEP_ALIVE", type: "text",
+    default: "30m", placeholder: "30m",
+    label: "Keep the model loaded for",
+    help: "How long Ollama keeps the model resident after the last request (e.g. 30m, 1h, 0 to unload immediately, -1 to keep forever). run.sh also unloads it from the GPU when the app exits." },
+  { group: "Local model", file: ".local-model", key: "OLLAMA_MANAGED_PORT", type: "int",
+    default: "11435", label: "Managed Ollama port",
+    help: "The side port run.sh runs its own Ollama on, kept off the system Ollama's 11434 so the two never fight over a bound port." },
+
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",
     suggestions: ["gpt-5.6-sol", "gpt-5.5", "gpt-5.3-codex", "gpt-5.4", "gpt-4.1"],
@@ -155,7 +181,7 @@ function readValues() {
   const result = {};
   for (const item of SCHEMA) {
     cache[item.file] ||= readFile(item.file).values;
-    const raw = cache[item.file][item.key];
+    const raw = cache[item.file][item.fileKey || item.key];
     result[item.key] = { value: raw === undefined ? item.default : raw, fromFile: raw !== undefined };
   }
   return result;
@@ -167,9 +193,13 @@ function writeValues(updates) {
   const byFile = new Map();
   for (const [key, value] of Object.entries(updates)) {
     const item = SCHEMA.find((s) => s.key === key);
-    if (!item) continue;                                   // ignore unknown keys
-    if (!byFile.has(item.file)) byFile.set(item.file, []);
-    byFile.get(item.file).push([key, String(value)]);
+    // Per-model context lines (CONTEXT_<model>) are written straight to .local-model even though
+    // they are not fixed schema keys — the model picker generates the key from the selection.
+    const file = item ? item.file : (/^CONTEXT_.+/.test(key) ? ".local-model" : null);
+    const fileKey = item ? (item.fileKey || item.key) : key;
+    if (!file) continue;                                   // ignore unknown keys
+    if (!byFile.has(file)) byFile.set(file, []);
+    byFile.get(file).push([fileKey, String(value)]);
   }
   const written = [];
   for (const [file, pairs] of byFile) {

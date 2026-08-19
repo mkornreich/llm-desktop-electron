@@ -38,10 +38,27 @@ if [ -z "${URL:-}" ]; then
 fi
 echo "[settings] $URL"
 
-# Prefer a chrome-less app window; fall back to the default browser.
-for app in "Google Chrome Canary" "Google Chrome" "Microsoft Edge" "Brave Browser"; do
-  if [ -d "/Applications/${app}.app" ]; then
-    open -na "$app" --args --app="$URL" --window-size=920,940 && exit 0
+# Prefer a chrome-less app window; fall back to the default browser. macOS drives it with
+# `open`; Linux has no `open`, so try a Chromium-family browser in --app mode and finally
+# xdg-open — without this the server started but the window never opened on Linux.
+if [ "$(uname -s)" = "Darwin" ]; then
+  for app in "Google Chrome Canary" "Google Chrome" "Microsoft Edge" "Brave Browser"; do
+    if [ -d "/Applications/${app}.app" ]; then
+      open -na "$app" --args --app="$URL" --window-size=920,940 && exit 0
+    fi
+  done
+  open "$URL"
+  exit 0
+fi
+# Linux: a Chromium-family browser gives the same chrome-less window; else the default handler.
+for bin in google-chrome-stable google-chrome chromium chromium-browser brave brave-browser microsoft-edge; do
+  if command -v "$bin" >/dev/null 2>&1; then
+    ( nohup "$bin" --app="$URL" --window-size=920,940 >/dev/null 2>&1 & )
+    exit 0
   fi
 done
-open "$URL"
+if command -v xdg-open >/dev/null 2>&1; then
+  ( nohup xdg-open "$URL" >/dev/null 2>&1 & )
+  exit 0
+fi
+echo "[settings] no browser launcher found — open this URL yourself: $URL"

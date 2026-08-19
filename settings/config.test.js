@@ -124,7 +124,7 @@ test("the schema covers every parameter the proxy and launcher read", () => {
 test("every schema entry is well formed", () => {
   for (const s of SCHEMA) {
     assert.ok(s.file && s.key && s.type && s.label, `incomplete entry: ${s.key}`);
-    assert.ok(["bool", "int", "text", "enum"].includes(s.type), `bad type on ${s.key}`);
+    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context"].includes(s.type), `bad type on ${s.key}`);
     if (s.type === "enum") assert.ok(Array.isArray(s.options) && s.options.length, `enum ${s.key} needs options`);
     assert.ok(s.default !== undefined, `${s.key} needs a default`);
   }

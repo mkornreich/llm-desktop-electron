@@ -107,24 +107,34 @@ window.settings = {
   status:   ()        => api("/api/status"),
   provenance: ()      => api("/api/provenance?limit=200"),
   relaunch: ()        => api("/api/relaunch", { method: "POST" }),
+  ollamaModels: ()    => api("/api/ollama-models"),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {};
+// The context a given local model launches with: its CONTEXT_<model> line, else the file default.
+const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 
 const isBoolOn = (v) => v === "1" || v === "true";
 
 function setMsg(text, cls) { const m = $("#msg"); m.textContent = text || ""; m.className = "msg" + (cls ? " " + cls : ""); }
 
-function dirtyKeys() { return Object.keys(DRAFT).filter((k) => DRAFT[k] !== CURRENT[k].value); }
+function dirtyKeys() {
+  return Object.keys(DRAFT).filter((k) => {
+    // The context field is per-model: it is dirty against the SELECTED model's saved context.
+    if (k === "LOCAL_CONTEXT") return DRAFT.LOCAL_CONTEXT !== modelCtx(DRAFT.LOCAL_MODEL);
+    return CURRENT[k] && DRAFT[k] !== CURRENT[k].value;
+  });
+}
 
 function refreshDirty() {
-  const d = dirtyKeys();
+  const d = dirtyKeys(); const ds = new Set(d);
   $("#save").disabled = d.length === 0;
   $("#revert").disabled = d.length === 0;
   for (const s of SCHEMA) {
     const row = document.getElementById("row-" + s.key);
-    if (row) row.classList.toggle("changed", DRAFT[s.key] !== CURRENT[s.key].value);
+    if (row) row.classList.toggle("changed", ds.has(s.key));
   }
   setMsg(d.length ? `${d.length} unsaved change${d.length > 1 ? "s" : ""}` : "", d.length ? "warn" : "");
 }
@@ -133,6 +143,10 @@ function refreshDirty() {
 // CLAUDE_CODE_* keys only for the proxy path, and several hold OpenAI model ids that Anthropic
 // would reject outright. .provider, .privacy and .sync apply either way.
 const OPENAI_ONLY = (s) => s.file === ".openai-model";
+const LOCAL_ONLY = (s) => s.file === ".local-model";
+// .openai-model applies in openai (and local) mode; .local-model only in local mode. Inert rows
+// are dimmed and marked, never hidden or cleared — the value still applies when you switch back.
+const isInert = (s) => (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s)) || (DRAFT.PROVIDER !== "local" && LOCAL_ONLY(s));
 
 function control(s) {
   const v = DRAFT[s.key];
@@ -147,6 +161,32 @@ function control(s) {
     }
     sel.onchange = () => { DRAFT[s.key] = sel.value; render(); };
     return sel;
+  }
+  if (s.type === "ollama") {
+    // Model picker: a dropdown of installed Ollama models (+ the current value, so a model that is
+    // set but not installed is not silently dropped). Picking one snaps the context field to that
+    // model's context. Falls back to a text field when no models are found (Ollama not running).
+    const cur = DRAFT[s.key] || "";
+    const opts = [...new Set([...(cur ? [cur] : []), ...OLLAMA_MODELS])];
+    if (!opts.length) {
+      const i = document.createElement("input"); i.type = "text";
+      i.value = cur; if (s.placeholder) i.placeholder = s.placeholder;
+      i.onchange = () => { DRAFT[s.key] = i.value.trim(); DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT[s.key]); render(); };
+      return i;
+    }
+    const sel = document.createElement("select");
+    for (const o of opts) {
+      const op = document.createElement("option"); op.value = o; op.textContent = o;
+      if (o === cur) op.selected = true; sel.append(op);
+    }
+    sel.onchange = () => { DRAFT[s.key] = sel.value; DRAFT.LOCAL_CONTEXT = modelCtx(sel.value); render(); };
+    return sel;
+  }
+  if (s.type === "ollama-context") {
+    const i = document.createElement("input"); i.type = "number";
+    i.value = DRAFT[s.key] ?? modelCtx(DRAFT.LOCAL_MODEL);
+    i.oninput = () => { DRAFT[s.key] = i.value.trim(); refreshDirty(); };
+    return i;
   }
   if (s.type === "bool") {
     const w = document.createElement("label"); w.className = "sw";
@@ -204,7 +244,7 @@ function render() {
       const row = document.createElement("div"); row.className = "row"; row.id = "row-" + s.key;
       const left = document.createElement("div");
       const lab = document.createElement("label"); lab.textContent = s.label;
-      const key = document.createElement("span"); key.className = "key"; key.textContent = s.key;
+      const key = document.createElement("span"); key.className = "key"; key.textContent = s.fileKey || s.key;
       lab.append(key);
       const help = document.createElement("div"); help.className = "help"; help.textContent = s.help || "";
       left.append(lab, help);
@@ -212,10 +252,12 @@ function render() {
       // several hold OpenAI model ids that Anthropic would simply reject. They are marked, not
       // hidden and never cleared: the value is still what will be used the moment the provider
       // goes back to openai, and deleting it would lose a deliberate choice.
-      if (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s)) {
+      if (isInert(s)) {
         row.classList.add("inert");
         const n = document.createElement("div"); n.className = "help inert-note";
-        n.textContent = "Not in effect: the agent is set to Anthropic. Saved, and applied again when you switch back to OpenAI.";
+        n.textContent = LOCAL_ONLY(s)
+          ? "Not in effect: the agent is not set to local. Saved, and applied when you switch the provider to local."
+          : "Not in effect: the agent is set to Anthropic. Saved, and applied again when you switch back to OpenAI.";
         left.append(n);
       }
       const ctl = document.createElement("div"); ctl.className = "ctl"; ctl.append(control(s));
@@ -308,19 +350,28 @@ async function refreshStatus() {
 }
 
 async function load() {
-  const { schema, values } = await window.settings.read();
-  SCHEMA = schema; CURRENT = values;
-  DRAFT = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v.value]));
+  const res = await window.settings.read();
+  SCHEMA = res.schema; CURRENT = res.values; LOCAL_MODEL_FILE = res.localModel || {};
+  DRAFT = Object.fromEntries(Object.entries(res.values).map(([k, v]) => [k, v.value]));
+  DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT.LOCAL_MODEL);
   render();
+  // Installed-model list is a best-effort enhancement; a missing Ollama must not block the form.
+  try { OLLAMA_MODELS = (await window.settings.ollamaModels()).models || []; render(); } catch { /* no Ollama */ }
 }
 
 async function save() {
   const d = dirtyKeys();
   if (!d.length) return {};
-  const updates = Object.fromEntries(d.map((k) => [k, DRAFT[k]]));
+  const updates = {};
+  for (const k of d) {
+    // The per-model context saves as CONTEXT_<selected model>, not a fixed key.
+    if (k === "LOCAL_CONTEXT") { if (DRAFT.LOCAL_MODEL) updates["CONTEXT_" + DRAFT.LOCAL_MODEL] = DRAFT.LOCAL_CONTEXT; }
+    else updates[k] = DRAFT[k];
+  }
   const res = await window.settings.write(updates);
-  CURRENT = res.values;
+  CURRENT = res.values; LOCAL_MODEL_FILE = res.localModel || LOCAL_MODEL_FILE;
   DRAFT = Object.fromEntries(Object.entries(res.values).map(([k, v]) => [k, v.value]));
+  DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT.LOCAL_MODEL);
   render();
   setMsg(`Saved to ${res.written.join(", ")}`, "ok");
   return res;
@@ -329,6 +380,7 @@ async function save() {
 $("#save").onclick = () => save().catch((e) => setMsg("Save failed: " + e.message, "warn"));
 $("#revert").onclick = () => {
   DRAFT = Object.fromEntries(Object.entries(CURRENT).map(([k, v]) => [k, v.value]));
+  DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT.LOCAL_MODEL);
   render(); setMsg("Reverted", "");
 };
 $("#relaunch").onclick = async () => {

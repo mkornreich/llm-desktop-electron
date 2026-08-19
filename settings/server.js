@@ -248,7 +248,8 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (url.pathname === "/api/config" && req.method === "GET")
-      return send(res, 200, { schema: config.SCHEMA, values: config.readValues(), root: config.ROOT });
+      return send(res, 200, { schema: config.SCHEMA, values: config.readValues(), root: config.ROOT,
+                              localModel: config.readFile(".local-model").values });
 
     if (url.pathname === "/api/config" && req.method === "POST") {
       const updates = await readJson(req);
@@ -260,7 +261,24 @@ const server = http.createServer(async (req, res) => {
       if (bad.length)
         return send(res, 400, { error: `These values cannot work: ${bad.join("; ")}`, errors: bad });
       const written = config.writeValues(updates);
-      return send(res, 200, { written, values: config.readValues() });
+      return send(res, 200, { written, values: config.readValues(),
+                              localModel: config.readFile(".local-model").values });
+    }
+
+    // Installed Ollama models, for the local model picker. Unioned across the managed side port
+    // and the system Ollama on 11434 (they share a models dir). Empty when no Ollama is running.
+    if (url.pathname === "/api/ollama-models" && req.method === "GET") {
+      const localVals = config.readFile(".local-model").values;
+      const managed = parseInt(localVals.OLLAMA_MANAGED_PORT || "11435", 10) || 11435;
+      const ports = [...new Set([managed, 11434])];
+      const names = new Set();
+      for (const p of ports) {
+        try {
+          const r = await fetch(`http://127.0.0.1:${p}/api/tags`, { signal: AbortSignal.timeout(1500) });
+          if (r.ok) for (const m of ((await r.json()).models || [])) if (m && m.name) names.add(m.name);
+        } catch { /* that Ollama instance is not up */ }
+      }
+      return send(res, 200, { models: [...names].sort(), ports });
     }
 
     if (url.pathname === "/api/status" && req.method === "GET")
