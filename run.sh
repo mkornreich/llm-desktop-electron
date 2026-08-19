@@ -215,22 +215,32 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
     export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_API="${OPENAI_API:-chat}"
 
+    # Per-model context (tokens). Drives BOTH the managed Ollama window AND the compaction window
+    # below, so both track the model — different models have different context windows, and a
+    # fixed compaction window would be wrong for all but one of them. Resolution: CONTEXT_<model>
+    # if present, else the OLLAMA_CONTEXT_LENGTH default, else 32768. COMPACT_<model> optionally
+    # overrides just the compaction window (otherwise it is derived from the context).
+    if [ -z "${OLLAMA_CONTEXT_LENGTH:-}" ]; then OLLAMA_CONTEXT_LENGTH="$(sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' "$CONF" 2>/dev/null | head -1)"; fi
+    DESIRED_CTX=""
+    while IFS='=' read -r k v; do
+      if [ "${k#CONTEXT_}" = "$OPENAI_MODEL" ]; then DESIRED_CTX="$v"; fi
+    done < <(grep -E '^CONTEXT_' "$CONF" 2>/dev/null)
+    DESIRED_CTX="${DESIRED_CTX:-${OLLAMA_CONTEXT_LENGTH:-32768}}"
+    DESIRED_COMPACT=""
+    while IFS='=' read -r k v; do
+      if [ "${k#COMPACT_}" = "$OPENAI_MODEL" ]; then DESIRED_COMPACT="$v"; fi
+    done < <(grep -E '^COMPACT_' "$CONF" 2>/dev/null)
+
     # Managed on-device Ollama (default on). Give the agent a big context the system Ollama
-    # usually caps. Tuning knobs come from .local-model (env wins); the context is per-model —
-    # CONTEXT_<model> if present, else OLLAMA_CONTEXT_LENGTH, else 32768.
+    # usually caps. Tuning knobs come from .local-model (env wins).
     OLLAMA_AUTOSTART="${OLLAMA_AUTOSTART:-$(sed -n 's/^OLLAMA_AUTOSTART=//p' "$CONF" 2>/dev/null | head -1)}"
     if [ "${OLLAMA_AUTOSTART:-1}" != "0" ] && command -v ollama >/dev/null 2>&1; then
-      for k in OLLAMA_MANAGED_PORT OLLAMA_KV_CACHE_TYPE OLLAMA_FLASH_ATTENTION OLLAMA_NUM_PARALLEL OLLAMA_KEEP_ALIVE OLLAMA_MODELS OLLAMA_CONTEXT_LENGTH; do
+      for k in OLLAMA_MANAGED_PORT OLLAMA_KV_CACHE_TYPE OLLAMA_FLASH_ATTENTION OLLAMA_NUM_PARALLEL OLLAMA_KEEP_ALIVE OLLAMA_MODELS; do
         if [ -z "${!k:-}" ]; then
           fv="$(sed -n "s/^${k}=//p" "$CONF" 2>/dev/null | head -1)"
           if [ -n "$fv" ]; then export "$k=$fv"; fi
         fi
       done
-      DESIRED_CTX=""
-      while IFS='=' read -r k v; do
-        if [ "${k#CONTEXT_}" = "$OPENAI_MODEL" ]; then DESIRED_CTX="$v"; fi
-      done < <(grep -E '^CONTEXT_' "$CONF" 2>/dev/null)
-      DESIRED_CTX="${DESIRED_CTX:-${OLLAMA_CONTEXT_LENGTH:-32768}}"
       # Models dir: explicit OLLAMA_MODELS, else the system Ollama's store if we can read it
       # (so models pulled via the normal `ollama` CLI are shared with our instance).
       MODELS_DIR="${OLLAMA_MODELS:-}"
@@ -289,6 +299,15 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
   while IFS='=' read -r k v; do
     case "$k" in CLAUDE_CODE_*) export "$k=$v"; echo "[run] $k=$v" ;; esac
   done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' "$CONF" 2>/dev/null)
+  # A local model's compaction window must track its real context: a fixed value can exceed a
+  # small model's window (so compaction never fires and the prompt overflows) or waste a big
+  # one. Derive it from the per-model context — 3/4, leaving headroom for the tools + reply —
+  # unless a per-model COMPACT_<model> or an explicit CLAUDE_CODE_AUTO_COMPACT_WINDOW was given
+  # (the latter is exported by the loop above, so gate on it being unset).
+  if [ "$PROVIDER" = "local" ] && [ -z "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${DESIRED_COMPACT:-$(( DESIRED_CTX * 3 / 4 ))}"
+    echo "[run] CLAUDE_CODE_AUTO_COMPACT_WINDOW=${CLAUDE_CODE_AUTO_COMPACT_WINDOW} (${OPENAI_MODEL}, ${DESIRED_CTX}-token context)"
+  fi
 else
   # Leave no trace of OpenAI mode in the environment. Unsetting the base URL is what makes
   # the env-gated patches fall back to the app's own Anthropic host.
