@@ -223,6 +223,21 @@ ensure_ollama() {
   echo "[run] managed Ollama: not ready in 30s — see ${logfile}"; return 1
 }
 
+# Evict every model resident in the managed Ollama so its VRAM is freed. keep_alive:0 unloads
+# the model without stopping the server. Armed on an EXIT trap once the managed instance is up,
+# so it fires when the app quits or is killed (run.sh does not exec, so it survives the app).
+# No-ops when nothing answers the managed port (openai/anthropic modes, or Ollama already gone).
+unload_managed_ollama() {
+  local port="${OLLAMA_MANAGED_PORT:-11435}" m
+  curl -sf --max-time 2 "http://127.0.0.1:${port}/api/version" >/dev/null 2>&1 || return 0
+  for m in $(curl -s --max-time 3 "http://127.0.0.1:${port}/api/ps" 2>/dev/null \
+             | grep -oE '"model":"[^"]+"' | sed 's/.*"model":"//; s/"$//' | sort -u); do
+    echo "[run] unloading Ollama model ${m} from 127.0.0.1:${port}"
+    curl -s --max-time 8 "http://127.0.0.1:${port}/api/generate" \
+      -d "{\"model\":\"${m}\",\"keep_alive\":0}" >/dev/null 2>&1 || true
+  done
+}
+
 if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
@@ -277,6 +292,8 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
       if [ -z "$MODELS_DIR" ] && [ -r /usr/share/ollama/.ollama/models ]; then MODELS_DIR=/usr/share/ollama/.ollama/models; fi
       if ensure_ollama "${OLLAMA_MANAGED_PORT:-11435}" "$DESIRED_CTX" "$MODELS_DIR"; then
         export OPENAI_BASE_URL="http://127.0.0.1:${OLLAMA_MANAGED_PORT:-11435}/v1"
+        # Free the model's VRAM when this launcher exits (app quit or killed).
+        trap unload_managed_ollama EXIT
       else
         echo "[run] managed Ollama unavailable; falling back to OPENAI_BASE_URL from .local-model"
       fi
