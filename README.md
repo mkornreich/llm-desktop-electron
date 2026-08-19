@@ -1,58 +1,72 @@
-# Run Claude's agent tooling on an OpenAI API key
+# Run Claude's agent tooling on OpenAI, a local GPU model, or Anthropic
 
-Claude Code and Claude Desktop are good agent harnesses. This repo lets you drive
-them with an **OpenAI** key instead of an Anthropic one, by translating between the
-two APIs locally.
+Claude Code and Claude Desktop are good agent harnesses. This repo lets you drive their
+**agent layer** with a backend of your choice — an **OpenAI** key, an **on-device model on your
+own GPU**, or stock **Anthropic** — by translating between the Anthropic and OpenAI APIs
+locally. The chat window is always the real claude.ai web app; only the agent sub-layer
+(Claude Code) is repointed.
 
-Two independent things live here, and **you probably only want the first**:
+Two independent things live here, and **you may only want the first**:
 
 | | What it is | What you need |
 |---|---|---|
-| **1. The proxy** — [`openai-proxy/`](openai-proxy/) | A local server that speaks the **Anthropic Messages API** on the front and calls **OpenAI** on the back. Point any Anthropic-API client at it. | Node with native `fetch` (18+), an OpenAI API key |
-| **2. The desktop build** | Anthropic's **Claude Desktop** app, unpacked and run under a stock Electron runtime, with the proxy wired in and a settings GUI | macOS, plus **your own copy** of Claude Desktop |
+| **1. The proxy** — [`openai-proxy/`](openai-proxy/) | A local server that speaks the **Anthropic Messages API** on the front and calls **OpenAI** (or any OpenAI-compatible server) on the back. Point any Anthropic-API client at it. | Node 22+ (native `fetch`), and an OpenAI key **or** a local server like Ollama |
+| **2. The desktop build** | Anthropic's **Claude Desktop** app, unpacked and run under a stock Electron runtime, with the proxy wired in, a provider switch, and a settings GUI | Linux or macOS, plus **your own copy** of Claude Desktop |
 
-The proxy is the generally useful part: it works with the ordinary `claude` CLI on
-any machine, and needs nothing from this repo's `app/` directory. Everything below
-the [Desktop build](#2-the-desktop-build) heading is specific to running Anthropic's
-Electron app and can be ignored if you just want the CLI on OpenAI.
+The proxy is the generally useful part: it works with the ordinary `claude` CLI on any machine,
+and needs nothing from this repo's `app/` directory. Everything below the
+[Desktop build](#2-the-desktop-build) heading is specific to running Anthropic's Electron app.
 
-> **Licensing, read this first.** `app/` is Anthropic's unpacked proprietary bundle
-> (~40 MB of their JavaScript, native binaries and resources). It is **not**
-> redistributable, which is why this repository is private. If you want part 2, you
-> must supply that directory from your own licensed Claude Desktop install — see
-> [Supplying the bundle](#supplying-the-bundle). Nothing in part 1 touches it.
+> **Licensing, read this first.** `app/` is Anthropic's unpacked proprietary bundle (~40 MB of
+> their JavaScript, native binaries and resources). It is **not** redistributable, which is why
+> this repository is private. For part 2 you must supply that directory from your own licensed
+> Claude Desktop install — see [Supplying the bundle](#supplying-the-bundle). Nothing in part 1
+> touches it.
 
 ---
 
-## 1. The proxy — Claude Code on OpenAI
+## 1. The proxy — Claude Code on OpenAI (or a local model)
 
 ### Quick start
 
 ```bash
-export OPENAI_API_KEY=sk-...              # the only secret involved
+export OPENAI_API_KEY=sk-...              # or point at a local server; see below
 cd openai-proxy && node supervise.mjs     # listens on 127.0.0.1:8123, restarts on crash
 ```
 
-`node proxy.mjs` still works and is the right thing for a one-off. Prefer the supervisor
-for anything you leave running: the proxy has taken itself down twice on a dropped upstream
-socket, and nothing noticed for hours — the app, the launcher and every agent kept running
-against a closed port. The supervisor restarts it, logs why, and gives up loudly rather than
-looping if it cannot start at all.
+`node proxy.mjs` still works and is right for a one-off. Prefer the supervisor for anything you
+leave running: the proxy has taken itself down on a dropped upstream socket with nothing
+noticing for hours — the app, the launcher and every agent kept running against a closed port.
+The supervisor restarts it, logs why, and gives up loudly rather than looping if it cannot start.
 
-Then, in another shell, point the stock Claude Code CLI at it:
+Point the stock Claude Code CLI at it:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8123 ANTHROPIC_API_KEY=unused claude -p "hello"
 ```
 
-`ANTHROPIC_API_KEY` must be set to *something* because the CLI insists on it, but the
-proxy ignores it and authenticates to OpenAI with `OPENAI_API_KEY`.
+`ANTHROPIC_API_KEY` must be set to *something* because the CLI insists on it, but the proxy
+ignores it and authenticates to OpenAI with `OPENAI_API_KEY`.
 
-Verified end-to-end with the unmodified CLI: a full agent turn, 221 tools, tool calls
-executed and results fed back, with the proxy log showing
-`model=claude-opus-4-8->gpt-5.3-codex`. The CLI still *says* "Opus" because it
-hardcodes that in its own prompt and asks for it by name — the proxy log and the
+Verified end-to-end with the unmodified CLI: a full agent turn, 221 tools, tool calls executed
+and results fed back, with the proxy log showing `model=claude-opus-4-8->gpt-5.6-sol`. The CLI
+still *says* "Opus" because it hardcodes that in its own prompt; the proxy log and the
 `ANTHROPIC_BASE_URL` in the process environment are the ground truth.
+
+### Point it at a local, on-device model
+
+Set `OPENAI_BASE_URL` at any OpenAI-compatible server ([Ollama](https://ollama.com),
+llama.cpp, LM Studio, vLLM) and the proxy translates to it exactly as it does to OpenAI. A
+**loopback** base URL is treated as **keyless** — no `OPENAI_API_KEY` needed (a placeholder
+bearer is sent, which local servers ignore):
+
+```bash
+OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_MODEL=qwen2.5:7b-instruct OPENAI_API=chat \
+  node openai-proxy/proxy.mjs
+```
+
+The desktop build wires this up as the [`local` provider](#on-device-model-local), which also
+starts and tunes Ollama for you.
 
 ### Configuration
 
@@ -60,22 +74,21 @@ Everything has a default; set only what you want to change.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `OPENAI_API_KEY` | — | Required. Also readable from a `KEY=VALUE` dot file (see below). |
-| `OPENAI_MODEL` | `gpt-5.6-sol` | Any OpenAI model id. Names containing `codex` route to **Responses** automatically; anything else needs `OPENAI_API=responses` set explicitly, or it lands on Chat Completions and its 128-tool cap. |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Point at any OpenAI-compatible endpoint. |
+| `OPENAI_API_KEY` | — | Required for a remote endpoint; **optional for a loopback one**. Also read from `.openai-key` (see below). |
+| `OPENAI_MODEL` | `gpt-5.6-sol` | Any model id. Names containing `codex` route to **Responses** automatically; anything else lands on Chat Completions unless `OPENAI_API=responses` is set. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint, including a local one. |
 | `PORT` | `8123` | |
-| `OPENAI_API` | `responses` | `responses` or `chat`, overriding the name heuristic. **Required for any non-codex model**: this app sends 236 tools and Chat Completions caps at 128. |
+| `OPENAI_API` | `responses` | `responses` or `chat`, overriding the name heuristic. **Required for a non-codex remote model**: this app sends 200+ tools and Chat Completions caps at 128. |
 | `OPENAI_REASONING_EFFORT` | `max` | The proxy steps down to the highest value your model accepts. |
-| `OPENAI_CLASSIFIER_SAFETY_MODEL` | `gpt-5.4` | Model for Claude Code's auto-mode safety verdict. It has a 60-second deadline and **denies the action** when it expires, so this wants a fast model — see [openai-proxy/README.md](openai-proxy/README.md#is-the-classifier-still-calling-anthropic-issue-11) for the measurements. |
+| `OPENAI_CLASSIFIER_SAFETY_MODEL` | `gpt-5.4-2026-03-05` | Model for Claude Code's auto-mode safety verdict. It has a 60-second deadline and **denies the action** when it expires, so this wants a fast model — see [openai-proxy/README.md](openai-proxy/README.md) for the measurements. |
 
-The full list — around thirty knobs, each documented with the bug that motivated it —
-is in [openai-proxy/README.md](openai-proxy/README.md).
+The full list — around thirty knobs, each documented with the bug that motivated it — is in
+[openai-proxy/README.md](openai-proxy/README.md).
 
-Instead of environment variables you can put `KEY=VALUE` lines in
-`.openai-model` at the repo root (checked in, for non-secrets). The secret
-**API key** goes in its own gitignored file, **`.openai-key`** at the repo root
-(`apiKey=…`; copy `.openai-key.example` to start). Precedence is env var →
-`.openai-model` → `.openai-key` → default.
+Instead of environment variables, put `KEY=VALUE` lines in `.openai-model` at the repo root
+(checked in, for non-secrets). The secret **API key** goes in its own gitignored file,
+**`.openai-key`** (`apiKey=…`; copy `.openai-key.example` to start). Precedence is
+env var → `.openai-model` → `.openai-key` → default.
 
 That precedence lives in exactly one place, [`openai-proxy/config.mjs`](openai-proxy/config.mjs),
 which also produces the config hash below. To see what a launch would actually use:
@@ -84,8 +97,8 @@ which also produces the config hash below. To see what a launch would actually u
 node openai-proxy/config.mjs            # the effective config, with the source of each value
 ```
 
-`--hash` prints just the config hash, `--validate` checks it and exits non-zero on an error.
-The key never appears in any of them — only a `sha256:` fingerprint of it.
+`--hash` prints just the config hash; `--validate` checks it and exits non-zero on an error. The
+key never appears in any of them — only a `sha256:` fingerprint of it.
 
 ### Knowing which proxy is running
 
@@ -96,13 +109,12 @@ The key never appears in any of them — only a `sha256:` fingerprint of it.
   "codeVersion": "a8e08f01…", "inflight": 0, "model": "gpt-5.6-sol", "…": "…" }
 ```
 
-- **`instance`** is a nonce generated at startup and also written to `proxy-runtime.json`.
-  Only the process that generated it can serve it, so matching both proves ownership — which is
-  what lets the launcher restart *its* proxy and refuse to touch anything else.
-- **`configHash`** covers every behaviour-affecting setting plus a fingerprint of the key.
-  The launcher compares it and restarts a proxy that is serving stale settings, instead of the
-  old behaviour: any answer on `/health` counted as healthy, so a changed model silently did not
-  take effect while the launcher printed "proxy healthy".
+- **`instance`** is a nonce generated at startup and also written to `proxy-runtime.json`. Only
+  the process that generated it can serve it, so matching both proves ownership — which is what
+  lets the launcher restart *its* proxy and refuse to touch anything else.
+- **`configHash`** covers every behaviour-affecting setting plus a fingerprint of the key. The
+  launcher compares it and restarts a proxy serving stale settings, instead of the old behaviour
+  where any answer on `/health` counted as healthy and a changed model silently did not apply.
 - **`codeVersion`** is a hash of the proxy sources, catching a process running older translation
   logic with current settings.
 - **`inflight`** is how many turns are being answered right now, so a restart can say what it
@@ -112,9 +124,8 @@ Supervisor behaviour is tuned by environment variable; the defaults are meant to
 `PROXY_MAX_FAST_FAILURES` (8) bounds immediate restart attempts, `PROXY_RESTART_BASE_MS` (500)
 and `PROXY_RESTART_MAX_MS` (30000) set the backoff, and `PROXY_HEALTH_EVERY_MS` (15000) /
 `PROXY_HEALTH_TIMEOUT_MS` (5000) / `PROXY_HEALTH_MISSES` (3) control the watchdog that replaces a
-proxy holding the port without answering. Set `PROXY_HEALTH_EVERY_MS=0` to disable that watchdog.
-An externally-killed proxy always restarts and never counts toward the give-up bound, so manually
-restarting it does not disable auto-restart.
+proxy holding the port without answering. An externally-killed proxy always restarts and never
+counts toward the give-up bound.
 
 ### Which API surface, and why it matters
 
@@ -122,46 +133,40 @@ restarting it does not disable auto-restart.
 |---|---|---|
 | Tool limit | **128** (129 → HTTP 400) | none observed — probed to 512 |
 | Reasoning controls | none | `reasoning.effort`, reasoning summaries |
+| Local-server support | universal | recent Ollama; not all local servers |
 
-Claude Code offers 27 tools; Claude Desktop offers over 200. On the chat surface the
-128-tool cap is real, so the proxy keeps the essential tools (read/write/edit/run/
-search/plan/web, plus renderers) and fills the remainder in the agent's own order,
-logging what it dropped — a silently truncated tool list is indistinguishable from a
-model that just declined to use a tool.
+Claude Code offers 27 tools; Claude Desktop offers over 200. On the chat surface the 128-tool cap
+is real, so the proxy keeps the essential tools (read/write/edit/run/search/plan/web, plus
+renderers) and fills the remainder in the agent's own order, logging what it dropped — a silently
+truncated tool list is indistinguishable from a model that just declined to use a tool.
 
 ### What the translation covers
 
-Text and tool calls in both directions, streaming and non-streaming, plus a set of
-fixes for behaviour differences between the two model families:
+Text and tool calls in both directions, streaming and non-streaming, plus fixes for behaviour
+differences between the two model families:
 
-- **Rendering** — GPT models emit `\(…\)` / `\[…\]` for maths, which Claude's
-  renderer shows literally. Rewritten to `$…$` / `$$…$$`, fence-aware so code
-  samples stay verbatim.
-- **Persistence** — GPT models routinely end a turn to check in ("If you want, I'll
-  run that now"), which in an agent loop reads as a stall. An explicit persistence
-  directive plus auto-continue when a turn announces an action and calls no tool.
-- **Context overflow** — Claude Code sizes its own auto-compaction from the model it
-  *thinks* it is talking to, so it never fires. The proxy compacts and retries,
-  including when the overflow arrives as a mid-stream event rather than an HTTP 400.
-- **Empty and truncated turns** — retried or resumed rather than surfaced as a blank
-  reply.
-- **Unsupported parameters** — the CLI sends `stop_sequences`, which some models
-  reject. The proxy drops whichever parameter the API names and retries, so the next
-  unsupported knob self-heals too.
-- **Thinking** — OpenAI reasoning *summaries* are mapped to Anthropic thinking
-  blocks. Raw chain-of-thought is not available from the API at any setting.
+- **Rendering** — GPT models emit `\(…\)` / `\[…\]` for maths, which Claude's renderer shows
+  literally. Rewritten to `$…$` / `$$…$$`, fence-aware so code samples stay verbatim.
+- **Persistence** — GPT models routinely end a turn to check in ("If you want, I'll run that
+  now"), which in an agent loop reads as a stall. An explicit persistence directive plus
+  auto-continue when a turn announces an action and calls no tool.
+- **Context overflow** — Claude Code sizes its own auto-compaction from the model it *thinks* it
+  is talking to, so it never fires. The proxy compacts and retries, including when the overflow
+  arrives as a mid-stream event rather than an HTTP 400.
+- **Empty and truncated turns** — retried or resumed rather than surfaced as a blank reply.
+- **Unsupported parameters** — the CLI sends `stop_sequences`, which some models reject. The
+  proxy drops whichever parameter the API names and retries, so the next unsupported knob
+  self-heals too.
+- **Thinking** — OpenAI reasoning *summaries* are mapped to Anthropic thinking blocks. Raw
+  chain-of-thought is not available from the API at any setting.
 
-**Images work** ([issue #13]). Anthropic `{type:"image", source:{…}}` blocks — base64 or
-url — become `image_url` on Chat Completions and `input_image` on Responses, so a pasted
-screenshot actually reaches the model. Verified end to end on both surfaces with a generated
-PNG: *"The middle square is blue, and the background is red."* If the configured model has no
-vision the picture is dropped and the question kept, with an honest note in its place, rather
-than failing the turn.
+**Images work.** Anthropic `{type:"image", source:{…}}` blocks — base64 or url — become
+`image_url` on Chat Completions and `input_image` on Responses. If the model has no vision the
+picture is dropped and the question kept, with an honest note in its place, rather than failing
+the turn.
 
 Known gaps: `/v1/messages/count_tokens` is estimated, and the cost figures the CLI prints are
 computed from Anthropic's price list and are meaningless when proxied.
-
-[issue #13]: https://github.com/mkornreich/llm-desktop-electron/issues/13
 
 ### Evaluation baseline
 
@@ -170,35 +175,20 @@ npm run eval           # run the corpus, diff against the frozen baseline
 npm run eval:freeze    # overwrite the baseline with what the code does NOW
 ```
 
-`eval/` holds a synthetic corpus — 13 cases across the slices that matter: agent tool selection, a
-utility helper, prefix and both safety stages, a renderer tool last in a 238-tool catalogue, a long
-tool loop, forks, client compaction, media in a tool result, and a coding task. Each case runs through
-the real proxy against a fake upstream, and what gets recorded is the payload the proxy **decided** to
-send: resolved model, tool count, whether a late tool survived, `tool_choice`, hint injection,
-reasoning, verbosity, output cap, cache key, pricing tier.
-
-It is **network-free**, and that is what makes it a baseline rather than a sample. Every one of those
-decisions is settled before a token is generated, so a real model would add cost and variance without
-adding information. Model *quality* is a separate question that needs paired live runs and can only
-justify a change to a default — `--live` explains that and refuses.
-
-Why it exists now rather than later: the remaining work changes tool exposure, effort, continuity,
-compaction and model defaults, and each of those can only be stated as a difference from what came
-before. A baseline frozen *after* the change measures nothing. `npm test` checks the frozen baseline
-on every run, so a behaviour change cannot arrive unnoticed inside a commit about something else.
-
-Alongside the recorded behaviour are invariants the baseline is **not allowed to encode away** — a
-classifier is never given tools or hints, a safety verdict never resolves to the main or prefix model,
-an agent turn that merely quotes the classifier contract keeps its full catalogue. Freezing a wrong
-behaviour cannot legitimise it.
-
-Every fixture is synthesised. No real transcript, prompt, path or command from this machine is in the
-corpus, and a standing check keeps it that way.
+`eval/` holds a synthetic, **network-free** corpus. Each case runs through the real proxy against
+a fake upstream, and what gets recorded is the payload the proxy **decided** to send: resolved
+model, tool count, whether a late tool survived, `tool_choice`, hint injection, reasoning,
+verbosity, output cap, cache key, pricing tier. Every one of those decisions is settled before a
+token is generated, which is what makes it a baseline rather than a sample. `npm test` checks the
+frozen baseline on every run, so a behaviour change cannot arrive unnoticed inside an unrelated
+commit. Alongside it are invariants the baseline is **not allowed to encode away** — a classifier
+is never given tools, a safety verdict never resolves to the main model, an agent turn that
+merely quotes the classifier contract keeps its full catalogue.
 
 ### Tests
 
 ```bash
-npm test        # the whole suite: proxy + settings + launcher scripts
+npm test        # the whole suite: proxy + settings + launcher scripts + eval baseline
 ```
 
 Most were written against a specific misbehaviour; the comments say which.
@@ -207,64 +197,73 @@ Most were written against a specific misbehaviour; the comments say which.
 
 ## 2. The desktop build
 
-Runs Anthropic's Claude Desktop (`@ant/desktop` v1.24012.9, an Electron Forge + Vite
-build) from its unpacked `app.asar` under a stock Electron runtime, with the proxy
-wired into the agent layer and a settings GUI over the launcher's config.
-
-Useful if you want the desktop UI rather than the terminal, or if you want to see how
-the app is put together. **Not required for part 1.**
+Runs Anthropic's Claude Desktop (`@ant/desktop` v1.24012.9, an Electron Forge + Vite build) from
+its unpacked `app.asar` under a stock Electron runtime, with the proxy wired into the agent
+layer, a provider switch, and a settings GUI over the launcher's config. Runs on **Linux and
+macOS**.
 
 ### Supplying the bundle
 
-`app/` **is** committed in this repository — 171 files of Anthropic's code — and that is
-exactly why it is private and must not be published. Treat that directory as somebody
-else's software that happens to be sitting here.
+`app/` **is** committed in this repository — Anthropic's code — and that is exactly why it is
+private and must not be published. `node_modules/` and `app/node_modules/` are **not** committed;
+you populate them from your own licensed install.
 
-To build it yourself instead, from your own licensed install:
+To rebuild `app/` from your own install:
 
-1. Find `app.asar` in your Claude Desktop installation
-   (macOS: `/Applications/Claude.app/Contents/Resources/`).
+1. Find `app.asar` in your Claude Desktop installation:
+   - **Linux:** `/usr/lib/claude-desktop/resources/`
+   - **macOS:** `/Applications/Claude.app/Contents/Resources/`
 2. `npx @electron/asar extract app.asar app/`
-3. Merge the sibling `app.asar.unpacked/` back in at the same relative paths — the
-   native addons (`@ant/claude-native`, `@ant/claude-swift`, `node-pty`, the office365
-   `msal` binaries) live there, and the app expects them beside their JS.
+3. Merge the sibling `app.asar.unpacked/node_modules/` back in over `app/node_modules/` — the
+   native addons (`@ant/claude-native`, `node-pty`, and on macOS `@ant/claude-swift`) live there
+   as platform binaries and the app expects them beside their JS. On Linux, `@ant/claude-swift`
+   is absent by design and fails closed.
 
-The version here is `@ant/desktop` v1.24012.9; a different version will not necessarily
-match the twelve env-gated patches, all of which are keyed to strings in this build.
+The version here is `@ant/desktop` v1.24012.9; a different version will not necessarily match the
+env-gated patches, which are keyed to strings in this build.
 
 ### Setup
 
 ```bash
-npm install        # stock Electron 43.2.0, ~200 MB, once
+npm install        # stock Electron 42.9.2, once
 ./run.sh
 ```
 
-A window opens on the `claude.ai` login screen; sign in as usual. `Cmd+Q` quits.
-`run.sh` re-creates the `Resources/app.asar → app/` symlink on every launch and
-reinstalls the `disclaimer` helper, so reinstalling `node_modules` costs nothing.
+Electron **42.9.2** is pinned to match the native modules harvested from a current Claude Desktop
+install. A window opens on the `claude.ai` login screen; sign in as usual. `run.sh` re-creates the
+`resources/app.asar → app/` symlink and reinstalls the `disclaimer` helper on every launch, so
+reinstalling `node_modules` costs nothing.
 
-That helper is repository-owned source ([scripts/claude-code-disclaimer.sh](scripts/claude-code-disclaimer.sh),
-installed as an absolute symlink by [scripts/install-disclaimer.mjs](scripts/install-disclaimer.mjs)).
-Stock Electron has no equivalent of Claude Desktop's TCC-attribution helper, and the app
-invokes it as `disclaimer <command> <args…>` — which makes it the one supported boundary at
-which this repo can choose the agent's *internal* model identity. In OpenAI mode it ignores
-whichever `claude-*` model Desktop selected and rewrites the bundled Claude Code executable to
-the configured `[1m]` capability identity; in Anthropic mode it is an exact argv passthrough.
-Nothing patches the Claude Code binary or the app bundle.
+**Linux note:** `npm install` downloads the Electron binary from GitHub's release CDN. If that host
+is blocked on your network, use a mirror:
 
-Subagents need a second lever. `Task`, `Explore` and teammate spawns run *inside* the session
-process, so they have no argv to rewrite, and the desktop sets their model itself — they were
-going out as `claude-sonnet-5` and resolving Sonnet's ordinary window, which produced 344 of 402
-measured client-side compactions while the main loop ran to ~883k tokens. The helper therefore
-also exports `CLAUDE_CODE_SUBAGENT_MODEL`, which Claude Code reads *before* the Task tool's own
-`model` argument and before an agent definition's `model:` frontmatter. It must be set there
-rather than in `run.sh`: the bundle composes the agent env itself and would overwrite it. The
-installer migrates only the two passthrough shims this repo generated in the past and refuses
-to overwrite anything else.
+```bash
+ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ \
+  ELECTRON_CUSTOM_DIR="v{{ version }}" node node_modules/electron/install.js
+```
 
-Requirements: macOS (see [LINUX.md](LINUX.md) for what a port needs) and Node ≥ 22 —
-the app itself refuses to start below Electron 34 and needs Node ≥ 22. Developed against
-Node 26; there is no `engines` field, so older versions are untested rather than blocked.
+`run.sh` is cross-platform (`uname -s`): it resolves the Electron resources dir (`dist/resources`
+on Linux, `Electron.app/Contents/Resources` on macOS), the Claude Desktop profile
+(`~/.config/Claude` vs `~/Library/Application Support/Claude`), and the `disclaimer` helper path
+per platform. See [LINUX.md](LINUX.md) for the port's design and the folded-conditional gotchas.
+
+### The disclaimer helper
+
+Stock Electron has no equivalent of Claude Desktop's TCC-attribution helper, and the app invokes
+it as `disclaimer <command> <args…>` — which makes it the one supported boundary at which this
+repo can choose the agent's *internal* model identity. The helper is repository-owned source
+([scripts/claude-code-disclaimer.sh](scripts/claude-code-disclaimer.sh)), installed as an absolute
+symlink by [scripts/install-disclaimer.mjs](scripts/install-disclaimer.mjs) at the per-platform
+`Helpers/` path. In OpenAI/local mode it rewrites the bundled Claude Code executable to the
+configured `[1m]` capability identity; in Anthropic mode it is an exact argv passthrough. It also
+exports `CLAUDE_CODE_SUBAGENT_MODEL` so `Task`/`Explore`/teammate spawns — which run inside the
+session process and have no argv to rewrite — get the right model. Nothing patches the Claude Code
+binary or the app bundle.
+
+### Requirements
+
+Linux or macOS, and Node ≥ 22 (Electron 42 bundles its own Node for the app itself). The app
+refuses to start below Electron 34.
 
 ### Settings GUI
 
@@ -272,32 +271,15 @@ Node 26; there is no `engines` field, so older versions are untested rather than
 ./settings.sh
 ```
 
-Every parameter, grouped, each with the reasoning behind it, plus live status and
-**Save & restart**, since most settings are read at launch.
-
-The status line separates **configured** from **active**, because they can differ and the
-window used to show only the files and present that as the running state. A proxy serving the
-previous settings is now labelled `STALE — restart to apply` rather than appearing healthy; a
-launch-time `OPENAI_MODEL=x ./run.sh` override is shown as an override rather than as your saved
-configuration; and in Anthropic mode the OpenAI-only settings are dimmed and marked as not in
-effect — still saved, and applied again the moment you switch back.
-
-**Save & restart** performs the sequence the state actually requires and verifies the result:
-it stops the app first (it holds an exclusive LevelDB lock on the session store), waits for it to
-exit rather than sleeping hopefully, stops the proxy *only if it can prove the proxy is ours*,
-waits for the port to be released, launches, and then confirms the new proxy reports the expected
-config hash before reporting success. If a turn is in flight it says how many and asks first. It
-previously ran `pkill -f llm-desktop-electron/user-data` — which matches any process whose command
-line merely *mentions* that path — slept 1.5s, and reported success before anything had started.
-
-It is a local page rather than an Electron window for a concrete reason: the
-`Resources/app.asar → app/` symlink makes Electron load *Anthropic's* app and ignore
-any CLI-supplied app path — verified with both `electron settings` and
-`electron --app=settings`, which each booted `appVersion 1.24012.9`. The server binds
-to `127.0.0.1` and requires a per-start token, because the API writes config and can
-restart the app; without a token any page you visited could POST to it. Writes are
-surgical — one `KEY=value` line changes and the surrounding documentation comments are
-left byte-identical.
+Every parameter, grouped, each with the reasoning behind it, plus live status and **Save &
+restart**. The status line separates **configured** from **active**: a proxy serving previous
+settings is labelled `STALE — restart to apply`; a launch-time `OPENAI_MODEL=x ./run.sh` override
+is shown as an override; and in Anthropic mode the OpenAI-only settings are dimmed as not in
+effect. **Save & restart** stops the app (it holds an exclusive LevelDB lock on the session
+store), waits for exit, stops the proxy *only if it can prove the proxy is ours*, relaunches, and
+confirms the new proxy reports the expected config hash before reporting success. It is a local
+`127.0.0.1` page requiring a per-start token, because the API writes config and can restart the
+app.
 
 ### Choosing the provider
 
@@ -308,128 +290,98 @@ left byte-identical.
 ./run.sh              # whichever .provider says (default: openai)
 ```
 
-| | `anthropic` | `openai` |
-|---|---|---|
-| agent's `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `http://127.0.0.1:8123` |
-| translation proxy | not started | started, health-checked |
-| `.openai-model` `CLAUDE_CODE_*` settings | not applied | applied |
-| model | Claude, as shipped | `gpt-5.3-codex` |
+| | `anthropic` | `openai` | `local` |
+|---|---|---|---|
+| agent's `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `http://127.0.0.1:8123` | `http://127.0.0.1:8123` |
+| translation proxy | not started | started, health-checked | started, health-checked |
+| backend the proxy calls | — | api.openai.com | on-device Ollama (GPU) |
+| API key | your Anthropic login | `OPENAI_API_KEY` / `.openai-key` | none (loopback is keyless) |
+| model | Claude, as shipped | `gpt-5.6-sol` | `qwen2.5:7b-instruct` |
 
-Switching back needs **no un-patching**: every edit to the bundle is env-gated
-(`PROXY_ANTHROPIC_BASE_URL || <original host>`), so with the variable unset the app uses
-its own Anthropic host. Anthropic mode also actively drops
-`CLAUDE_CODE_BG_CLASSIFIER_MODEL` and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`,
-because those hold OpenAI model ids and sending `gpt-4.1-mini` to Anthropic just errors.
-
-Maximum reasoning is the default either way, through two different knobs: the proxy's
-`OPENAI_REASONING_EFFORT` on the OpenAI path, and `CLAUDE_CODE_EFFORT_LEVEL=max` plus
-`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` exported by `run.sh` on the Anthropic path.
-`MAX_THINKING_TOKENS` is deliberately unused — the CLI's own migration notes call
-`thinking.budget_tokens` deprecated in favour of adaptive thinking.
-
-Either way this affects only the **agent**. The chat window is the remote claude.ai web
-app talking to Anthropic in both modes.
+Switching needs **no un-patching**: every edit to the bundle is env-gated
+(`PROXY_ANTHROPIC_BASE_URL || <original host>`), so with the variable unset the app uses its own
+Anthropic host. This affects only the **agent** — the chat window is the remote claude.ai web app
+talking to Anthropic in every mode.
 
 #### On-device model (`local`)
 
 `PROVIDER=local` (or `./run-local.sh`) is `openai` mode pointed at a local OpenAI-compatible
-server instead of api.openai.com, so the agent runs on **this machine's GPU** with no API key —
-the proxy treats a loopback `OPENAI_BASE_URL` as keyless. It uses [Ollama](https://ollama.com),
-and everything is configured in [`.local-model`](.local-model).
+server instead of api.openai.com, so the agent runs on **this machine's GPU** with no API key. It
+uses [Ollama](https://ollama.com), configured in [`.local-model`](.local-model).
 
 **It manages Ollama for you.** The agent's prompt (system + up to 128 tools) is large, and a
 system Ollama is usually pinned to a small context by its service unit — which would silently
-truncate that prompt. So `run.sh` starts its **own** Ollama on a side port
-(`OLLAMA_MANAGED_PORT`, default 11435) with a big context and the right GPU tuning, sharing the
-models you already pulled, and leaves the system Ollama untouched for its other clients. It
-reuses that instance across launches and restarts it only when the context changes. The tuning
-that makes a big context fit a laptop GPU is applied automatically: `q8_0` KV cache (≈half the
-VRAM of `f16`), flash attention, and `OLLAMA_NUM_PARALLEL=1` so the **full** context goes to the
+truncate that prompt, and can't be rebound without root. So `run.sh` starts its **own** Ollama on
+a side port (`OLLAMA_MANAGED_PORT`, default 11435) with a big context, sharing the models you
+already pulled, and leaves the system Ollama untouched for its other clients. It reuses that
+instance across launches and restarts it only when the context changes. The GPU tuning that makes
+a big context fit a laptop card is applied automatically: **`q8_0` KV cache** (≈half the VRAM of
+`f16`), **flash attention**, and **`OLLAMA_NUM_PARALLEL=1`** so the *full* context goes to the
 single agent request instead of being split across slots. Set `OLLAMA_AUTOSTART=0` to manage the
 server yourself.
 
 - **Context is per model.** `OLLAMA_CONTEXT_LENGTH` is the default; `CONTEXT_<model>` overrides it
-  for a given model (a bigger native window can take more; a large model needs less to fit VRAM).
-  Keep `CLAUDE_CODE_AUTO_COMPACT_WINDOW` under whatever context is in effect.
+  per model (a bigger native window can take more; a large model needs less to fit VRAM). Keep
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` under whatever context is in effect.
 - **A tool-calling model is required.** The agent is tool calls end to end, so the model must emit
   proper OpenAI `tool_calls`, not dump them as text. `qwen2.5:7b-instruct` (32K), `qwen3:8b` (40K)
   and `granite4.1:8b` (128K) do; `qwen2.5-coder:7b` does not. Pull it first (`ollama pull <model>`).
 
-`local` speaks Chat Completions by default (universal across local servers; its 128-tool cap
-also helps a small model fit context). A 7-8B model on a laptop GPU is far less capable than the
-hosted models — this is for privacy/offline use, not maximum quality.
+`local` speaks Chat Completions by default (universal across local servers; its 128-tool cap also
+helps a small model fit context). A 7-8B model on a laptop GPU is far less capable than the hosted
+models — this is for privacy/offline use, not maximum quality.
 
 ### Launcher configuration
 
-Five dot files, all read by `run.sh`, each overridable by an env var of the same name.
-None contains a secret.
+Dot files at the repo root, all read by `run.sh` (or the proxy), each overridable by an env var of
+the same name.
 
 | File | Setting | Default | Effect |
 |---|---|---|---|
-| [`.provider`](.provider) | `PROVIDER` | `openai` | `openai` = agent via the proxy (api.openai.com); `local` = proxy → on-device GPU model; `anthropic` = agent calls Anthropic directly with Claude |
-| [`.openai-model`](.openai-model) | `OPENAI_MODEL` and friends | `gpt-5.3-codex` | Everything in the proxy table above |
-| [`.local-model`](.local-model) | `OPENAI_MODEL`, `OPENAI_BASE_URL` | Ollama `qwen2.5:7b-instruct` | The local server and model for `local` mode |
+| [`.provider`](.provider) | `PROVIDER` | `openai` | `openai` = agent via the proxy to api.openai.com; `local` = proxy → on-device GPU model; `anthropic` = agent calls Anthropic directly |
+| [`.openai-model`](.openai-model) | `OPENAI_MODEL` and friends | `gpt-5.6-sol` | Everything in the proxy config table above, for `openai` mode |
+| [`.local-model`](.local-model) | `OPENAI_MODEL`, context, Ollama tuning | Ollama `qwen2.5:7b-instruct` | The local server, model, per-model context and GPU tuning for `local` mode |
+| `.openai-key` *(gitignored)* | `apiKey` | — | The secret OpenAI key for `openai` mode. Not read in `local`/`anthropic`. Copy [`.openai-key.example`](.openai-key.example) to start |
 | [`.privacy`](.privacy) | `DISABLE_TELEMETRY` | `1` | Turns off first-party telemetry and Sentry, and sinkholes the analytics hosts |
-| [`.sync`](.sync) | `SYNC_CLAUDE_SESSIONS` | `1` | Copies Claude Desktop's session list into this build's isolated profile on launch |
+| [`.sync`](.sync) | `SYNC_CLAUDE_SESSIONS`, `SYNC_CLAUDE_GROUPING` | `1` | Shares Claude Desktop's sessions and sidebar grouping with this build |
 
-`user-data/` is an isolated profile with **one deliberate exception**:
-`claude-code-sessions` is a symlink to the real install's store, so sessions are genuinely
-shared and written in both directions ([issue #3]). A session created or renamed in either
-app is immediately the other's — and, for the same reason, deleting one deletes it for both.
-Everything else in `user-data/` (cookies, caches, Local Storage) stays private to this build.
-
-Local Storage deliberately is **not** shared: LevelDB permits one process at a time, and both
-databases hold an exclusive `fcntl(F_WRLCK)` while their app runs, so a shared directory would
-stop the second app to start from opening its own UI state at all.
+`user-data/` is an isolated profile with **one deliberate exception**: `claude-code-sessions` is a
+symlink to the real install's store, so sessions are genuinely shared and written in both
+directions ([issue #3]). A session created or renamed in either app is immediately the other's —
+and deleting one deletes it for both. Everything else in `user-data/` (cookies, caches, Local
+Storage) stays private to this build. Local Storage deliberately is **not** shared: LevelDB
+permits one process at a time, so a shared directory would stop the second app from opening its
+own UI state.
 
 [issue #3]: https://github.com/mkornreich/llm-desktop-electron/issues/3
 
-The app runs unpackaged (`app.isPackaged === false`), which is its own dev layout.
+The app runs unpackaged (`app.isPackaged === false`).
 
 ### What works, and what cannot
 
-**Works:** launches and stays up, renders the real Claude web UI, native addons load,
-the desktop↔web IPC bridge is valid on the `claude.ai` origin, the agent runs on
-OpenAI through the proxy.
+**Works:** launches and stays up on Linux and macOS, renders the real Claude web UI, native addons
+load, the desktop↔web IPC bridge is valid on the `claude.ai` origin, the agent runs through the
+proxy on OpenAI or a local GPU model, telemetry is off (the `isolated-segment` beacon shows
+`ERR_BLOCKED_BY_CLIENT`), and sessions sync with the real install.
 
-**Cannot work outside the signed bundle** — auto-update, `claude://` deep links, and
-anything gated on macOS entitlements the stock Electron binary does not carry (the
-VM/"virtualization" features, which the app itself reports as unavailable).
-`--remote-debugging-port` is refused by the app's own signed CDP gate.
-
-**Scheduled tasks run; waking a sleeping machine does not.** An earlier version of this
-section said scheduled tasks were dead, which the logs disprove — this build reports
-`[wake-scheduler] registered claim id=scheduled-tasks` and then
-`[CCDScheduledTasks] Confirmed task run for: daily-frontpage-audit`. What genuinely fails is
-the daemon registration the app warns about, `[wake-scheduler] DEV BUILD — daemon registration
-will fail. The dev Electron bundle has no Contents/Library/LaunchDaemons/ plist`: a stock
-Electron bundle has no LaunchDaemon, so nothing can wake the Mac from sleep for a timer. Tasks
-fire while the app is running; they are missed while the machine sleeps.
+**Cannot work outside the signed bundle** — auto-update, `claude://` deep links, and anything
+gated on macOS entitlements the stock Electron binary does not carry (the VM/"virtualization"
+features, which the app reports as unavailable). On Linux the macOS-only pieces (global hotkeys,
+memory-pressure telemetry from `@ant/claude-swift`, computer-use frame streaming) are absent by
+design and fail closed; the launcher polyfills the few macOS-only Electron APIs the bundle calls
+unconditionally at startup so it boots cleanly.
 
 ### Startup noise that is not a problem
 
-Three alarming lines appear on **every** launch, including healthy ones:
-
-```
-[error] Failed to handle pending folder: Error: Timed out waiting for mainView to become ready
-ERROR:network_service_instance_impl.cc:721] Network service crashed or was terminated, restarting service.
-CONSOLE "getInitialLocale failed ... did not pass origin validation"
-```
-
-The first two are startup races; the app carries on and logs in. The third is origin
-validation working as designed — Electron loads the app through the `app.asar`
-symlink, so the shell renderer's `file://` URL is not the one the validator expects,
-and the locale falls back. `net::ERR_FAILED` on the bootstrap fetch is downstream of
-the network-service restart, not a connectivity problem.
-
-To tell whether a launch actually succeeded, grep for both of these:
+Alarming lines appear on **every** launch, including healthy ones — startup races, an
+`@ant/claude-swift`/office365 `ERR_MODULE_NOT_FOUND` (macOS-only modules, fail closed), Wayland
+binding warnings, and `MISSING_TRANSLATION` / "Cowork not supported" notices. To tell whether a
+launch actually succeeded, grep for these:
 
 ```bash
-grep -c "isLoggedOut: false" boot.log; grep -c "my-access] loaded" boot.log
+grep -c "isLoggedOut: false" boot.log      # signed in
+grep -c "loaded .* features" boot.log       # feature flags fetched
 ```
-
-Also expect `MISSING_TRANSLATION` warnings (the `resources/i18n` files were not in the
-asar) and a one-off "Shell environment extraction timed out (attempt 1/5)".
 
 ### Reset
 
@@ -443,15 +395,14 @@ Delete `user-data/`.
 |---|---|
 | [openai-proxy/README.md](openai-proxy/README.md) | The proxy in depth: every knob, every behaviour fix and the bug that motivated it, the classifier measurements, the compaction ladder |
 | [SESSIONS.md](SESSIONS.md) | How the desktop build relates to your real Claude install: shared memory, session sync, and why grouping behaves as it does |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | How the desktop app is built: which UI is local vs. remote, the IPC bridge the remote page uses to drive your machine, which layers can be modified |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How the desktop app is built: which UI is local vs. remote, the IPC bridge the remote page uses, which layers can be modified |
 | [ANTHROPIC_ENDPOINTS.md](ANTHROPIC_ENDPOINTS.md) | Every Anthropic endpoint the app calls, with payloads and what each is for |
 | [FINDINGS.md](FINDINGS.md) | Notable things in the bundle — permission modes, the extension registry, companion-hardware pairing, the auto-approved tool list |
-| [LINUX.md](LINUX.md) | What a Linux port would take, with the native-module and folded-conditional blockers |
+| [LINUX.md](LINUX.md) | The Linux port: native-module harvest, folded-conditional blockers, and what degrades off macOS |
 
 ## Contributing back
 
-The proxy is self-contained (`openai-proxy/`, plus `settings/` for the GUI) and
-carries no Anthropic code, so it can be developed and shared independently of the
-bundle. If you extend it, add a test naming the behaviour you fixed — that is the
-convention throughout, and it is what caught several regressions in the fixes
-themselves.
+The proxy is self-contained (`openai-proxy/`, plus `settings/` for the GUI) and carries no
+Anthropic code, so it can be developed and shared independently of the bundle. If you extend it,
+add a test naming the behaviour you fixed — that is the convention throughout, and it is what
+caught several regressions in the fixes themselves.
