@@ -43,6 +43,36 @@ if [ ! -e "$RES/app.asar" ] || [ "$(readlink "$RES/app.asar" 2>/dev/null)" != "$
   ln -sfn "$PWD/app" "$RES/app.asar"
 fi
 
+# chrome-sandbox self-heal (Linux). Electron's renderer sandbox needs EITHER an unprivileged
+# user-namespace (which modern Ubuntu disables via kernel.apparmor_restrict_unprivileged_userns=1)
+# OR a setuid-root chrome-sandbox. The stock Electron we download ships chrome-sandbox owned by us,
+# so on such a kernel Electron aborts: "SUID sandbox helper binary ... not configured correctly".
+# The `.deb` of Claude Desktop already installed a setuid-root chrome-sandbox of the SAME Electron
+# build (byte-identical), so borrow it via a symlink — this keeps the sandbox ON with no `sudo` and
+# self-heals after an `npm install`. `find -L -perm -4000 -uid 0` is non-empty only for a working
+# (directly-or-via-symlink) setuid-root binary, so an already-linked sandbox is left alone.
+if [ "$(uname -s)" != "Darwin" ] && [ -e "$RES/../chrome-sandbox" ]; then
+  SANDBOX="$RES/../chrome-sandbox"
+  if [ -z "$(find -L "$SANDBOX" -perm -4000 -uid 0 2>/dev/null)" ]; then
+    linked=0
+    for stock in /usr/lib/claude-desktop/chrome-sandbox /opt/Claude/chrome-sandbox \
+                 "$HOME/.local/share/claude-desktop/chrome-sandbox"; do
+      if [ -n "$(find -L "$stock" -perm -4000 -uid 0 2>/dev/null)" ] && cmp -s "$SANDBOX" "$stock"; then
+        mv -f "$SANDBOX" "$SANDBOX.orig" 2>/dev/null || true
+        ln -sfn "$stock" "$SANDBOX"
+        echo "[run] chrome-sandbox: linked to $stock (setuid-root; keeps the renderer sandbox, no sudo)"
+        linked=1; break
+      fi
+    done
+    if [ "$linked" = 0 ]; then
+      echo "[run] WARNING: chrome-sandbox is not setuid-root and no matching system copy was found;"
+      echo "[run]          Electron may abort. Fix it once with:"
+      echo "[run]            sudo chown root:root '$PWD/$SANDBOX' && sudo chmod 4755 '$PWD/$SANDBOX'"
+      echo "[run]          (or add --no-sandbox to ./run.sh — less secure for the remote web content)."
+    fi
+  fi
+fi
+
 # The app spawns every subprocess (shell-PATH probe, Claude Code, ...) through a
 # "disclaimer" helper (Contents/Helpers/disclaimer) — a macOS TCC-attribution
 # wrapper present in the signed Claude.app but absent from stock Electron. Install an

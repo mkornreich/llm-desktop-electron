@@ -247,6 +247,12 @@ on Linux, `Electron.app/Contents/Resources` on macOS), the Claude Desktop profil
 (`~/.config/Claude` vs `~/Library/Application Support/Claude`), and the `disclaimer` helper path
 per platform. See [LINUX.md](LINUX.md) for the port's design and the folded-conditional gotchas.
 
+On modern Ubuntu (`kernel.apparmor_restrict_unprivileged_userns=1`) Electron's namespace sandbox is
+blocked, so it needs a **setuid-root `chrome-sandbox`** — which the downloaded Electron isn't. `run.sh`
+self-heals this by symlinking to the setuid-root `chrome-sandbox` the Claude Desktop `.deb` already
+installed (same Electron build, byte-identical), keeping the renderer sandbox **on with no `sudo`**. If
+no system copy matches, it prints the one-time `sudo chown root:root … && sudo chmod 4755 …` fix.
+
 ### The disclaimer helper
 
 Stock Electron has no equivalent of Claude Desktop's TCC-attribution helper, and the app invokes
