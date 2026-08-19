@@ -284,18 +284,45 @@ async function handle(req, res) {
 
     // Installed Ollama models, for the local model picker. Unioned across the managed side port
     // and the system Ollama on 11434 (they share a models dir). Empty when no Ollama is running.
+    //
+    // The picker only offers models the current config can actually RUN. When thinking is on — the
+    // default (OPENAI_SHOW_THINKING=1) — the proxy asks the model to think on every turn, and Ollama
+    // 400s a model without the "thinking" capability (`<model> does not support thinking`). So with
+    // thinking on, non-thinking models are filtered out rather than left selectable to fail at
+    // runtime; with thinking explicitly off, every installed model is offered.
     if (url.pathname === "/api/ollama-models" && req.method === "GET") {
       const localVals = config.readFile(".local-model").values;
       const managed = parseInt(localVals.OLLAMA_MANAGED_PORT || "11435", 10) || 11435;
       const ports = [...new Set([managed, 11434])];
-      const names = new Set();
+      // OPENAI_SHOW_THINKING may live in either file; default (unset) is ON, matching the proxy.
+      const showThinkingRaw = localVals.OPENAI_SHOW_THINKING ?? config.readFile(".openai-model").values.OPENAI_SHOW_THINKING;
+      const requireThinking = showThinkingRaw === undefined
+        ? true : !/^(0|false|off|no)$/i.test(String(showThinkingRaw).trim());
+
+      // name -> the first port serving it; capabilities are identical wherever a model is served.
+      const port = new Map();
       for (const p of ports) {
         try {
           const r = await fetch(`http://127.0.0.1:${p}/api/tags`, { signal: AbortSignal.timeout(1500) });
-          if (r.ok) for (const m of ((await r.json()).models || [])) if (m && m.name) names.add(m.name);
+          if (r.ok) for (const m of ((await r.json()).models || [])) if (m && m.name && !port.has(m.name)) port.set(m.name, p);
         } catch { /* that Ollama instance is not up */ }
       }
-      return send(res, 200, { models: [...names].sort(), ports });
+      // Ask each model for its capabilities. /api/show returns e.g. ["completion","tools","thinking"].
+      const capabilities = {};
+      await Promise.all([...port].map(async ([name, p]) => {
+        try {
+          const r = await fetch(`http://127.0.0.1:${p}/api/show`, {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(2500),
+          });
+          if (r.ok) capabilities[name] = (await r.json()).capabilities || [];
+        } catch { /* leave undefined -> treated as not-thinking when thinking is required */ }
+      }));
+
+      const all = [...port.keys()].sort();
+      const canThink = (n) => Array.isArray(capabilities[n]) && capabilities[n].includes("thinking");
+      const models = (requireThinking ? all.filter(canThink) : all);
+      return send(res, 200, { models, all, capabilities, requireThinking, ports });
     }
 
     if (url.pathname === "/api/status" && req.method === "GET")

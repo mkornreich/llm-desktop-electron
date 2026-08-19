@@ -112,7 +112,7 @@ window.settings = {
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
-let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {};
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true;
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 
@@ -260,6 +260,17 @@ function render() {
           : "Not in effect: the agent is set to Anthropic. Saved, and applied again when you switch back to OpenAI.";
         left.append(n);
       }
+      // The saved model is still shown even when it is filtered out of the picker (a non-thinking
+      // model while thinking is on), so the configuration is never silently misrepresented — but it
+      // is flagged, because the app will 400 on it every turn.
+      if (s.key === "LOCAL_MODEL" && OLLAMA_REQUIRE_THINKING && DRAFT.LOCAL_MODEL &&
+          OLLAMA_MODELS.length && !OLLAMA_MODELS.includes(DRAFT.LOCAL_MODEL)) {
+        const n = document.createElement("div"); n.className = "help inert-note";
+        n.textContent = `“${DRAFT.LOCAL_MODEL}” has no “thinking” capability. Thinking is on, so the app ` +
+          `requests it every turn and Ollama will reject this model — pick a thinking model above, or set ` +
+          `OPENAI_SHOW_THINKING=0.`;
+        left.append(n);
+      }
       const ctl = document.createElement("div"); ctl.className = "ctl"; ctl.append(control(s));
       row.append(left, ctl); sec.append(row);
     }
@@ -356,7 +367,13 @@ async function load() {
   DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT.LOCAL_MODEL);
   render();
   // Installed-model list is a best-effort enhancement; a missing Ollama must not block the form.
-  try { OLLAMA_MODELS = (await window.settings.ollamaModels()).models || []; render(); } catch { /* no Ollama */ }
+  // The picker is restricted to thinking-capable models when thinking is on (see /api/ollama-models).
+  try {
+    const om = await window.settings.ollamaModels();
+    OLLAMA_MODELS = om.models || [];
+    OLLAMA_REQUIRE_THINKING = om.requireThinking !== false;
+    render();
+  } catch { /* no Ollama */ }
 }
 
 async function save() {
