@@ -356,7 +356,11 @@ fi
 # does and ANTHROPIC_ENDPOINTS.md for the traffic it suppresses.
 EXTRA=()
 DISABLE_TELEMETRY_VAL=$(sed -n 's/^DISABLE_TELEMETRY=//p' .privacy 2>/dev/null | head -1)
-if [ -n "${DISABLE_TELEMETRY_VAL:-}" ] && [ "${DISABLE_TELEMETRY_VAL}" != "0" ]; then
+# Telemetry is OFF BY DEFAULT. The kill switch engages unless .privacy explicitly opts back IN
+# with DISABLE_TELEMETRY=0 — so a missing or blank .privacy still disables telemetry (the same
+# default-on-unless-0 shape as .sync), rather than the old behaviour where deleting .privacy
+# quietly re-enabled it.
+if [ "${DISABLE_TELEMETRY_VAL:-1}" != "0" ]; then
   # 1. The bundled Claude Code agent reads these (its own "no-telemetry" mode).
   export DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   # 2. The desktop shell's OWN telemetry ignores those env vars — it gates on the
