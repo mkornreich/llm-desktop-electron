@@ -15,9 +15,9 @@ const filePath = (f) => path.join(ROOT, f);
 // Every parameter the launcher or the proxy actually reads. `file` is where it is persisted.
 const SCHEMA = [
   { group: "Provider", file: ".provider", key: "PROVIDER", type: "enum",
-    options: ["openai", "anthropic"], default: "openai",
+    options: ["openai", "local", "anthropic"], default: "openai",
     label: "Model backing the agent",
-    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the local translation proxy. Only the agent is affected; the chat window is always remote claude.ai." },
+    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. Only the agent is affected; the chat window is always remote claude.ai." },
 
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",

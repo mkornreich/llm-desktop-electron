@@ -114,6 +114,14 @@ const PICKER_MODELS = CFG.OPENAI_PICKER_MODELS
   .split(",").map((s) => { const [id, ...n] = s.split(":"); return { id: (id || "").trim(), name: (n.join(":").trim() || (id || "").trim()) }; })
   .filter((m) => m.id);
 const OPENAI_BASE = CFG.OPENAI_BASE_URL;
+// A loopback OPENAI_BASE_URL means an on-device server (Ollama, llama.cpp, LM Studio, vLLM):
+// those serve the OpenAI API without authenticating, so the key is OPTIONAL there. An off-box
+// endpoint still requires a key — that is the difference the FATAL check below turns on.
+const IS_LOCAL_ENDPOINT = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(OPENAI_BASE);
+// The bearer token actually put on the wire: the real key wherever it exists, and a harmless
+// placeholder for a keyless local server (which ignores Authorization entirely). Never empty,
+// so a local endpoint that DOES want a token still gets a well-formed header.
+const OPENAI_AUTH = OPENAI_API_KEY || (IS_LOCAL_ENDPOINT ? "local" : "");
 // Budget used only when the client omits max_tokens. It deliberately does NOT read
 // FILE.maxTokens any more: ~/.dbeaver-ai-complete is a DBeaver config and carries
 // maxTokens=512, which is fine for a SQL assistant and far too small for an agent — a request
@@ -457,7 +465,7 @@ const NUDGE = "You ended your turn without calling any tool, but the user's requ
 const DEFAULT_TEMP = CFG.DEFAULT_TEMP;
 const PORT = CFG.PORT;
 
-if (!OPENAI_API_KEY) {
+if (!OPENAI_API_KEY && !IS_LOCAL_ENDPOINT) {
   console.error("[proxy] FATAL: no OpenAI API key (put `apiKey=sk-...` in .openai-key, or set OPENAI_API_KEY)");
   process.exit(1);
 }
@@ -873,7 +881,7 @@ async function summariseDropped(pieces) {
   try {
     const r = await fetch(`${OPENAI_BASE}/responses`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}` },
       body: JSON.stringify({
         model: COMPACT_MODEL, max_output_tokens: SUMMARY_MAX_TOKENS,
         input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
@@ -1643,7 +1651,7 @@ async function callOpenAI(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   const doFetch = (body) => f(`${OPENAI_BASE}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}` },
     body: JSON.stringify(stripUnsupported(body, "chat")),
   });
   let res = await doFetch(payload);
@@ -1952,7 +1960,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
 async function callResponses(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   let accepted = payload;                        // updated by each fallback that gets used
-  const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(stripUnsupported(b)) }); };
+  const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}` }, body: JSON.stringify(stripUnsupported(b)) }); };
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();

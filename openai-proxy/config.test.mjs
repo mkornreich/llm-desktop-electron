@@ -339,6 +339,18 @@ test("validation rejects values that parse but cannot work", () => {
   assert.match(noKey, /\.openai-key/);
 });
 
+test("a loopback OPENAI_BASE_URL makes the API key optional (on-device server)", () => {
+  // `local` provider points the proxy at Ollama/llama.cpp on localhost, which serve the OpenAI
+  // API without a key — so a missing key must NOT be an error there.
+  for (const base of ["http://127.0.0.1:11434/v1", "http://localhost:8080/v1", "http://[::1]:1234/v1"]) {
+    const errs = validate({ resolved: resolve({ env: { OPENAI_BASE_URL: base }, project: {}, home: {}, keyfile: {} }) }).errors.join();
+    assert.doesNotMatch(errs, /API key/, `loopback ${base} must not require a key`);
+  }
+  // But a remote endpoint with no key is still an error.
+  const remote = validate({ resolved: resolve({ env: { OPENAI_BASE_URL: "https://api.openai.com/v1" }, project: {}, home: {}, keyfile: {} }) }).errors.join();
+  assert.match(remote, /API key/);
+});
+
 test("validation warns about the tool-dropping configuration, without blocking it", () => {
   const r = validate({ resolved: resolve({
     env: { OPENAI_API_KEY: "k", OPENAI_MODEL: "gpt-5.6-sol", OPENAI_API: "chat" }, project: {}, home: {} }) });

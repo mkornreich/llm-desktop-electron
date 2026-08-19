@@ -89,7 +89,9 @@ fi
 # ---------------------------------------------------------------------------------------
 # Provider selection (.provider dot file, or PROVIDER=… for one launch).
 #
-#   openai     -> start the translation proxy and point the agent at it
+#   openai     -> start the translation proxy and point the agent at it (api.openai.com)
+#   local      -> same translation proxy, pointed at an on-device OpenAI-compatible server
+#                 (Ollama by default) so the agent runs on THIS machine's GPU, no API key
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
@@ -98,8 +100,8 @@ fi
 PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
 PROVIDER="${PROVIDER:-openai}"
 case "$PROVIDER" in
-  openai|anthropic) ;;
-  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|anthropic)"; exit 1 ;;
+  openai|anthropic|local) ;;
+  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic)"; exit 1 ;;
 esac
 echo "[run] provider: $PROVIDER"
 
@@ -131,9 +133,125 @@ export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-max}"
 export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT="${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT:-1}"
 echo "[run] CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL} (always-enable=${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT})"
 
-if [ "$PROVIDER" = "openai" ]; then
+# Bring up a run.sh-managed Ollama on a side port with a big context and GPU tuning, sharing the
+# system Ollama's models. Non-destructive by design: a system Ollama is usually pinned to a small
+# context by its service unit and can't be rebound without root, so instead of fighting it we run
+# our OWN second instance on OLLAMA_MANAGED_PORT with the context + tuning the agent needs. Reuses
+# an already-running managed instance when its context still matches; restarts it when it changed.
+# The tuning defaults matter on a laptop GPU: q8_0 KV cache roughly halves the context's VRAM,
+# flash attention cuts memory further, and NUM_PARALLEL=1 gives the FULL context to the single
+# agent request instead of Ollama splitting it across parallel slots.
+#   ensure_ollama <port> <context-tokens> <models-dir-or-empty>
+ensure_ollama() {
+  local port="$1" ctx="$2" models_dir="$3"
+  local baseu="http://127.0.0.1:${port}"
+  local statefile="$PWD/user-data/ollama-managed"       # "<pid> <ctx>" of the instance we own
+  local logfile="$PWD/user-data/ollama-managed.log"
+  mkdir -p "$PWD/user-data"
+
+  if [ -f "$statefile" ]; then
+    local old_pid old_ctx
+    read -r old_pid old_ctx < "$statefile" || true
+    if [ -n "${old_pid:-}" ] && kill -0 "$old_pid" 2>/dev/null; then
+      if [ "${old_ctx:-}" = "$ctx" ] && curl -sf --max-time 2 "${baseu}/api/version" >/dev/null 2>&1; then
+        echo "[run] managed Ollama: reusing pid ${old_pid} on 127.0.0.1:${port} (context ${ctx})"
+        return 0
+      fi
+      echo "[run] managed Ollama: context ${old_ctx:-?} -> ${ctx}; restarting"
+      kill "$old_pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do if ! kill -0 "$old_pid" 2>/dev/null; then break; fi; sleep 1; done
+    fi
+  fi
+
+  # Never stomp a foreign listener already on the port.
+  if curl -sf --max-time 2 "${baseu}/api/version" >/dev/null 2>&1; then
+    echo "[run] managed Ollama: 127.0.0.1:${port} already answering but not ours — using it as-is"
+    return 0
+  fi
+
+  echo "[run] managed Ollama: starting on 127.0.0.1:${port} (context ${ctx}, kv ${OLLAMA_KV_CACHE_TYPE:-q8_0}, flash ${OLLAMA_FLASH_ATTENTION:-1}, parallel ${OLLAMA_NUM_PARALLEL:-1})"
+  (
+    export OLLAMA_HOST="127.0.0.1:${port}"
+    if [ -n "$models_dir" ]; then export OLLAMA_MODELS="$models_dir"; fi
+    export OLLAMA_CONTEXT_LENGTH="$ctx"
+    export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
+    export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}"
+    export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+    export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
+    nohup ollama serve > "$logfile" 2>&1 &
+    echo "$! $ctx" > "$statefile"
+  )
+  local new_pid; read -r new_pid _ < "$statefile"
+  local i
+  for i in $(seq 1 30); do
+    if curl -sf --max-time 2 "${baseu}/api/version" >/dev/null 2>&1; then
+      echo "[run] managed Ollama: ready after ${i}s (pid ${new_pid})"; return 0
+    fi
+    if ! kill -0 "$new_pid" 2>/dev/null; then echo "[run] managed Ollama: FAILED to start — see ${logfile}"; return 1; fi
+    sleep 1
+  done
+  echo "[run] managed Ollama: not ready in 30s — see ${logfile}"; return 1
+}
+
+if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
+
+  # `local` provider: the SAME translation proxy, pointed at an on-device OpenAI-compatible
+  # server (Ollama by default) instead of api.openai.com, so the agent runs on this machine's
+  # GPU. Read the endpoint/model from .local-model and export them as OPENAI_* env vars, which
+  # outrank .openai-model in the proxy's precedence — so ensure-proxy's config hash AND the
+  # proxy both target the local server. No API key needed: the proxy treats a loopback
+  # OPENAI_BASE_URL as keyless. Everything downstream (proxy start, PROXY_ANTHROPIC_BASE_URL,
+  # the Claude Code identity) is shared with openai mode below; only CONF differs.
+  CONF=".openai-model"
+  if [ "$PROVIDER" = "local" ]; then
+    CONF=".local-model"
+    export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-qwen2.5:7b-instruct}"
+    # OpenAI surface for the local server. Default chat/completions: every local server has it,
+    # and its 128-tool cap helps a small model fit its context. Recent Ollama also serves
+    # /responses — set OPENAI_API=responses in .local-model to use it.
+    export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_API="${OPENAI_API:-chat}"
+
+    # Managed on-device Ollama (default on). Give the agent a big context the system Ollama
+    # usually caps. Tuning knobs come from .local-model (env wins); the context is per-model —
+    # CONTEXT_<model> if present, else OLLAMA_CONTEXT_LENGTH, else 32768.
+    OLLAMA_AUTOSTART="${OLLAMA_AUTOSTART:-$(sed -n 's/^OLLAMA_AUTOSTART=//p' "$CONF" 2>/dev/null | head -1)}"
+    if [ "${OLLAMA_AUTOSTART:-1}" != "0" ] && command -v ollama >/dev/null 2>&1; then
+      for k in OLLAMA_MANAGED_PORT OLLAMA_KV_CACHE_TYPE OLLAMA_FLASH_ATTENTION OLLAMA_NUM_PARALLEL OLLAMA_KEEP_ALIVE OLLAMA_MODELS OLLAMA_CONTEXT_LENGTH; do
+        if [ -z "${!k:-}" ]; then
+          fv="$(sed -n "s/^${k}=//p" "$CONF" 2>/dev/null | head -1)"
+          if [ -n "$fv" ]; then export "$k=$fv"; fi
+        fi
+      done
+      DESIRED_CTX=""
+      while IFS='=' read -r k v; do
+        if [ "${k#CONTEXT_}" = "$OPENAI_MODEL" ]; then DESIRED_CTX="$v"; fi
+      done < <(grep -E '^CONTEXT_' "$CONF" 2>/dev/null)
+      DESIRED_CTX="${DESIRED_CTX:-${OLLAMA_CONTEXT_LENGTH:-32768}}"
+      # Models dir: explicit OLLAMA_MODELS, else the system Ollama's store if we can read it
+      # (so models pulled via the normal `ollama` CLI are shared with our instance).
+      MODELS_DIR="${OLLAMA_MODELS:-}"
+      if [ -z "$MODELS_DIR" ] && [ -r /usr/share/ollama/.ollama/models ]; then MODELS_DIR=/usr/share/ollama/.ollama/models; fi
+      if ensure_ollama "${OLLAMA_MANAGED_PORT:-11435}" "$DESIRED_CTX" "$MODELS_DIR"; then
+        export OPENAI_BASE_URL="http://127.0.0.1:${OLLAMA_MANAGED_PORT:-11435}/v1"
+      else
+        echo "[run] managed Ollama unavailable; falling back to OPENAI_BASE_URL from .local-model"
+      fi
+    fi
+
+    # Endpoint the proxy talks to: the managed instance above, or the configured/default server
+    # when OLLAMA_AUTOSTART=0 (you run and size it yourself).
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$(sed -n 's/^OPENAI_BASE_URL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}"
+    echo "[run] local model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (on-device, api ${OPENAI_API}, no key)"
+    if ! curl -sf --max-time 3 "${OPENAI_BASE_URL%/}/models" >/dev/null 2>&1; then
+      echo "[run] WARNING: no OpenAI-compatible server answered at ${OPENAI_BASE_URL}"
+      echo "[run]          is ollama installed and is '${OPENAI_MODEL}' pulled? ('ollama pull ${OPENAI_MODEL}')"
+    fi
+  fi
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:
   #   * a model change did not take effect, because the OLD proxy answered /health and got
   #     reused while the launcher printed "proxy healthy";
@@ -160,17 +278,17 @@ if [ "$PROVIDER" = "openai" ]; then
   # claude-* identity Desktop selected and gives bundled/cache Claude Code this supported
   # [1m] identity instead. Claude Code then sends claude-opus-4-8 on the wire, which the
   # proxy continues to map to OPENAI_MODEL.
-  OPENAI_CLAUDE_CODE_MODEL=$(sed -n 's/^OPENAI_CLAUDE_CODE_MODEL=//p' .openai-model 2>/dev/null | head -1)
+  OPENAI_CLAUDE_CODE_MODEL=$(sed -n 's/^OPENAI_CLAUDE_CODE_MODEL=//p' "$CONF" 2>/dev/null | head -1)
   if [ -z "${OPENAI_CLAUDE_CODE_MODEL:-}" ]; then
-    echo "[run] missing OPENAI_CLAUDE_CODE_MODEL in .openai-model"
+    echo "[run] missing OPENAI_CLAUDE_CODE_MODEL in $CONF"
     exit 1
   fi
   export LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL="$OPENAI_CLAUDE_CODE_MODEL"
-  echo "[run] Claude Code internal model: ${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL} (OpenAI mode)"
-  # Other OpenAI-only agent settings (classifier model, gateway model discovery, context cap).
+  echo "[run] Claude Code internal model: ${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL} (${PROVIDER} mode)"
+  # Other proxy-mode agent settings (classifier model, gateway model discovery, context cap).
   while IFS='=' read -r k v; do
     case "$k" in CLAUDE_CODE_*) export "$k=$v"; echo "[run] $k=$v" ;; esac
-  done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' .openai-model 2>/dev/null)
+  done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' "$CONF" 2>/dev/null)
 else
   # Leave no trace of OpenAI mode in the environment. Unsetting the base URL is what makes
   # the env-gated patches fall back to the app's own Anthropic host.

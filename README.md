@@ -302,7 +302,8 @@ left byte-identical.
 ### Choosing the provider
 
 ```bash
-./run-openai.sh       # OpenAI, via the local translation proxy
+./run-openai.sh       # OpenAI (api.openai.com), via the local translation proxy
+./run-local.sh        # an on-device model on this machine's GPU (Ollama), same proxy, no API key
 ./run-anthropic.sh    # Claude, calling Anthropic directly (stock behaviour)
 ./run.sh              # whichever .provider says (default: openai)
 ```
@@ -329,15 +330,45 @@ Maximum reasoning is the default either way, through two different knobs: the pr
 Either way this affects only the **agent**. The chat window is the remote claude.ai web
 app talking to Anthropic in both modes.
 
+#### On-device model (`local`)
+
+`PROVIDER=local` (or `./run-local.sh`) is `openai` mode pointed at a local OpenAI-compatible
+server instead of api.openai.com, so the agent runs on **this machine's GPU** with no API key —
+the proxy treats a loopback `OPENAI_BASE_URL` as keyless. It uses [Ollama](https://ollama.com),
+and everything is configured in [`.local-model`](.local-model).
+
+**It manages Ollama for you.** The agent's prompt (system + up to 128 tools) is large, and a
+system Ollama is usually pinned to a small context by its service unit — which would silently
+truncate that prompt. So `run.sh` starts its **own** Ollama on a side port
+(`OLLAMA_MANAGED_PORT`, default 11435) with a big context and the right GPU tuning, sharing the
+models you already pulled, and leaves the system Ollama untouched for its other clients. It
+reuses that instance across launches and restarts it only when the context changes. The tuning
+that makes a big context fit a laptop GPU is applied automatically: `q8_0` KV cache (≈half the
+VRAM of `f16`), flash attention, and `OLLAMA_NUM_PARALLEL=1` so the **full** context goes to the
+single agent request instead of being split across slots. Set `OLLAMA_AUTOSTART=0` to manage the
+server yourself.
+
+- **Context is per model.** `OLLAMA_CONTEXT_LENGTH` is the default; `CONTEXT_<model>` overrides it
+  for a given model (a bigger native window can take more; a large model needs less to fit VRAM).
+  Keep `CLAUDE_CODE_AUTO_COMPACT_WINDOW` under whatever context is in effect.
+- **A tool-calling model is required.** The agent is tool calls end to end, so the model must emit
+  proper OpenAI `tool_calls`, not dump them as text. `qwen2.5:7b-instruct` (32K), `qwen3:8b` (40K)
+  and `granite4.1:8b` (128K) do; `qwen2.5-coder:7b` does not. Pull it first (`ollama pull <model>`).
+
+`local` speaks Chat Completions by default (universal across local servers; its 128-tool cap
+also helps a small model fit context). A 7-8B model on a laptop GPU is far less capable than the
+hosted models — this is for privacy/offline use, not maximum quality.
+
 ### Launcher configuration
 
-Four dot files, all read by `run.sh`, each overridable by an env var of the same name.
+Five dot files, all read by `run.sh`, each overridable by an env var of the same name.
 None contains a secret.
 
 | File | Setting | Default | Effect |
 |---|---|---|---|
-| [`.provider`](.provider) | `PROVIDER` | `openai` | `openai` = agent via the proxy; `anthropic` = agent calls Anthropic directly with Claude |
+| [`.provider`](.provider) | `PROVIDER` | `openai` | `openai` = agent via the proxy (api.openai.com); `local` = proxy → on-device GPU model; `anthropic` = agent calls Anthropic directly with Claude |
 | [`.openai-model`](.openai-model) | `OPENAI_MODEL` and friends | `gpt-5.3-codex` | Everything in the proxy table above |
+| [`.local-model`](.local-model) | `OPENAI_MODEL`, `OPENAI_BASE_URL` | Ollama `qwen2.5:7b-instruct` | The local server and model for `local` mode |
 | [`.privacy`](.privacy) | `DISABLE_TELEMETRY` | `1` | Turns off first-party telemetry and Sentry, and sinkholes the analytics hosts |
 | [`.sync`](.sync) | `SYNC_CLAUDE_SESSIONS` | `1` | Copies Claude Desktop's session list into this build's isolated profile on launch |
 
