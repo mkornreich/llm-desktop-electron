@@ -677,6 +677,12 @@ node config.mjs --validate   # range and cross-field checks; non-zero on error
   `temperature` if a model rejects it.
 - Other env overrides: `OPENAI_BASE_URL`, `PORT`, `OPENAI_MAX_OUTPUT_TOKENS`
   (default 32768), `OPENAI_MAX_TOOLS` (default 128).
+- **On-device models:** point `OPENAI_BASE_URL` at a local OpenAI-compatible server
+  (Ollama `http://127.0.0.1:11434/v1`, llama.cpp, LM Studio, vLLM) and the proxy translates to
+  it just as it does to OpenAI. A **loopback** base URL is treated as **keyless** — no
+  `OPENAI_API_KEY` required (a placeholder bearer is sent, which local servers ignore). The
+  desktop build wires this up as the `local` provider; see the top-level README and
+  [`.local-model`](../.local-model).
 
 > **Model notes:** `gpt-5.3-codex` (Responses API) is the current pick — verified
 > end-to-end incl. tools, streaming, and tool-result round-trips. For a

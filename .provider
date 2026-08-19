@@ -3,6 +3,9 @@
 #
 #   openai     -> route the agent through openai-proxy/proxy.mjs (Anthropic Messages API
 #                 in, OpenAI out). Model and behaviour come from .openai-model.
+#   local      -> same proxy, but pointed at an on-device OpenAI-compatible server (Ollama by
+#                 default) so the agent runs on this machine's GPU. No API key. Endpoint and
+#                 model come from .local-model. See that file for the context caveats.
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude, exactly
 #                 as the shipped app does. The proxy is not started, and the OpenAI-only
 #                 CLAUDE_CODE_* settings from .openai-model are NOT applied — sending an
@@ -12,5 +15,5 @@
 # this setting only affects the agent. The bundle patches are env-gated, so in anthropic
 # mode they are inert and no files need reverting.
 #
-# Convenience wrappers: ./run-openai.sh and ./run-anthropic.sh force one mode.
+# Convenience wrappers: ./run-openai.sh, ./run-local.sh and ./run-anthropic.sh force one mode.
 PROVIDER=openai

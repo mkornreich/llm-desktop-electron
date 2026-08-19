@@ -409,7 +409,10 @@ export function validate(opts = {}) {
   if (v.OPENAI_CLASSIFIER_SLOW_MS >= 60000)
     warnings.push(`OPENAI_CLASSIFIER_SLOW_MS=${v.OPENAI_CLASSIFIER_SLOW_MS} is at or past the CLI's ` +
       `60s fail-closed classifier deadline, so the warning can never fire before the denial`);
-  if (!v.OPENAI_API_KEY) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, .openai-key)`);
+  // A loopback OPENAI_BASE_URL is an on-device server (Ollama etc.) that serves the OpenAI API
+  // without a key, so a missing key there is fine — mirrors the proxy's own startup gate.
+  const isLocalEndpoint = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(v.OPENAI_BASE_URL || "");
+  if (!v.OPENAI_API_KEY && !isLocalEndpoint) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, .openai-key)`);
 
   return { errors, warnings };
 }
