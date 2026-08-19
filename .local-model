@@ -58,6 +58,9 @@ OPENAI_BASE_URL=http://127.0.0.1:11434/v1
 # Internal identity handed to Claude Code; kept the same as openai mode so the CLI stays fully
 # featured. What matters for a small local model is the compaction window below.
 OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]
-# Compact the conversation this many tokens in. Keep it under OLLAMA_CONTEXT_LENGTH, leaving room
-# for the tools + reply.
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=24000
+# Compaction window (when Claude Code compacts the conversation). Leave this unset: run.sh
+# derives it PER MODEL as 3/4 of the context in effect above (CONTEXT_<model> / the default),
+# leaving room for the tools + reply — so switching models keeps a sane window automatically.
+# To pin it, either set a per-model override here (COMPACT_<model>, exact model name):
+#   COMPACT_gemma3:27b=6000
+# or force one value for every model with an explicit CLAUDE_CODE_AUTO_COMPACT_WINDOW=<n>.
