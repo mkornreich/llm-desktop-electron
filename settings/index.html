@@ -416,6 +416,14 @@ $("#relaunch").onclick = async () => {
 load().catch((e) => { $("#form").textContent = "Failed to load settings: " + e.message; });
 refreshStatus();
 setInterval(refreshStatus, 5000);
+
+// The server is a plain local process with no handle on this window, so it can't tell when the
+// window closes. Ping it so it knows we are still here; when the pings stop it shuts itself down
+// instead of lingering. The pagehide beacon just makes that shutdown quicker than the timeout.
+const heartbeat = () => fetch("/api/heartbeat?t=" + TOKEN, { headers: { "x-settings-token": TOKEN } }).catch(() => {});
+heartbeat();
+setInterval(heartbeat, 2000);
+addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/close?t=" + TOKEN); } catch (e) {} });
 </script>
 </body>
 </html>

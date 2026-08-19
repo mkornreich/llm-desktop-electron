@@ -29,6 +29,8 @@ async function boot(env = {}) {
     env: { ...process.env, SETTINGS_PORT: String(port), ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  let exited = null;
+  child.on("exit", (code, signal) => { exited = { code, signal }; });
   let out = "";
   const url = await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`server did not start. Output:\n${out}`)), 15000);
@@ -48,7 +50,23 @@ async function boot(env = {}) {
     });
     return { status: r.status, body: await r.json().catch(() => null) };
   };
-  return { api, base: url.base, token: url.token, stop: () => child.kill("SIGKILL"), out: () => out };
+  return {
+    api, base: url.base, token: url.token, out: () => out,
+    stop: () => child.kill("SIGKILL"),
+    alive: () => exited === null,
+    // Resolves with {code,signal} when the child exits, or null if it is still up after `ms`.
+    waitExit: (ms) => new Promise((resolve) => {
+      if (exited) return resolve(exited);
+      const t = setTimeout(() => resolve(null), ms);
+      child.on("exit", (code, signal) => { clearTimeout(t); resolve({ code, signal }); });
+    }),
+  };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function beatFor(s, ms, every = 250) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { await s.api("/api/heartbeat").catch(() => {}); await sleep(every); }
 }
 
 test("the token is required, and it is not guessable from the response", async () => {
@@ -182,4 +200,64 @@ test("an empty provenance store is reported as empty, not as an error", async ()
     assert.equal(status, 200);
     assert.deepEqual(body.sessions, []);
   } finally { s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// --- window lifetime -------------------------------------------------------------------------
+// settings.sh detaches the server and exits, so nothing external ever stops it. The window keeps
+// it alive by heartbeating; when the beats stop the server must shut itself down rather than
+// linger as an orphan on 127.0.0.1. The grace windows are shrunk here so the tests are quick.
+
+test("with no window ever connecting, the server gives up instead of orphaning itself", async () => {
+  // The backstop for a launch where the browser never opens: no heartbeat ever arrives.
+  const s = await boot({ SETTINGS_BOOT_GRACE_MS: "300" });
+  try {
+    const ex = await s.waitExit(6000);
+    assert.ok(ex, "the server should have exited on its own");
+    assert.equal(ex.code, 0, "a self-shutdown is a clean exit");
+  } finally { s.stop(); }
+});
+
+test("the server shuts down once the window stops sending heartbeats", async () => {
+  const s = await boot({ SETTINGS_IDLE_GRACE_MS: "700", SETTINGS_BOOT_GRACE_MS: "60000" });
+  try {
+    const { status } = await s.api("/api/heartbeat");   // the window has connected...
+    assert.equal(status, 200);
+    const ex = await s.waitExit(7000);                  // ...and then goes away
+    assert.ok(ex, "the server should exit after the heartbeats stop");
+    assert.equal(ex.code, 0);
+  } finally { s.stop(); }
+});
+
+test("heartbeats keep the server alive, and only their absence stops it", async () => {
+  const s = await boot({ SETTINGS_IDLE_GRACE_MS: "700", SETTINGS_BOOT_GRACE_MS: "60000" });
+  try {
+    await beatFor(s, 2200, 250);                        // well past the idle grace, kept alive throughout
+    assert.ok(s.alive(), "a heartbeating window must not be shut down");
+    const ex = await s.waitExit(7000);                  // stop beating -> it exits
+    assert.ok(ex, "the server should exit once the heartbeats stop");
+  } finally { s.stop(); }
+});
+
+test("the unload beacon shuts the server down without waiting out the idle timeout", async () => {
+  // The idle grace is huge here; only the /api/close path can end it in time.
+  const s = await boot({ SETTINGS_CLOSE_GRACE_MS: "200", SETTINGS_IDLE_GRACE_MS: "60000", SETTINGS_BOOT_GRACE_MS: "60000" });
+  try {
+    await s.api("/api/heartbeat");
+    await s.api("/api/close", { method: "POST" });
+    const ex = await s.waitExit(5000);
+    assert.ok(ex, "the close beacon should have shut the server down");
+  } finally { s.stop(); }
+});
+
+test("a reload is not a close: a beacon followed by a heartbeat keeps the server up", async () => {
+  // pagehide fires on reload too and sends the close beacon; the reloaded page's first heartbeat
+  // must cancel it, or reloading the settings window would kill the server out from under it.
+  const s = await boot({ SETTINGS_CLOSE_GRACE_MS: "800", SETTINGS_IDLE_GRACE_MS: "60000", SETTINGS_BOOT_GRACE_MS: "60000" });
+  try {
+    await s.api("/api/heartbeat");
+    await s.api("/api/close", { method: "POST" });      // pagehide
+    await sleep(200);
+    await beatFor(s, 2200, 250);                        // the reloaded page reconnects and keeps beating
+    assert.ok(s.alive(), "a reload must not shut the server down");
+  } finally { s.stop(); }
 });

@@ -233,7 +233,19 @@ async function relaunch() {
                   `(${last?.state}: ${last?.reason}). See openai-proxy/proxy.log.` };
 }
 
-const server = http.createServer(async (req, res) => {
+// The settings window is a plain browser page, so there is no close event to listen for. The page
+// heartbeats every couple of seconds; when the beats stop — window closed, tab closed, browser
+// quit — the server shuts itself down rather than lingering as an orphan on 127.0.0.1. A request in
+// flight (a relaunch can take ~a minute) blocks shutdown, and the boot grace covers a browser that
+// is still cold-starting and has not sent its first beat yet.
+let activeRequests = 0, seenBeat = false, lastBeat = 0;
+let closeAt = 0;   // set by an unload beacon; a later heartbeat clears it, so a reload is not a close
+const startedAt = Date.now();
+const BOOT_GRACE_MS  = parseInt(process.env.SETTINGS_BOOT_GRACE_MS  || "120000", 10);
+const IDLE_GRACE_MS  = parseInt(process.env.SETTINGS_IDLE_GRACE_MS  || "6000", 10);
+const CLOSE_GRACE_MS = parseInt(process.env.SETTINGS_CLOSE_GRACE_MS || "2500", 10);
+
+async function handle(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
 
   if (url.pathname === "/" && req.method === "GET") {
@@ -245,6 +257,11 @@ const server = http.createServer(async (req, res) => {
 
   if (!url.pathname.startsWith("/api/")) return send(res, 404, { error: "not found" });
   if (!authorized(req, url)) return send(res, 403, { error: "bad token" });
+
+  // Window liveness. The page pings /api/heartbeat; the unload beacon hits /api/close for a faster
+  // exit. Both are deliberately trivial and require the token like every other /api route.
+  if (url.pathname === "/api/heartbeat") { seenBeat = true; lastBeat = Date.now(); closeAt = 0; return send(res, 200, { ok: true }); }
+  if (url.pathname === "/api/close") { closeAt = Date.now(); return send(res, 200, { ok: true }); }
 
   try {
     if (url.pathname === "/api/config" && req.method === "GET")
@@ -318,7 +335,29 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     return send(res, 500, { error: e.message });
   }
+}
+
+const server = http.createServer(async (req, res) => {
+  activeRequests++;
+  try { await handle(req, res); }
+  finally { activeRequests--; }
 });
+
+function shutdown(why) {
+  console.log(`[settings] ${why}; shutting down`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 800).unref();   // force it if a keep-alive socket lingers
+}
+
+// One watchdog tick. unref() so it never keeps the process alive on its own — the http server does
+// that, and the moment the server is the only thing left running we want to be free to exit.
+setInterval(() => {
+  if (activeRequests > 0) return;                    // don't cut off an in-flight request or relaunch
+  const now = Date.now();
+  if (!seenBeat) { if (now - startedAt > BOOT_GRACE_MS) shutdown("the window never opened"); return; }
+  if (closeAt && now - closeAt > CLOSE_GRACE_MS) return shutdown("the settings window was closed");
+  if (now - lastBeat > IDLE_GRACE_MS) shutdown("the settings window went away");
+}, 1500).unref();
 
 server.listen(PORT, "127.0.0.1", () => {
   // stdout is consumed by settings.sh, which opens this URL.
