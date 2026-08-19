@@ -321,8 +321,10 @@ single agent request instead of being split across slots. Set `OLLAMA_AUTOSTART=
 server yourself.
 
 - **Context is per model.** `OLLAMA_CONTEXT_LENGTH` is the default; `CONTEXT_<model>` overrides it
-  per model (a bigger native window can take more; a large model needs less to fit VRAM). Keep
-  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` under whatever context is in effect.
+  per model (a bigger native window can take more; a large model needs less to fit VRAM). The
+  compaction window follows automatically — `run.sh` derives `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as
+  3/4 of the context in effect, so switching models keeps a sane window (override per model with
+  `COMPACT_<model>`, or globally with an explicit `CLAUDE_CODE_AUTO_COMPACT_WINDOW`).
 - **A tool-calling model is required.** The agent is tool calls end to end, so the model must emit
   proper OpenAI `tool_calls`, not dump them as text. `qwen2.5:7b-instruct` (32K), `qwen3:8b` (40K)
   and `granite4.1:8b` (128K) do; `qwen2.5-coder:7b` does not. Pull it first (`ollama pull <model>`).
