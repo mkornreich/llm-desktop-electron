@@ -112,7 +112,7 @@ test("the schema covers every parameter the proxy and launcher read", () => {
   // out of a dot file slipped past it — which is how CLAUDE_CODE_AUTO_COMPACT_WINDOW, the knob
   // that decides the context window the app displays, stayed invisible in the GUI. So assert
   // against the dot files themselves: if a setting is persisted, it is exposed.
-  for (const f of [".provider", ".privacy", ".sync", ".openai-model", ".diagnostics"]) {
+  for (const f of [".provider", ".privacy", ".sync", ".openai-model", ".diagnostics", ".openrouter-model"]) {
     const txt = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
     const persisted = [...txt.matchAll(/^([A-Z][A-Z0-9_]+)=/gm)].map((m) => m[1]);
     assert.ok(persisted.length, `${f} should define at least one setting`);
@@ -124,7 +124,7 @@ test("the schema covers every parameter the proxy and launcher read", () => {
 test("every schema entry is well formed", () => {
   for (const s of SCHEMA) {
     assert.ok(s.file && s.key && s.type && s.label, `incomplete entry: ${s.key}`);
-    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context"].includes(s.type), `bad type on ${s.key}`);
+    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context", "openrouter"].includes(s.type), `bad type on ${s.key}`);
     if (s.type === "enum") assert.ok(Array.isArray(s.options) && s.options.length, `enum ${s.key} needs options`);
     assert.ok(s.default !== undefined, `${s.key} needs a default`);
   }

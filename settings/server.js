@@ -215,8 +215,10 @@ async function relaunch() {
   steps.push("launched ./run.sh");
 
   // In Anthropic mode there is deliberately no proxy, so there is nothing to verify. Waiting for
-  // one would time out and report a failure for a correct configuration.
-  if (cfg.provider() !== "openai")
+  // one would time out and report a failure for a correct configuration. Every other mode (openai,
+  // local, openrouter) runs the proxy and MUST be verified — the old `!== "openai"` check wrongly
+  // skipped verification for local and openrouter.
+  if (cfg.provider() === "anthropic")
     return { started: true, steps, provider: cfg.provider(), verified: "no proxy in anthropic mode" };
 
   const deadline = Date.now() + 40000;
@@ -323,6 +325,31 @@ async function handle(req, res) {
       const canThink = (n) => Array.isArray(capabilities[n]) && capabilities[n].includes("thinking");
       const models = (requireThinking ? all.filter(canThink) : all);
       return send(res, 200, { models, all, capabilities, requireThinking, ports });
+    }
+
+    // Tool-capable OpenRouter models, for the openrouter picker. Fetches the public models catalog
+    // (no auth), keeps models whose supported_parameters include "tools" (the agent is tool calls
+    // end to end), and flags the free ones (pricing.prompt and .completion both "0"). Free models
+    // are heavily rate-limited and need data-sharing enabled at openrouter.ai/settings/privacy — the
+    // picker help says so. On any network error it returns empty and the field falls back to text.
+    if (url.pathname === "/api/openrouter-models" && req.method === "GET") {
+      let models = [];
+      try {
+        const r = await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(6000) });
+        if (r.ok) {
+          models = ((await r.json()).data || [])
+            .filter((m) => Array.isArray(m.supported_parameters) && m.supported_parameters.includes("tools"))
+            .map((m) => ({
+              id: m.id,
+              name: m.name || m.id,
+              free: !!(m.pricing && m.pricing.prompt === "0" && m.pricing.completion === "0"),
+              context: m.context_length || null,
+            }))
+            // Free first, then alphabetical — the free ones are what the picker is mostly for.
+            .sort((a, b) => (a.free === b.free ? a.id.localeCompare(b.id) : a.free ? -1 : 1));
+        }
+      } catch { /* OpenRouter unreachable -> empty; the field falls back to a text input */ }
+      return send(res, 200, { models });
     }
 
     if (url.pathname === "/api/status" && req.method === "GET")

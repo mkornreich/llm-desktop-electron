@@ -149,6 +149,10 @@ export const SETTINGS = [
 
   { name: "OPENAI_BASE_URL", env: "OPENAI_BASE_URL", type: "str",
     default: "https://api.openai.com/v1" },
+  // Extra headers sent to the upstream, as comma-separated `Key:Value` pairs. Used for OpenRouter's
+  // optional attribution headers (HTTP-Referer / X-Title); harmless and empty for other backends.
+  { name: "OPENAI_EXTRA_HEADERS", env: "OPENAI_EXTRA_HEADERS", project: ["OPENAI_EXTRA_HEADERS"],
+    type: "str", default: "" },
   { name: "PORT", env: "PORT", type: "int", default: "8123" },   // no `zero`: see resolve()
 
   { name: "OPENAI_DEFAULT_MAX_TOKENS", env: "OPENAI_DEFAULT_MAX_TOKENS",

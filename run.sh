@@ -122,6 +122,8 @@ fi
 #   openai     -> start the translation proxy and point the agent at it (api.openai.com)
 #   local      -> same translation proxy, pointed at an on-device OpenAI-compatible server
 #                 (Ollama by default) so the agent runs on THIS machine's GPU, no API key
+#   openrouter -> same translation proxy, pointed at OpenRouter (openrouter.ai) with an sk-or-
+#                 key in .openai-key, so the agent runs on any model OpenRouter serves
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
@@ -130,8 +132,8 @@ fi
 PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
 PROVIDER="${PROVIDER:-openai}"
 case "$PROVIDER" in
-  openai|anthropic|local) ;;
-  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic)"; exit 1 ;;
+  openai|anthropic|local|openrouter) ;;
+  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic|openrouter)"; exit 1 ;;
 esac
 echo "[run] provider: $PROVIDER"
 
@@ -248,7 +250,7 @@ unload_managed_ollama() {
   done
 }
 
-if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
+if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "openrouter" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
 
@@ -317,6 +319,28 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ]; then
     if ! curl -sf --max-time 3 "${OPENAI_BASE_URL%/}/models" >/dev/null 2>&1; then
       echo "[run] WARNING: no OpenAI-compatible server answered at ${OPENAI_BASE_URL}"
       echo "[run]          is ollama installed and is '${OPENAI_MODEL}' pulled? ('ollama pull ${OPENAI_MODEL}')"
+    fi
+  fi
+
+  # `openrouter` provider: the SAME translation proxy, pointed at OpenRouter's OpenAI-compatible
+  # gateway instead of api.openai.com. Reads model/api from .openrouter-model; the base URL is
+  # fixed; the sk-or- key resolves from .openai-key (the proxy's keyfile source) — NOT handled here.
+  if [ "$PROVIDER" = "openrouter" ]; then
+    CONF=".openrouter-model"
+    export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-poolside/laguna-s-2.1:free}"
+    # Chat Completions by default (broadest model coverage). OpenRouter also serves a stateless
+    # /responses — set OPENAI_API=responses in .openrouter-model to use it (avoids the 128-tool cap).
+    export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_API="${OPENAI_API:-chat}"
+    export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+    # Optional OpenRouter attribution headers (HTTP-Referer / X-Title). Format: "Key:Value,Key:Value".
+    OPENAI_EXTRA_HEADERS_VAL=$(sed -n 's/^OPENAI_EXTRA_HEADERS=//p' "$CONF" 2>/dev/null | head -1)
+    [ -n "${OPENAI_EXTRA_HEADERS_VAL}" ] && export OPENAI_EXTRA_HEADERS="${OPENAI_EXTRA_HEADERS_VAL}"
+    echo "[run] openrouter model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
+    # The sk-or- key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no OpenRouter key found — put 'apiKey=sk-or-...' in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:

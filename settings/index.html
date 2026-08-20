@@ -108,11 +108,12 @@ window.settings = {
   provenance: ()      => api("/api/provenance?limit=200"),
   relaunch: ()        => api("/api/relaunch", { method: "POST" }),
   ollamaModels: ()    => api("/api/ollama-models"),
+  openrouterModels: () => api("/api/openrouter-models"),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
-let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true;
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [];
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 
@@ -144,9 +145,13 @@ function refreshDirty() {
 // would reject outright. .provider, .privacy and .sync apply either way.
 const OPENAI_ONLY = (s) => s.file === ".openai-model";
 const LOCAL_ONLY = (s) => s.file === ".local-model";
-// .openai-model applies in openai (and local) mode; .local-model only in local mode. Inert rows
-// are dimmed and marked, never hidden or cleared — the value still applies when you switch back.
-const isInert = (s) => (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s)) || (DRAFT.PROVIDER !== "local" && LOCAL_ONLY(s));
+const OPENROUTER_ONLY = (s) => s.file === ".openrouter-model";
+// .openai-model applies in openai (and local) mode; .local-model only in local mode;
+// .openrouter-model only in openrouter mode. Inert rows are dimmed and marked, never hidden or
+// cleared — the value still applies when you switch back.
+const isInert = (s) => (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s))
+  || (DRAFT.PROVIDER !== "local" && LOCAL_ONLY(s))
+  || (DRAFT.PROVIDER !== "openrouter" && OPENROUTER_ONLY(s));
 
 function control(s) {
   const v = DRAFT[s.key];
@@ -187,6 +192,28 @@ function control(s) {
     i.value = DRAFT[s.key] ?? modelCtx(DRAFT.LOCAL_MODEL);
     i.oninput = () => { DRAFT[s.key] = i.value.trim(); refreshDirty(); };
     return i;
+  }
+  if (s.type === "openrouter") {
+    // Model picker: a dropdown of tool-capable OpenRouter models (free ones flagged), plus the
+    // current value so a set-but-unlisted model is not dropped. Falls back to a text field when the
+    // catalog can't be fetched (offline).
+    const cur = DRAFT[s.key] || "";
+    const meta = Object.fromEntries(OPENROUTER_MODELS.map((m) => [m.id, m]));
+    const opts = [...new Set([...(cur ? [cur] : []), ...OPENROUTER_MODELS.map((m) => m.id)])];
+    if (!opts.length) {
+      const i = document.createElement("input"); i.type = "text";
+      i.value = cur; if (s.placeholder) i.placeholder = s.placeholder;
+      i.onchange = () => { DRAFT[s.key] = i.value.trim(); refreshDirty(); };
+      return i;
+    }
+    const sel = document.createElement("select");
+    for (const o of opts) {
+      const op = document.createElement("option"); op.value = o;
+      op.textContent = meta[o]?.free ? `${o}  · free` : o;
+      if (o === cur) op.selected = true; sel.append(op);
+    }
+    sel.onchange = () => { DRAFT[s.key] = sel.value; refreshDirty(); };
+    return sel;
   }
   if (s.type === "bool") {
     const w = document.createElement("label"); w.className = "sw";
@@ -299,12 +326,14 @@ async function refreshStatus() {
   // chat window is always the remote claude.ai app talking to Anthropic — and calling it
   // "provider" made it read as though it switched the whole application.
   const cfg = st.configured || {};
-  el.append(chip("agent provider", cfg.provider || "?", cfg.provider === "openai" ? "on" : ""));
+  el.append(chip("agent provider", cfg.provider || "?", cfg.provider !== "anthropic" ? "on" : ""));
 
   // CONFIGURED and ACTIVE are separate rows because they can legitimately differ, and the
   // window used to show only the files and present that as the live state. An edited-but-not-
   // restarted setting looked applied; a stale proxy looked healthy.
-  if (cfg.provider === "openai") {
+  // Every mode except anthropic runs the proxy (openai, local, openrouter), so all of them show the
+  // real proxy state — the old `=== "openai"` check wrongly showed local/openrouter as "not used".
+  if (cfg.provider !== "anthropic") {
     const state = st.proxyState;
     if (state === "ours") {
       el.append(chip("proxy", "serving these settings", "on"));
@@ -374,6 +403,8 @@ async function load() {
     OLLAMA_REQUIRE_THINKING = om.requireThinking !== false;
     render();
   } catch { /* no Ollama */ }
+  // OpenRouter model catalog — also best-effort; offline just falls the picker back to a text field.
+  try { OPENROUTER_MODELS = (await window.settings.openrouterModels()).models || []; render(); } catch { /* offline */ }
 }
 
 async function save() {

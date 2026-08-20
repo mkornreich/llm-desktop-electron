@@ -123,6 +123,15 @@ const IS_LOCAL_ENDPOINT = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1
 // placeholder for a keyless local server (which ignores Authorization entirely). Never empty,
 // so a local endpoint that DOES want a token still gets a well-formed header.
 const OPENAI_AUTH = OPENAI_API_KEY || (IS_LOCAL_ENDPOINT ? "local" : "");
+// Optional extra headers for the upstream, parsed from OPENAI_EXTRA_HEADERS as comma-separated
+// `Key:Value` pairs. Used for OpenRouter's attribution headers (HTTP-Referer / X-Title); empty for
+// every other backend, so the outbound headers are unchanged there.
+const EXTRA_HEADERS = Object.fromEntries(
+  (CFG.OPENAI_EXTRA_HEADERS || "").split(",")
+    .map((p) => p.trim()).filter(Boolean)
+    .map((p) => { const i = p.indexOf(":"); return i > 0 ? [p.slice(0, i).trim(), p.slice(i + 1).trim()] : null; })
+    .filter(Boolean));
+const upstreamHeaders = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}`, ...EXTRA_HEADERS });
 // Budget used only when the client omits max_tokens. It deliberately does NOT read
 // FILE.maxTokens any more: ~/.dbeaver-ai-complete is a DBeaver config and carries
 // maxTokens=512, which is fine for a SQL assistant and far too small for an agent — a request
@@ -886,7 +895,7 @@ async function summariseDropped(pieces) {
   try {
     const r = await fetch(`${OPENAI_BASE}/responses`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}` },
+      headers: upstreamHeaders(),
       body: JSON.stringify({
         model: COMPACT_MODEL, max_output_tokens: SUMMARY_MAX_TOKENS,
         input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
@@ -1656,7 +1665,7 @@ async function callOpenAI(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   const doFetch = (body) => f(`${OPENAI_BASE}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}` },
+    headers: upstreamHeaders(),
     body: JSON.stringify(stripUnsupported(body, "chat")),
   });
   let res = await doFetch(payload);
@@ -1965,7 +1974,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
 async function callResponses(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   let accepted = payload;                        // updated by each fallback that gets used
-  const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}` }, body: JSON.stringify(stripUnsupported(b)) }); };
+  const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: upstreamHeaders(), body: JSON.stringify(stripUnsupported(b)) }); };
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();

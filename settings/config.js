@@ -15,9 +15,9 @@ const filePath = (f) => path.join(ROOT, f);
 // Every parameter the launcher or the proxy actually reads. `file` is where it is persisted.
 const SCHEMA = [
   { group: "Provider", file: ".provider", key: "PROVIDER", type: "enum",
-    options: ["openai", "local", "anthropic"], default: "openai",
+    options: ["openai", "local", "openrouter", "anthropic"], default: "openai",
     label: "Model backing the agent",
-    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. Only the agent is affected; the chat window is always remote claude.ai." },
+    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. openrouter = the same proxy pointed at OpenRouter (any model it serves, incl. free ones); configure it in .openrouter-model and put an sk-or- key in .openai-key. Only the agent is affected; the chat window is always remote claude.ai." },
 
   // The local (on-device) model, its own file. .local-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)
@@ -44,6 +44,19 @@ const SCHEMA = [
   { group: "Local model", file: ".local-model", key: "OLLAMA_MANAGED_PORT", type: "int",
     default: "11435", label: "Managed Ollama port",
     help: "The side port run.sh runs its own Ollama on, kept off the system Ollama's 11434 so the two never fight over a bound port." },
+
+  // OpenRouter, its own file. Like .local-model it reuses OPENAI_MODEL/OPENAI_API, so these carry a
+  // distinct `key` plus a `fileKey` (the line written to .openrouter-model). The sk-or- key lives in
+  // .openai-key (gitignored), not here. OPENAI_EXTRA_HEADERS is a documented .openrouter-model line,
+  // not a GUI field.
+  { group: "OpenRouter model", file: ".openrouter-model", key: "OPENROUTER_MODEL", fileKey: "OPENAI_MODEL",
+    type: "openrouter", default: "poolside/laguna-s-2.1:free", placeholder: "vendor/model[:free]",
+    label: "OpenRouter model",
+    help: "Any OpenRouter model id that supports tool calling (the agent is tool calls end to end). The dropdown lists tool-capable models from openrouter.ai and flags the free (:free) ones. Free models are limited to 20 req/min and 50 req/day (1000/day with >= $10 credit) and need data-sharing enabled at openrouter.ai/settings/privacy. Put your sk-or- key in .openai-key." },
+  { group: "OpenRouter model", file: ".openrouter-model", key: "OPENROUTER_API", fileKey: "OPENAI_API",
+    type: "enum", options: ["chat", "responses"], default: "chat",
+    label: "API surface",
+    help: "chat = /chat/completions (broadest OpenRouter model support; caps tools at 128 — the app sends ~93, so it fits). responses = /responses (stateless; OpenRouter supports it per-model and it sends every tool, avoiding the 128 cap). Leave as chat unless your model needs responses." },
 
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",
