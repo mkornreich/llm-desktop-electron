@@ -177,6 +177,10 @@ export const SETTINGS = [
   // (the search sub-request just goes to the model, which can't browse). Default: on. See websearch.mjs.
   { name: "PROXY_WEB_SEARCH", env: "PROXY_WEB_SEARCH", project: ["PROXY_WEB_SEARCH"],
     type: "bool01", default: "1" },
+  // Optional proxy for the web-search fetch (curl -x), e.g. http://host:port or socks5://host:port.
+  // Use it when DuckDuckGo rate-limits your IP. Empty = direct.
+  { name: "PROXY_WEB_SEARCH_PROXY", env: "PROXY_WEB_SEARCH_PROXY", project: ["PROXY_WEB_SEARCH_PROXY"],
+    type: "str", default: "" },
 
   { name: "OPENAI_OUTPUT_FIXUPS", env: "OPENAI_OUTPUT_FIXUPS", project: ["OPENAI_OUTPUT_FIXUPS"],
     type: "bool01", default: "1" },

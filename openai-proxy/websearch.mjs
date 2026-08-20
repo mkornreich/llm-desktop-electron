@@ -15,8 +15,29 @@
 // heavy use will throttle — an API-keyed backend would be sturdier, but this is keyless by request.
 import { spawn } from "node:child_process";
 
-const UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+// A small pool of realistic, current desktop-browser UAs, rotated per request — DuckDuckGo throttles
+// a fixed or obviously-bot UA far faster than ordinary-looking browser traffic.
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+];
+const pickUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 const LITE_URL = "https://lite.duckduckgo.com/lite/";
+
+// curl exit codes -> a human-readable reason, so a failed search says WHY (the model relays it).
+function curlReason(code, err) {
+  const known = {
+    6: "DNS could not resolve DuckDuckGo",
+    7: "the connection to DuckDuckGo was refused",
+    28: "the request timed out (DuckDuckGo may be rate-limiting this network)",
+    35: "the TLS handshake with DuckDuckGo failed",
+    56: "the connection to DuckDuckGo was reset",
+  };
+  return known[code] || `search failed (curl exit ${code}${err ? ": " + err.trim().slice(0, 100) : ""})`;
+}
 
 // ---- detection -----------------------------------------------------------------------------
 
@@ -46,23 +67,29 @@ export function webSearchQuery(body) {
 
 // Scrape DDG lite via curl. Resolves { ok:true, html } or { ok:false, reason }; never rejects.
 // `run` is injectable so tests need not hit the network.
-export function fetchDdgLite(query, { timeoutMs = 12000, run } = {}) {
+export function fetchDdgLite(query, { timeoutMs = 12000, proxy = "", run } = {}) {
   if (run) return Promise.resolve(run(query));
   return new Promise((resolve) => {
     let child;
-    const args = ["-sS", "-m", String(Math.max(3, Math.ceil(timeoutMs / 1000))), "-A", UA,
-      "--data-urlencode", "q=" + query, LITE_URL];
+    const args = [
+      "-sS", "-L", "-m", String(Math.max(3, Math.ceil(timeoutMs / 1000))),
+      "-A", pickUA(),
+      "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "-H", "Accept-Language: en-US,en;q=0.9",
+      ...(proxy ? ["-x", proxy] : []),          // route through an HTTP/SOCKS proxy when configured
+      "--data-urlencode", "q=" + query, LITE_URL,
+    ];
     try { child = spawn("curl", args, { stdio: ["ignore", "pipe", "pipe"] }); }
     catch { return resolve({ ok: false, reason: "curl is not available" }); }
     const out = []; let err = "", done = false;
     const finish = (r) => { if (done) return; done = true; clearTimeout(timer); try { child.kill("SIGKILL"); } catch {} resolve(r); };
-    const timer = setTimeout(() => finish({ ok: false, reason: "search timed out" }), timeoutMs + 2000);
+    const timer = setTimeout(() => finish({ ok: false, reason: "the request timed out" }), timeoutMs + 2000);
     child.stdout.on("data", (d) => out.push(d));
     child.stderr.on("data", (d) => { if (err.length < 300) err += d; });
     child.on("error", () => finish({ ok: false, reason: "curl is not available" }));
     child.on("close", (code) => { if (done) return; done = true; clearTimeout(timer);
       code === 0 ? resolve({ ok: true, html: Buffer.concat(out).toString("utf8") })
-                 : resolve({ ok: false, reason: `search failed (curl ${code}${err ? ": " + err.trim().slice(0, 120) : ""})` }); });
+                 : resolve({ ok: false, reason: curlReason(code, err) }); });
   });
 }
 
@@ -120,10 +147,10 @@ export function injectWebSearch(body, query, search) {
 
 // The whole flow: if `body` is a WebSearch sub-request, run the search and rewrite it in place.
 // Returns true if handled (body was rewritten), false otherwise.
-export async function handleWebSearch(body, { log = () => {}, fetchImpl } = {}) {
+export async function handleWebSearch(body, { log = () => {}, proxy = "", fetchImpl } = {}) {
   const query = webSearchQuery(body);
   if (!query) return false;
-  const raw = await fetchDdgLite(query, { run: fetchImpl });
+  const raw = await fetchDdgLite(query, { proxy, run: fetchImpl });
   const search = raw.ok ? { ok: true, results: parseDdgLite(raw.html) } : { ok: false, reason: raw.reason };
   injectWebSearch(body, query, search);
   log(`  web_search "${query.slice(0, 60)}" -> ${search.ok ? (search.results.length || 0) + " results" : "unavailable: " + search.reason}`);

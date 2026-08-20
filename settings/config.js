@@ -181,6 +181,13 @@ const SCHEMA = [
   { group: "Tools", file: ".openai-model", key: "PROXY_SEND_IOS_TOOLS", type: "bool",
     default: "1", label: "Send iOS Simulator tools (mcp__Claude_Code_iOS)",
     help: "On: forward the Claude Code iOS Simulator tools to the model. Off: strip them from every request. Useful for shrinking the ~40k-token tool block a small local model has to fit in its context. Changing it restarts the proxy." },
+  { group: "Tools", file: ".openai-model", key: "PROXY_WEB_SEARCH", type: "bool",
+    default: "1", label: "Run web search locally (DuckDuckGo)",
+    help: "On: the proxy executes Claude Code's WebSearch by scraping DuckDuckGo and injecting the results, since a local model can't run Anthropic's server-side search. Off: WebSearch is left to the (unrunnable) server tool. Changing it restarts the proxy." },
+  { group: "Tools", file: ".openai-model", key: "PROXY_WEB_SEARCH_PROXY", type: "text",
+    default: "", placeholder: "http://host:port",
+    label: "Web-search proxy (optional)",
+    help: "Route the DuckDuckGo fetch through an HTTP/SOCKS proxy (e.g. http://host:port or socks5://host:port) when DuckDuckGo rate-limits your IP. Empty = direct." },
 
   // Diagnostics. Both live in .diagnostics, which run.sh reads and exports into the launch
   // environment — DESKTOP_LOG_LEVEL for the app, PROXY_DUMP_TOOLS for the proxy.

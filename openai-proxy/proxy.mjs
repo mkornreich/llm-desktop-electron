@@ -159,6 +159,7 @@ const DISABLED_TOOL_PREFIXES = [
 ];
 // Execute Claude Code's server-side WebSearch locally (proxy runs the search) — see websearch.mjs.
 const WEB_SEARCH_ENABLED = CFG.PROXY_WEB_SEARCH;
+const WEB_SEARCH_PROXY = CFG.PROXY_WEB_SEARCH_PROXY;   // optional curl -x proxy for the search fetch
 function dropDisabledMcpTools(body) {
   if (!DISABLED_TOOL_PREFIXES.length || !Array.isArray(body?.tools)) return body;
   body.tools = body.tools.filter((t) => !DISABLED_TOOL_PREFIXES.some((p) => String(t?.name || "").startsWith(p)));
@@ -3038,7 +3039,7 @@ const server = http.createServer(async (req, res) => {
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
     // Claude Code's WebSearch is Anthropic's server-side tool; the local model can't run it. When this
     // is that search sub-request, run the search here and inject the results, so it actually works.
-    if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log });
+    if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log, proxy: WEB_SEARCH_PROXY });
     dropDisabledMcpTools(body);   // strip MCP tool groups the config disables, before dump/translation
     dumpTools(body.tools);
 
