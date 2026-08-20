@@ -46,6 +46,7 @@ import {
 } from "./content.mjs";
 import { localizePdfsInBody, makePdfExtractor } from "./pdf.mjs";
 import { handleWebSearch } from "./websearch.mjs";
+import { dropRedundantPlanTool } from "./planmode.mjs";
 import {
   makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
   newId as newTurnId,
@@ -3042,6 +3043,7 @@ const server = http.createServer(async (req, res) => {
     // is that search sub-request, run the search here and inject the results, so it actually works.
     if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log, proxy: WEB_SEARCH_PROXY });
     dropDisabledMcpTools(body);   // strip MCP tool groups the config disables, before dump/translation
+    dropRedundantPlanTool(body, { log });   // in plan mode already? withhold EnterPlanMode so it can't re-enter and loop
     dumpTools(body.tools);
 
     // A local backend (Ollama etc.) cannot ingest a PDF the way Anthropic's servers do, so a
