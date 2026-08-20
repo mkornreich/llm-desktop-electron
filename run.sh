@@ -163,6 +163,16 @@ export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-max}"
 export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT="${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT:-1}"
 echo "[run] CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL} (always-enable=${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT})"
 
+# Diagnostics (.diagnostics dot file, edited by the settings window): the app's log level and the
+# proxy's per-request tool dump. Both are read here and exported into the launch environment — the
+# app reads DESKTOP_LOG_LEVEL, the proxy reads PROXY_DUMP_TOOLS (it inherits this env). An unset or
+# blank value leaves the built-in default in place.
+DESKTOP_LOG_LEVEL_VAL=$(sed -n 's/^DESKTOP_LOG_LEVEL=//p' .diagnostics 2>/dev/null | head -1)
+[ -n "${DESKTOP_LOG_LEVEL_VAL}" ] && export DESKTOP_LOG_LEVEL="${DESKTOP_LOG_LEVEL_VAL}"
+PROXY_DUMP_TOOLS_VAL=$(sed -n 's/^PROXY_DUMP_TOOLS=//p' .diagnostics 2>/dev/null | head -1)
+[ "${PROXY_DUMP_TOOLS_VAL}" = "1" ] && export PROXY_DUMP_TOOLS=1
+[ -n "${DESKTOP_LOG_LEVEL_VAL}" ] && echo "[run] DESKTOP_LOG_LEVEL=${DESKTOP_LOG_LEVEL_VAL}${PROXY_DUMP_TOOLS:+, PROXY_DUMP_TOOLS=1}"
+
 # Bring up a run.sh-managed Ollama on a side port with a big context and GPU tuning, sharing the
 # system Ollama's models. Non-destructive by design: a system Ollama is usually pinned to a small
 # context by its service unit and can't be rebound without root, so instead of fighting it we run

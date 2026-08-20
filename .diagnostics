@@ -1,0 +1,19 @@
+# Diagnostics — app verbosity and proxy debug dumps.
+#
+# Edited by the settings window (the "Diagnostics" group). run.sh reads both keys and exports
+# them into the app's environment at launch, so the app and the proxy pick them up.
+
+# App log level: error | warn | info | debug
+#
+# Verbosity of the desktop app's own logging — user-data/logs-dev/main.log and the console. The
+# app reads DESKTOP_LOG_LEVEL once, at startup, so a change needs an app restart. 'debug' is very
+# chatty (every spawn, IPC, etc.); 'warn'/'error' keep only problems. Default: info.
+DESKTOP_LOG_LEVEL=info
+
+# Dump the exact tool list of every proxy request.
+#
+# 1 = on, 0 = off. When on, the proxy overwrites openai-proxy/tools-dump.txt with the tool list of
+# each /v1/messages request — the quickest way to see which tools (and how many) actually reach the
+# model. Only the proxy reads this, so it does nothing in Anthropic mode. It is part of the proxy's
+# config hash, so toggling it restarts the proxy. Default: 0.
+PROXY_DUMP_TOOLS=0
