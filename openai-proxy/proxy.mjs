@@ -156,7 +156,6 @@ const DISABLED_TOOL_PREFIXES = [
   ...(CFG.PROXY_SEND_CHROME_TOOLS ? [] : ["mcp__claude-in-chrome"]),
   ...(CFG.PROXY_SEND_IOS_TOOLS ? [] : ["mcp__Claude_Code_iOS"]),
 ];
-if (DISABLED_TOOL_PREFIXES.length) log(`not forwarding tool group(s): ${DISABLED_TOOL_PREFIXES.join(", ")}`);
 function dropDisabledMcpTools(body) {
   if (!DISABLED_TOOL_PREFIXES.length || !Array.isArray(body?.tools)) return body;
   body.tools = body.tools.filter((t) => !DISABLED_TOOL_PREFIXES.some((p) => String(t?.name || "").startsWith(p)));
@@ -627,6 +626,9 @@ const log = (...a) => console.log(`[proxy ${new Date().toISOString().slice(5, 19
 // One process-wide PDF text extractor (content-hashed cache), used only for local backends — see
 // pdf.mjs. A cloud OpenAI endpoint ingests `input_file` itself, so its PDFs are left untouched.
 const extractPdf = makePdfExtractor({ log });
+// Logged here, after `log` is defined — DISABLED_TOOL_PREFIXES is computed far above, but logging it
+// up there references `log` before its initialization (a TDZ crash when a tool group is disabled).
+if (DISABLED_TOOL_PREFIXES.length) log(`not forwarding tool group(s): ${DISABLED_TOOL_PREFIXES.join(", ")}`);
 
 // ---- connection pooling (the real cause of classifier timeouts) ----
 //
