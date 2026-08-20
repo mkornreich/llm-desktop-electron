@@ -173,6 +173,15 @@ const SCHEMA = [
     default: "1", label: "Merge sidebar grouping with Claude Desktop",
     help: "Merges the claude.ai sidebar grouping between both apps, in both directions, at launch and again after quit (issue #3). The authority is dframe-store.state.customGroupsByScope — the groups, the assignments map saying which session is in which group, and the per-group order — plus the groupBy mode and starred groups. LSS-persisted.dframe-group-scopes is only a legacy mirror the app regenerates: merging into it looked like it worked, then the app relaunched and put its own value straight back. Everything else is left alone, including sidebarWidth and which groups you have collapsed. This replaced a one-way whole-directory copy that replaced all ~371 of the destination's claude.ai keys to fix 3, and that discarded the other side's work: the real install had 69 assignments and this build 61, each with some the other lacked, for a union of 71. Deletions do not propagate — remove a group in one app and the merge restores it from the other. Local Storage still cannot be shared like the session store: LevelDB allows one process at a time, so a profile is only written while its own app is closed, and skipped with a note if not; reads use a snapshot and need no lock. Backs the directory up to Local Storage.grouping-bak and verifies by reading back. Needs node and classic-level." },
 
+  // Tools. Whether the proxy forwards specific MCP tool groups to the model. Off strips the group
+  // from every request (it never reaches the model and does not eat the tool budget / context).
+  { group: "Tools", file: ".openai-model", key: "PROXY_SEND_CHROME_TOOLS", type: "bool",
+    default: "1", label: "Send Chrome browser tools (mcp__claude-in-chrome)",
+    help: "On: forward the Claude-for-Chrome browser tools (~22 tools) to the model. Off: strip them from every request, so they don't reach the model or consume its tool budget / context. Applies to any proxy mode (openai/local/openrouter); changing it restarts the proxy." },
+  { group: "Tools", file: ".openai-model", key: "PROXY_SEND_IOS_TOOLS", type: "bool",
+    default: "1", label: "Send iOS Simulator tools (mcp__Claude_Code_iOS)",
+    help: "On: forward the Claude Code iOS Simulator tools to the model. Off: strip them from every request. Useful for shrinking the ~40k-token tool block a small local model has to fit in its context. Changing it restarts the proxy." },
+
   // Diagnostics. Both live in .diagnostics, which run.sh reads and exports into the launch
   // environment — DESKTOP_LOG_LEVEL for the app, PROXY_DUMP_TOOLS for the proxy.
   { group: "Diagnostics", file: ".diagnostics", key: "DESKTOP_LOG_LEVEL", type: "enum",

@@ -165,6 +165,13 @@ export const SETTINGS = [
   { name: "OPENAI_MAX_TOOLS", env: "OPENAI_MAX_TOOLS", type: "int", default: "128", zero: 128 },
   { name: "OPENAI_MAX_TOOLS_RESPONSES", env: "OPENAI_MAX_TOOLS_RESPONSES",
     type: "int", default: "0", zero: Infinity },
+  // Whether to forward specific MCP tool groups to the model. Off strips that group from every
+  // request (it never reaches the model and does not eat the tool budget / context) — useful when a
+  // group's schemas are large (the Chrome + iOS groups are ~40 tools between them). Default: send.
+  { name: "PROXY_SEND_CHROME_TOOLS", env: "PROXY_SEND_CHROME_TOOLS",
+    project: ["PROXY_SEND_CHROME_TOOLS"], type: "bool01", default: "1" },
+  { name: "PROXY_SEND_IOS_TOOLS", env: "PROXY_SEND_IOS_TOOLS",
+    project: ["PROXY_SEND_IOS_TOOLS"], type: "bool01", default: "1" },
 
   { name: "OPENAI_OUTPUT_FIXUPS", env: "OPENAI_OUTPUT_FIXUPS", project: ["OPENAI_OUTPUT_FIXUPS"],
     type: "bool01", default: "1" },

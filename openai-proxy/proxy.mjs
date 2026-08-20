@@ -149,6 +149,19 @@ const MAX_OUTPUT_TOKENS = CFG.OPENAI_MAX_OUTPUT_TOKENS;
 // Names must still match ^[a-zA-Z0-9_-]{1,64}$, so they are always sanitized.
 const MAX_TOOLS_CHAT = CFG.OPENAI_MAX_TOOLS;
 const MAX_TOOLS_RESPONSES = CFG.OPENAI_MAX_TOOLS_RESPONSES;
+// MCP tool groups the config says NOT to forward. When a toggle is off, tools whose name starts
+// with the group's prefix are stripped from every request before translation — they never reach
+// the model and do not count against the tool budget or context. Default is to send both.
+const DISABLED_TOOL_PREFIXES = [
+  ...(CFG.PROXY_SEND_CHROME_TOOLS ? [] : ["mcp__claude-in-chrome"]),
+  ...(CFG.PROXY_SEND_IOS_TOOLS ? [] : ["mcp__Claude_Code_iOS"]),
+];
+if (DISABLED_TOOL_PREFIXES.length) log(`not forwarding tool group(s): ${DISABLED_TOOL_PREFIXES.join(", ")}`);
+function dropDisabledMcpTools(body) {
+  if (!DISABLED_TOOL_PREFIXES.length || !Array.isArray(body?.tools)) return body;
+  body.tools = body.tools.filter((t) => !DISABLED_TOOL_PREFIXES.some((p) => String(t?.name || "").startsWith(p)));
+  return body;
+}
 // When the chat path MUST drop tools, drop the least essential ones rather than
 // whichever happened to be last in the array. These are the tools an agent needs to
 // actually finish work (read/write/run/search/plan) plus the ones that make output
@@ -3018,6 +3031,7 @@ const server = http.createServer(async (req, res) => {
     const isCls = isClassifier(route);
     const model = pickModel(body, route);                // FROM THE ROUTE — never inherited
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
+    dropDisabledMcpTools(body);   // strip MCP tool groups the config disables, before dump/translation
     dumpTools(body.tools);
 
     // A local backend (Ollama etc.) cannot ingest a PDF the way Anthropic's servers do, so a
