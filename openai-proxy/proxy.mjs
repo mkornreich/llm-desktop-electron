@@ -44,6 +44,7 @@ import {
 import {
   decodeBlocks, decodeToolResult, partsToResponses, partsToChat, countImages, countFiles, countNotes,
 } from "./content.mjs";
+import { localizePdfsInBody, makePdfExtractor } from "./pdf.mjs";
 import {
   makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
   newId as newTurnId,
@@ -597,6 +598,10 @@ const rid = (p) => p + crypto.randomBytes(16).toString("hex");
 // classifier aborts (a "median 34s" and then a "median 483s", both artefacts) before the
 // ambiguity was noticed. UTC, matching the ISO timestamps the rest of the pipeline uses.
 const log = (...a) => console.log(`[proxy ${new Date().toISOString().slice(5, 19).replace("T", " ")}]`, ...a);
+
+// One process-wide PDF text extractor (content-hashed cache), used only for local backends — see
+// pdf.mjs. A cloud OpenAI endpoint ingests `input_file` itself, so its PDFs are left untouched.
+const extractPdf = makePdfExtractor({ log });
 
 // ---- connection pooling (the real cause of classifier timeouts) ----
 //
@@ -3002,6 +3007,12 @@ const server = http.createServer(async (req, res) => {
     const model = pickModel(body, route);                // FROM THE ROUTE — never inherited
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
     dumpTools(body.tools);
+
+    // A local backend (Ollama etc.) cannot ingest a PDF the way Anthropic's servers do, so a
+    // `document` block would otherwise reach a model that just answers "I can't read PDFs". Extract
+    // the text here and hand it over as text — the on-device equivalent of server-side ingestion.
+    // No-op for a cloud endpoint (it takes `input_file` itself) and for a turn with no PDF.
+    if (IS_LOCAL_ENDPOINT) await localizePdfsInBody(body, { extract: extractPdf });
 
     // Both encoders build the tool registry, which validates the whole declared catalog. A name
     // collision throws here rather than being sanitized into an alias, because two tools sharing a
