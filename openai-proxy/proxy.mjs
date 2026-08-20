@@ -475,8 +475,11 @@ const NUDGE = "You ended your turn without calling any tool, but the user's requ
 const DEFAULT_TEMP = CFG.DEFAULT_TEMP;
 const PORT = CFG.PORT;
 
-if (!OPENAI_API_KEY && !IS_LOCAL_ENDPOINT) {
-  console.error("[proxy] FATAL: no OpenAI API key (put `apiKey=sk-...` in .openai-key, or set OPENAI_API_KEY)");
+// A remote endpoint (openai or openrouter) needs a key; a loopback one (local) does not. Only
+// enforce this when the proxy will actually SERVE — PROXY_NO_LISTEN=1 is the unit-test import mode
+// (proxy.test.mjs), which never serves and must not exit the test runner over a missing key.
+if (!OPENAI_API_KEY && !IS_LOCAL_ENDPOINT && !process.env.PROXY_NO_LISTEN) {
+  console.error("[proxy] FATAL: no API key for a remote endpoint (put `apiKey=sk-...` in .openai-key, or set OPENAI_API_KEY)");
   process.exit(1);
 }
 
