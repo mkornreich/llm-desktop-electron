@@ -633,6 +633,7 @@ const extractPdf = makePdfExtractor({ log });
 // Logged here, after `log` is defined — DISABLED_TOOL_PREFIXES is computed far above, but logging it
 // up there references `log` before its initialization (a TDZ crash when a tool group is disabled).
 if (DISABLED_TOOL_PREFIXES.length) log(`not forwarding tool group(s): ${DISABLED_TOOL_PREFIXES.join(", ")}`);
+log(`web search: ${WEB_SEARCH_ENABLED ? "ON" : "off"}${WEB_SEARCH_PROXY ? " via proxy " + WEB_SEARCH_PROXY : " (direct)"}`);
 
 // ---- connection pooling (the real cause of classifier timeouts) ----
 //
@@ -3132,6 +3133,8 @@ const server = http.createServer(async (req, res) => {
                 ? ` — SLOW. The CLI aborts its classifier at 60s and then DENIES the action.`
                 : ""));
         }
+        const toolNames = msg.content.filter((c) => c.type === "tool_use").map((c) => c.name);
+        if (toolNames.length) log(`  model called tool(s): ${toolNames.join(", ")}`);
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
                    msg.content.filter((c) => c.type === "text").reduce((n, c) => n + c.text.length, 0),
                    Date.now() - startedAt);

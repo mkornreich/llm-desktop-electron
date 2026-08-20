@@ -14,6 +14,13 @@
 // DDG's bot detection, while curl (HTTP/1.1, browser UA) fares better. DDG still rate-limits, so
 // heavy use will throttle — an API-keyed backend would be sturdier, but this is keyless by request.
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+// Diagnostic dump of every web-search attempt (the raw request shape + outcome), so a failure can be
+// traced without guessing. Appended to openai-proxy/websearch-debug.txt.
+const DEBUG_FILE = fileURLToPath(new URL("./websearch-debug.txt", import.meta.url));
+function dumpDebug(lines) { try { fs.appendFileSync(DEBUG_FILE, lines.filter((l) => l != null).join("\n") + "\n\n"); } catch { /* best effort */ } }
 
 // A small pool of realistic, current desktop-browser UAs, rotated per request — DuckDuckGo throttles
 // a fixed or obviously-bot UA far faster than ordinary-looking browser traffic.
@@ -147,12 +154,43 @@ export function injectWebSearch(body, query, search) {
 
 // The whole flow: if `body` is a WebSearch sub-request, run the search and rewrite it in place.
 // Returns true if handled (body was rewritten), false otherwise.
+const toolSig = (body) => Array.isArray(body?.tools) ? body.tools.map((t) => t?.type || t?.name || "?").join(", ") : "(no tools)";
+const lastUserText = (body) => {
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i]?.role === "user") return contentText(msgs[i].content);
+  return "";
+};
+
 export async function handleWebSearch(body, { log = () => {}, proxy = "", fetchImpl } = {}) {
   const query = webSearchQuery(body);
-  if (!query) return false;
+  if (!query) {
+    // A near-miss: a request carrying a search-ish tool that we did NOT route. Surfacing these tells
+    // "the sub-request never looked like a search" apart from "the search itself failed".
+    const sig = toolSig(body);
+    if (/search/i.test(sig)) {
+      log(`  web_search NOT routed — tools=[${sig}] last-user="${lastUserText(body).slice(0, 100)}"`);
+      dumpDebug(["=== web_search candidate NOT routed ===", "tools: " + sig,
+                 "msgs: " + (Array.isArray(body?.messages) ? body.messages.length : 0),
+                 "lastUser: " + lastUserText(body).slice(0, 500)]);
+    }
+    return false;
+  }
+  log(`  web_search: "${query.slice(0, 100)}"${proxy ? " via " + proxy : " (direct)"}`);
   const raw = await fetchDdgLite(query, { proxy, run: fetchImpl });
-  const search = raw.ok ? { ok: true, results: parseDdgLite(raw.html) } : { ok: false, reason: raw.reason };
+  let search;
+  if (!raw.ok) {
+    search = { ok: false, reason: raw.reason };
+    log(`  web_search FETCH FAILED: ${raw.reason}`);
+    dumpDebug([`=== web_search "${query}" — FETCH FAILED ===`, "reason: " + raw.reason, "proxy: " + (proxy || "(direct)")]);
+  } else {
+    const results = parseDdgLite(raw.html);
+    search = { ok: true, results };
+    log(`  web_search fetch ok: ${raw.html.length} bytes -> ${results.length} results`);
+    dumpDebug([`=== web_search "${query}" -> ${results.length} results (${raw.html.length} bytes) ===`,
+               results.length ? results.map((r, i) => `  [${i + 1}] ${r.title} | ${r.url}`).join("\n")
+                              : "  0 RESULTS. html head: " + raw.html.replace(/\s+/g, " ").slice(0, 400)]);
+  }
   injectWebSearch(body, query, search);
-  log(`  web_search "${query.slice(0, 60)}" -> ${search.ok ? (search.results.length || 0) + " results" : "unavailable: " + search.reason}`);
+  dumpDebug(["injected (" + (search.ok ? (search.results?.length || 0) + " results" : "unavailable") + "); tools now: [" + toolSig(body) + "]"]);
   return true;
 }

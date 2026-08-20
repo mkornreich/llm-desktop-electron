@@ -34,3 +34,4 @@ openai-proxy/proxy-runtime.json
 # Per-session provenance: which model actually answered each session. Local runtime records
 # about this machine's sessions, and they name session ids — not source, and not shareable.
 provenance/
+openai-proxy/websearch-debug.txt
