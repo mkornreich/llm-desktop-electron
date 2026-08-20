@@ -333,6 +333,22 @@ test("auto-continue fires on announcements the model did not act on", () => {
   ]) assert.ok(shouldAutoContinue(t), `should continue: ${t.slice(0, 60)}`);
 });
 
+test("auto-continue fires on a 'next step' announcement, even alongside a completion word", () => {
+  // Verbatim shape from a real local-model stall: it marked a task in_progress, wrote a file, then
+  // announced its next step and ended the turn. "scaffolding is complete" must not mask the
+  // unfulfilled "my next step is to …" — INTENT is checked before DONE, so this continues.
+  const stall = "The initial file scaffolding is complete. My next step is to flesh out the simulation " +
+                "functions within scraper.py to demonstrate the full pipeline working end-to-end.";
+  assert.equal(continueReason(stall, false, false), "intent");
+  assert.equal(continueReason(stall, true, false), "intent");   // even with work already done this turn
+  for (const t of [
+    "Next, I'll implement the fetch loop.",
+    "I'll now write the parser.",
+    "The next step is to build the pagination handler.",
+    "I plan to add the deduplication pass.",
+  ]) assert.ok(shouldAutoContinue(t), `should continue: ${t}`);
+});
+
 test("auto-continue does NOT fire on a finished turn", () => {
   for (const t of [
     "Done — I rendered a red pelican SVG and saved it to /tmp/red_pelican.svg",

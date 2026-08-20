@@ -363,8 +363,19 @@ const MAX_CONTINUATIONS = CFG.OPENAI_MAX_CONTINUATIONS;
 // Three distinct shapes, because they need opposite treatment.
 // 1. INTENT — the model says it is about to act, and then doesn't. Always continue.
 const INTENT_RE = new RegExp([
-  "\\b(i['’]?ll|i will|let me|i['’]?m going to|i am going to|going to)\\b[^.!?]{0,80}\\b(run|query|check|look|search|fetch|pull|list|inspect|read|grep|find|start|do|gather|collect)\\b",
+  "\\b(i['’]?ll|i will|let me|i['’]?m going to|i am going to|going to)\\b[^.!?]{0,80}\\b(run|query|check|look|search|fetch|pull|list|inspect|read|grep|find|start|do|gather|collect|write|create|add|edit|update|modify|implement|build|make|generate|install|commit|test|fix|refactor|scrape|populate|flesh|continue|proceed|finish|complete)\\b",
   "\\b(starting|i['’]?ve started|kicking off)\\b[^.!?]{0,60}\\b(now|in the background)\\b",
+  // An announced NEXT action the model then fails to take — "My next step is to …", "Next, I'll …",
+  // "I'll now …", "I plan to …". These carry no whitelisted verb, so match the announcement itself.
+  // Checked before DONE_RE below, so a "…is complete. My next step is to …" continues rather than
+  // being read as a finished turn — a real local-model stall that left a task stuck in_progress.
+  "\\bmy next step\\b",
+  "\\bnext step(s)? (is|are|will be)?\\s*to\\b",
+  "\\bnext,? i['’]?(ll| will)\\b",
+  "\\b(then|now) i['’]?(ll| will)\\b",
+  "\\bi['’]?(ll| will) (now|next|then|proceed|continue)\\b",
+  "\\bi (plan|intend|aim) to\\b",
+  "\\b(proceeding|moving on) to\\b",
 ].join("|"), "i");
 // 2. OFFER — "if you want, I can …". Ambiguous alone: it means "shall I do what you asked?"
 //    BEFORE the work, and "shall I do something extra?" AFTER it. Only the first continues.
