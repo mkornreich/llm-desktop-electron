@@ -113,9 +113,12 @@ window.settings = {
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
-let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [];
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {};
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
+// The model's MAXIMUM supported context (from Ollama's model_info) — what the picker snaps the
+// context field to when you switch models, falling back to the saved/default when the max is unknown.
+const maxCtx = (m) => String(OLLAMA_MAX_CONTEXT[m] ?? modelCtx(m));
 
 const isBoolOn = (v) => v === "1" || v === "true";
 
@@ -176,7 +179,7 @@ function control(s) {
     if (!opts.length) {
       const i = document.createElement("input"); i.type = "text";
       i.value = cur; if (s.placeholder) i.placeholder = s.placeholder;
-      i.onchange = () => { DRAFT[s.key] = i.value.trim(); DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT[s.key]); render(); };
+      i.onchange = () => { DRAFT[s.key] = i.value.trim(); DRAFT.LOCAL_CONTEXT = maxCtx(DRAFT[s.key]); render(); };
       return i;
     }
     const sel = document.createElement("select");
@@ -184,7 +187,8 @@ function control(s) {
       const op = document.createElement("option"); op.value = o; op.textContent = o;
       if (o === cur) op.selected = true; sel.append(op);
     }
-    sel.onchange = () => { DRAFT[s.key] = sel.value; DRAFT.LOCAL_CONTEXT = modelCtx(sel.value); render(); };
+    // Switching models snaps the context field to the NEW model's maximum supported context.
+    sel.onchange = () => { DRAFT[s.key] = sel.value; DRAFT.LOCAL_CONTEXT = maxCtx(sel.value); render(); };
     return sel;
   }
   if (s.type === "ollama-context") {
@@ -401,6 +405,7 @@ async function load() {
     const om = await window.settings.ollamaModels();
     OLLAMA_MODELS = om.models || [];
     OLLAMA_REQUIRE_THINKING = om.requireThinking !== false;
+    OLLAMA_MAX_CONTEXT = om.maxContext || {};
     render();
   } catch { /* no Ollama */ }
   // OpenRouter model catalog — also best-effort; offline just falls the picker back to a text field.

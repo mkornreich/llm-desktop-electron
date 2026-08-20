@@ -309,22 +309,31 @@ async function handle(req, res) {
           if (r.ok) for (const m of ((await r.json()).models || [])) if (m && m.name && !port.has(m.name)) port.set(m.name, p);
         } catch { /* that Ollama instance is not up */ }
       }
-      // Ask each model for its capabilities. /api/show returns e.g. ["completion","tools","thinking"].
+      // Ask each model for its capabilities AND its maximum context. /api/show returns capabilities
+      // (["completion","tools","thinking"]) plus model_info carrying "<arch>.context_length" — the
+      // model's max supported context, which the picker snaps the context field to on model change.
       const capabilities = {};
+      const maxContext = {};
       await Promise.all([...port].map(async ([name, p]) => {
         try {
           const r = await fetch(`http://127.0.0.1:${p}/api/show`, {
             method: "POST", headers: { "content-type": "application/json" },
             body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(2500),
           });
-          if (r.ok) capabilities[name] = (await r.json()).capabilities || [];
-        } catch { /* leave undefined -> treated as not-thinking when thinking is required */ }
+          if (r.ok) {
+            const j = await r.json();
+            capabilities[name] = j.capabilities || [];
+            const info = j.model_info || {};
+            const ck = Object.keys(info).find((k) => /(^|\.)context_length$/.test(k));
+            if (ck && Number.isFinite(info[ck])) maxContext[name] = info[ck];
+          }
+        } catch { /* leave undefined -> not-thinking / unknown max */ }
       }));
 
       const all = [...port.keys()].sort();
       const canThink = (n) => Array.isArray(capabilities[n]) && capabilities[n].includes("thinking");
       const models = (requireThinking ? all.filter(canThink) : all);
-      return send(res, 200, { models, all, capabilities, requireThinking, ports });
+      return send(res, 200, { models, all, capabilities, maxContext, requireThinking, ports });
     }
 
     // Tool-capable OpenRouter models, for the openrouter picker. Fetches the public models catalog
