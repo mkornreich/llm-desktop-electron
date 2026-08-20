@@ -172,6 +172,11 @@ export const SETTINGS = [
     project: ["PROXY_SEND_CHROME_TOOLS"], type: "bool01", default: "1" },
   { name: "PROXY_SEND_IOS_TOOLS", env: "PROXY_SEND_IOS_TOOLS",
     project: ["PROXY_SEND_IOS_TOOLS"], type: "bool01", default: "1" },
+  // Execute Claude Code's WebSearch locally: the proxy runs the search (DuckDuckGo) and injects the
+  // results, since a local model can't run Anthropic's server-side web_search. Off = leave it broken
+  // (the search sub-request just goes to the model, which can't browse). Default: on. See websearch.mjs.
+  { name: "PROXY_WEB_SEARCH", env: "PROXY_WEB_SEARCH", project: ["PROXY_WEB_SEARCH"],
+    type: "bool01", default: "1" },
 
   { name: "OPENAI_OUTPUT_FIXUPS", env: "OPENAI_OUTPUT_FIXUPS", project: ["OPENAI_OUTPUT_FIXUPS"],
     type: "bool01", default: "1" },

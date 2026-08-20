@@ -45,6 +45,7 @@ import {
   decodeBlocks, decodeToolResult, partsToResponses, partsToChat, countImages, countFiles, countNotes,
 } from "./content.mjs";
 import { localizePdfsInBody, makePdfExtractor } from "./pdf.mjs";
+import { handleWebSearch } from "./websearch.mjs";
 import {
   makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
   newId as newTurnId,
@@ -156,6 +157,8 @@ const DISABLED_TOOL_PREFIXES = [
   ...(CFG.PROXY_SEND_CHROME_TOOLS ? [] : ["mcp__claude-in-chrome"]),
   ...(CFG.PROXY_SEND_IOS_TOOLS ? [] : ["mcp__Claude_Code_iOS"]),
 ];
+// Execute Claude Code's server-side WebSearch locally (proxy runs the search) — see websearch.mjs.
+const WEB_SEARCH_ENABLED = CFG.PROXY_WEB_SEARCH;
 function dropDisabledMcpTools(body) {
   if (!DISABLED_TOOL_PREFIXES.length || !Array.isArray(body?.tools)) return body;
   body.tools = body.tools.filter((t) => !DISABLED_TOOL_PREFIXES.some((p) => String(t?.name || "").startsWith(p)));
@@ -3033,6 +3036,9 @@ const server = http.createServer(async (req, res) => {
     const isCls = isClassifier(route);
     const model = pickModel(body, route);                // FROM THE ROUTE — never inherited
     const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
+    // Claude Code's WebSearch is Anthropic's server-side tool; the local model can't run it. When this
+    // is that search sub-request, run the search here and inject the results, so it actually works.
+    if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log });
     dropDisabledMcpTools(body);   // strip MCP tool groups the config disables, before dump/translation
     dumpTools(body.tools);
 
