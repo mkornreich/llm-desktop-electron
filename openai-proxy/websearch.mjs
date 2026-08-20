@@ -11,8 +11,11 @@
 // crash or an invented answer.
 //
 // DuckDuckGo is scraped via `curl`, not node's fetch: undici's TLS/HTTP2 fingerprint gets blocked by
-// DDG's bot detection, while curl (HTTP/1.1, browser UA) fares better. DDG still rate-limits, so
-// heavy use will throttle — an API-keyed backend would be sturdier, but this is keyless by request.
+// DDG's bot detection, while curl (HTTP/1.1, browser UA) fares better. The fetch forces IPv4 (`-4`):
+// `lite.duckduckgo.com`'s AAAA (IPv6) lookup stalls to the timeout on some resolvers, which surfaced
+// as `curl (28) Resolving timed out`; its A record resolves instantly, so IPv4 sidesteps the hang.
+// DDG still rate-limits, so heavy use will throttle — an API-keyed backend would be sturdier, but
+// this is keyless by request.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -39,7 +42,7 @@ function curlReason(code, err) {
   const known = {
     6: "DNS could not resolve DuckDuckGo",
     7: "the connection to DuckDuckGo was refused",
-    28: "the request timed out (DuckDuckGo may be rate-limiting this network)",
+    28: "the request to DuckDuckGo timed out",
     35: "the TLS handshake with DuckDuckGo failed",
     56: "the connection to DuckDuckGo was reset",
   };
@@ -79,7 +82,9 @@ export function fetchDdgLite(query, { timeoutMs = 12000, proxy = "", run } = {})
   return new Promise((resolve) => {
     let child;
     const args = [
+      "-4",                                     // DDG's AAAA (IPv6) record stalls DNS; forcing IPv4 resolves instantly
       "-sS", "-L", "-m", String(Math.max(3, Math.ceil(timeoutMs / 1000))),
+      "--connect-timeout", "8",                 // fail fast on a genuinely blocked network instead of burning -m
       "-A", pickUA(),
       "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "-H", "Accept-Language: en-US,en;q=0.9",
