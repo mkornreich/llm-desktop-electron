@@ -138,6 +138,41 @@ test("the compaction model inherits the prefix classifier before its own default
     "OPENAI_CLASSIFIER_MODEL");
 });
 
+test("local mode defaults the classifier, safety, and compact models to the model in use", () => {
+  const env = { OPENAI_BASE_URL: "http://127.0.0.1:11435/v1", OPENAI_MODEL: "gemma4:latest" };
+  // A remote classifier carried over from .openai-model (project) must not stick in local mode.
+  const project = { OPENAI_CLASSIFIER_MODEL: "gpt-5.4-nano", OPENAI_COMPACT_MODEL: "gpt-4.1-mini" };
+  const v = R(env, project), s = S(env, project);
+  assert.equal(v.OPENAI_CLASSIFIER_MODEL, "gemma4:latest");
+  assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gemma4:latest");   // was the remote gpt-5.4 default
+  assert.equal(v.OPENAI_COMPACT_MODEL, "gemma4:latest");
+  assert.equal(s.OPENAI_CLASSIFIER_SAFETY_MODEL, "local -> main model");
+});
+
+test("an explicit env classifier model still wins in local mode", () => {
+  const env = { OPENAI_BASE_URL: "http://127.0.0.1:11435/v1", OPENAI_MODEL: "gemma4:latest",
+                OPENAI_CLASSIFIER_MODEL: "qwen3:8b" };
+  const v = R(env);
+  assert.equal(v.OPENAI_CLASSIFIER_MODEL, "qwen3:8b");               // env override respected
+  assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gemma4:latest");   // still defaults to the model in use
+});
+
+test("a remote endpoint keeps the remote classifier/compact defaults", () => {
+  const env = { OPENAI_BASE_URL: "https://api.openai.com/v1", OPENAI_MODEL: "gpt-4.1", OPENAI_API_KEY: "x" };
+  const v = R(env), s = S(env);
+  assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4-2026-03-05");
+  assert.equal(v.OPENAI_COMPACT_MODEL, "gpt-4.1-mini");
+  assert.notEqual(s.OPENAI_CLASSIFIER_MODEL, "local -> main model");
+});
+
+test("local mode does not warn about a blank safety model (main-model verdicts are the intent there)", () => {
+  const r = validate({ resolved: resolve({ env: {
+    OPENAI_BASE_URL: "http://127.0.0.1:11435/v1", OPENAI_MODEL: "gemma4:latest",
+    OPENAI_CLASSIFIER_SAFETY_MODEL: "",
+  } }) });
+  assert.ok(!r.warnings.some((w) => /safety verdicts run on/.test(w)));
+});
+
 test("`0` means off where the original allowed it, and snaps back where it did not", () => {
   // These are the `|| zero` tails, one per setting. Getting one wrong silently re-enables a
   // retry loop the operator turned off, or disables a floor they never touched.

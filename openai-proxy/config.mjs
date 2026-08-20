@@ -238,6 +238,14 @@ export const SETTINGS = [
 
 const BY_NAME = new Map(SETTINGS.map((s) => [s.name, s]));
 
+// A loopback OPENAI_BASE_URL is an on-device server (Ollama etc.): it serves the OpenAI API without a
+// key and can only run models it hosts locally. Used both to relax the key requirement and to keep the
+// auxiliary LLM calls (safety classifier, prefix classifier, compaction) on the local model rather than
+// a remote default the local upstream cannot reach.
+export function isLocalEndpoint(url) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(url || "");
+}
+
 // ---------- resolution ----------
 
 // Returns { values, sources } where sources[name] is
@@ -289,6 +297,20 @@ export function resolve({ env = process.env, project, home, keyfile } = {}) {
   values.OPENAI_COMPACT_MODEL = cmRaw || values.OPENAI_CLASSIFIER_MODEL || "gpt-4.1-mini";
   sources.OPENAI_COMPACT_MODEL = cmRaw ? cmSrc
     : values.OPENAI_CLASSIFIER_MODEL ? "OPENAI_CLASSIFIER_MODEL" : "default";
+
+  // In local mode the on-device upstream can only serve the model it is running, so the auxiliary LLM
+  // calls cannot use the remote defaults (the gpt-5.4 safety classifier, gpt-4.1-mini compaction) or a
+  // classifier carried over from .openai-model — every safety verdict would fail ("auto mode cannot
+  // determine the safety of …"). Default them to the model currently in use. An explicit env override
+  // still wins (e.g. pointing the classifier at a smaller local model for faster verdicts).
+  if (isLocalEndpoint(values.OPENAI_BASE_URL)) {
+    for (const name of ["OPENAI_CLASSIFIER_MODEL", "OPENAI_CLASSIFIER_SAFETY_MODEL", "OPENAI_COMPACT_MODEL"]) {
+      if (sources[name] !== "env") {
+        values[name] = values.OPENAI_MODEL;
+        sources[name] = "local -> main model";
+      }
+    }
+  }
 
   // ~/.dbeaver-ai-complete only. Absent means "send no temperature", which is not the same
   // as sending 0, so undefined has to survive.
@@ -416,7 +438,7 @@ export function validate(opts = {}) {
       `Set OPENAI_API=responses unless you specifically need Chat Completions`);
   // Blank is legal and documented, and it is also the configuration measured to miss the CLI's
   // deadline. Saying so is the difference between a choice and an accident.
-  if (v.OPENAI_CLASSIFIER_SAFETY_MODEL === "")
+  if (v.OPENAI_CLASSIFIER_SAFETY_MODEL === "" && !isLocalEndpoint(v.OPENAI_BASE_URL))
     // Re-measured against the real classifier corpus (eval/reports/safety-classifier.md). The old
     // warning blamed LATENCY, from figures taken on gpt-5.3-codex. On today's main model latency is
     // fine — p50 2.4s, p95 6.1s, nothing near the deadline — but 8 of 14 verdicts came back
@@ -431,8 +453,7 @@ export function validate(opts = {}) {
       `60s fail-closed classifier deadline, so the warning can never fire before the denial`);
   // A loopback OPENAI_BASE_URL is an on-device server (Ollama etc.) that serves the OpenAI API
   // without a key, so a missing key there is fine — mirrors the proxy's own startup gate.
-  const isLocalEndpoint = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(v.OPENAI_BASE_URL || "");
-  if (!v.OPENAI_API_KEY && !isLocalEndpoint) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, .openai-key)`);
+  if (!v.OPENAI_API_KEY && !isLocalEndpoint(v.OPENAI_BASE_URL)) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, .openai-key)`);
 
   return { errors, warnings };
 }
