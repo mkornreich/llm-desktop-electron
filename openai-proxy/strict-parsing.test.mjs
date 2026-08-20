@@ -9,7 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ToolRegistry, sanitizeToolName } from "./tool-registry.mjs";
 import {
-  parseRequestBody, validateMessagesRequest, parseToolArguments, schemaAllowsEmpty,
+  parseRequestBody, validateMessagesRequest, hoistInlineSystemMessages, parseToolArguments, schemaAllowsEmpty,
 } from "./request-policy.mjs";
 import { RequestError, TranslationError, ToolCatalogError, errorResponse } from "./errors.mjs";
 
@@ -62,6 +62,62 @@ test("the messages request shape is checked before any translation is attempted"
     assert.ok(e instanceof RequestError, `${JSON.stringify(body)} must be rejected`);
     assert.match(e.message, re);
   }
+});
+
+test("an inline system message is hoisted into the top-level system, not rejected", () => {
+  // The bug this fixes: a client that puts instructions in a `system` ROLE inside messages (the
+  // OpenAI shape) produced `messages[1].role ... got "system"` and 400'd the whole turn against a
+  // local Ollama-backed run. Hoisting folds it into Anthropic's top-level system field instead.
+  const out = hoistInlineSystemMessages({ messages: [
+    { role: "user", content: "hi" },
+    { role: "system", content: "be terse" },
+  ] });
+  assert.equal(out.system, "be terse");
+  assert.deepEqual(out.messages.map((m) => m.role), ["user"]);
+  // ...and the exact pipeline the proxy runs (hoist THEN validate) now accepts what used to 400.
+  const validated = validateMessagesRequest(hoistInlineSystemMessages({ messages: [
+    { role: "user", content: "hi" }, { role: "system", content: "be terse" },
+  ] }));
+  assert.equal(validated.messages.length, 1);
+});
+
+test("hoisting preserves an existing top-level system and the order of inline ones", () => {
+  const out = hoistInlineSystemMessages({
+    system: "GLOBAL",
+    messages: [
+      { role: "system", content: "first" },
+      { role: "user", content: "hi" },
+      { role: "developer", content: "second" },   // OpenAI's newer name for the system role
+    ],
+  });
+  assert.equal(out.system, "GLOBAL\n\nfirst\n\nsecond");
+  assert.deepEqual(out.messages.map((m) => m.role), ["user"]);
+});
+
+test("hoisting reads content blocks and an array-shaped top-level system", () => {
+  const out = hoistInlineSystemMessages({
+    system: [{ type: "text", text: "A" }, { type: "text", text: "B" }],
+    messages: [
+      { role: "system", content: [{ type: "text", text: "one" }, { type: "image", source: {} }, { type: "text", text: "two" }] },
+      { role: "user", content: "hi" },
+    ],
+  });
+  assert.equal(out.system, "A\nB\n\none\ntwo");   // non-text block dropped; system flattened to text
+});
+
+test("a request with no inline system message is returned unchanged", () => {
+  const body = { system: "S", messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "yo" }] };
+  const out = hoistInlineSystemMessages(body);
+  assert.equal(out, body);                        // same reference: nothing to do
+  assert.deepEqual(out.messages.map((m) => m.role), ["user", "assistant"]);
+});
+
+test("a whitespace-only inline system message is dropped without inventing a prompt", () => {
+  const out = hoistInlineSystemMessages({ messages: [
+    { role: "user", content: "hi" }, { role: "system", content: "   " },
+  ] });
+  assert.equal(out.system, undefined);            // nothing survives, so no empty system is created
+  assert.deepEqual(out.messages.map((m) => m.role), ["user"]);
 });
 
 // ---------- outbound: tool arguments ----------

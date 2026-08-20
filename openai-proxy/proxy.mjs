@@ -25,7 +25,7 @@ import {
   newInstanceId, writeManifest, readManifest, clearManifest, REPO,
 } from "../scripts/lib/proxy-runtime.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
-import { parseRequestBody, validateMessagesRequest, parseToolArguments } from "./request-policy.mjs";
+import { parseRequestBody, validateMessagesRequest, hoistInlineSystemMessages, parseToolArguments } from "./request-policy.mjs";
 // `anthropicError` is deliberately NOT imported: this file already has a function of that name
 // that writes to a response. Importing the body-builder under the same name is how you end up
 // sending a plain object where a response was expected.
@@ -2988,7 +2988,7 @@ const server = http.createServer(async (req, res) => {
     // the client had sent no messages at all.
     let body;
     try {
-      body = validateMessagesRequest(parseRequestBody(raw, { what: "/v1/messages body" }));
+      body = validateMessagesRequest(hoistInlineSystemMessages(parseRequestBody(raw, { what: "/v1/messages body" })));
     } catch (e) {
       const r = errorResponse(e);
       log(`/v1/messages rejected: ${r.body.error.message}`);

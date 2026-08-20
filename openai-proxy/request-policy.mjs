@@ -64,6 +64,57 @@ export function validateMessagesRequest(body) {
   return body;
 }
 
+// Text of a message's content, whether a plain string or Anthropic content blocks. Only text is
+// carried; a system prompt is text, and non-text blocks inside a system message are dropped.
+function systemTextOf(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content
+      .map((b) => (typeof b === "string" ? b : b && b.type === "text" ? b.text || "" : ""))
+      .filter(Boolean)
+      .join("\n");
+  return "";
+}
+
+// Fold inline system/developer messages into the top-level `system` field.
+//
+// Some clients — anything speaking OpenAI's message shape — put the instructions in a `system`
+// (or OpenAI's newer `developer`) role INSIDE `messages` rather than in Anthropic's top-level
+// `system` field. Anthropic's Messages API, and validateMessagesRequest above, accept only
+// user/assistant there, so ONE stray system message 400s the whole turn — which is exactly the
+// `messages[1].role ... got "system"` rejection seen against a local Ollama-backed run. Rather than
+// reject a conversation the client considers well-formed, hoist those messages into the top-level
+// system prompt (preserving order) and drop them from the array: the instructions still reach the
+// model, and the request then validates. The proxy already translates `body.system` into the
+// OpenAI system message / `instructions`, so nothing downstream has to change.
+//
+// Runs BEFORE validateMessagesRequest, so the validator stays strict about roles this cannot
+// rescue (tool, function, a typo). Only mutates `body` when an inline system message is present.
+export function hoistInlineSystemMessages(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages)) return body;
+  const isSystem = (m) => m && (m.role === "system" || m.role === "developer");
+  if (!body.messages.some(isSystem)) return body;
+
+  const hoisted = [];
+  const kept = [];
+  for (const m of body.messages) {
+    if (isSystem(m)) { const t = systemTextOf(m.content); if (t) hoisted.push(t); }
+    else kept.push(m);
+  }
+  body.messages = kept;
+  if (hoisted.length) {
+    const existing = Array.isArray(body.system)
+      ? body.system.map((b) => (b && b.text) || "").join("\n")
+      : (typeof body.system === "string" ? body.system : "");
+    // The existing top-level system is the global instruction and goes first; the inline ones,
+    // which appeared within the transcript, follow in the order they were sent. Only assign when
+    // something survives, so a whitespace-only system message does not invent an empty prompt.
+    const merged = [existing, ...hoisted].map((s) => s.trim()).filter(Boolean).join("\n\n");
+    if (merged) body.system = merged;
+  }
+  return body;
+}
+
 // ---------- outbound: what the model sent back ----------
 
 // Does this schema accept a call with no arguments at all? Only then may `{}` stand for "the model
