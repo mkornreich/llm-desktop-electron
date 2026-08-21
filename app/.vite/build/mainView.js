@@ -99,6 +99,12 @@ try {
       __llmdEl.contextBridge.exposeInMainWorld("__llmdLocalModels", function () {
         try { return JSON.parse(process.env.LLMD_LOCAL_MODELS || "[]"); } catch (e) { return []; }
       });
+      // Whether a composite (fallback) model is configured (run.sh -> LLMD_COMPOSITE = {members:[...]}).
+      // When set, the page injects a "Composite" entry FIRST in the code picker and makes it the default
+      // for NEW sessions. Members + fallback logic live in the proxy; the app only sends the "composite" id.
+      __llmdEl.contextBridge.exposeInMainWorld("__llmdComposite", function () {
+        try { return JSON.parse(process.env.LLMD_COMPOSITE || "null"); } catch (e) { return null; }
+      });
       __llmdWrite("bridge exposed");
     } catch (e) { __llmdWrite("bridge expose FAILED: " + e); }
     try {
@@ -242,6 +248,37 @@ try {
                   });
                   log("injected " + MY.length + " provider models into the picker");
                 }
+                // Composite (fallback) model: a distinct entry, FIRST in the code-surface dropdown and the
+                // DEFAULT for new sessions. The proxy owns its member list + failover; the app just sends the
+                // "composite" id. UNSHIFT (index 0 = first, since order is raw array order) with NO `section`
+                // field — real entries carry none, so array position governs. The default for new sessions is
+                // set via model_selector_state, overriding ONLY the global default (never a user's saved pick).
+                try {
+                  var COMP = (window.__llmdComposite && window.__llmdComposite()) || null;
+                  if (COMP && Array.isArray(COMP.members) && COMP.members.length && Array.isArray(data.model_selector_config)) {
+                    var CID = "composite";
+                    data.model_selector_config.forEach(function (surf) {
+                      if (!surf || surf.id !== "code" || !Array.isArray(surf.models)) return;
+                      if (surf.models.some(function (x) { return x && x.id === CID; })) return;
+                      surf.models.unshift({
+                        id: CID, name: "Composite (fallback)", short_name: "Composite",
+                        description: "Tries " + COMP.members.join(" → ") + ", falling over on errors / 429s",
+                        capabilities: { compass: false, gsuite_tools: false, mm_images: false, mm_pdf: false, web_search: false },
+                        thinking: { type: "effort_and_mode",
+                          effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High" }, { id: "xhigh", name: "Extra" }, { id: "max", name: "Max", recommended: true }],
+                          mode_options: [{ id: "auto", name: "Thinking" }, { id: "off", name: "Off" }] }
+                      });
+                    });
+                    if (am && Array.isArray(am.models) && !am.models.some(function (x) { return x && x.model_id === CID; }))
+                      am.models.unshift({ model_id: CID, minimum_tier: "free" });
+                    if (Array.isArray(data.model_selector_state)) {
+                      data.model_selector_state.forEach(function (st) {
+                        if (st && st.id === "code" && st.source === "global_default") st.model = CID;
+                      });
+                    }
+                    log("injected composite (first + default) with " + COMP.members.length + " member(s)");
+                  }
+                } catch (e) { log("composite inject error " + e); }
               } catch (e) { log("inject error " + e); }
               log("patched response " + url);
             } catch (e) { log("patch error " + e); }

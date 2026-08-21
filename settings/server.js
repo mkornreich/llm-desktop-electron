@@ -336,6 +336,50 @@ async function handle(req, res) {
       return send(res, 200, { models, all, capabilities, maxContext, requireThinking, ports });
     }
 
+    // Member choices for the composite (fallback) model picker: `<provider>:<model>` ids aggregated across
+    // providers — the openai/gemini/cohere schema suggestions plus each provider's currently-configured
+    // model, and live Ollama thinking models as local:<model>. Best-effort; the picker keeps any member
+    // that is set but unlisted, so a missing source never drops a valid id.
+    if (url.pathname === "/api/composite-choices" && req.method === "GET") {
+      const sug = (key) => (config.SCHEMA.find((s) => s.key === key) || {}).suggestions || [];
+      const configured = (file) => { const v = config.readFile(file).values.OPENAI_MODEL; return v ? [v] : []; };
+      const choices = [];
+      const seen = new Set();
+      const add = (provider, model) => {
+        if (!model) return;
+        const id = `${provider}:${model}`;
+        if (seen.has(id)) return; seen.add(id);
+        choices.push({ id, label: `${provider}: ${model}`, provider });
+      };
+      for (const m of [...sug("OPENAI_MODEL"), ...configured(".openai-model")]) add("openai", m);
+      for (const m of [...sug("GEMINI_MODEL"), ...configured(".gemini-model")]) add("gemini", m);
+      for (const m of [...sug("COHERE_MODEL"), ...configured(".cohere-model")]) add("cohere", m);
+      for (const m of configured(".openrouter-model")) add("openrouter", m);
+      // Local Ollama thinking models (live) — same discovery as /api/ollama-models.
+      try {
+        const localVals = config.readFile(".local-model").values;
+        const managed = parseInt(localVals.OLLAMA_MANAGED_PORT || "11435", 10) || 11435;
+        const ports = [...new Set([managed, 11434])];
+        const port = new Map();
+        for (const p of ports) {
+          try {
+            const r = await fetch(`http://127.0.0.1:${p}/api/tags`, { signal: AbortSignal.timeout(1500) });
+            if (r.ok) for (const mm of ((await r.json()).models || [])) if (mm && mm.name && !port.has(mm.name)) port.set(mm.name, p);
+          } catch { /* that Ollama instance is not up */ }
+        }
+        await Promise.all([...port].map(async ([name, p]) => {
+          try {
+            const r = await fetch(`http://127.0.0.1:${p}/api/show`, {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(2500),
+            });
+            if (r.ok) { const caps = (await r.json()).capabilities; if (Array.isArray(caps) && caps.includes("thinking")) add("local", name); }
+          } catch { /* leave out */ }
+        }));
+      } catch { /* no Ollama */ }
+      return send(res, 200, { choices });
+    }
+
     // Tool-capable OpenRouter models, for the openrouter picker. Fetches the public models catalog
     // (no auth), keeps models whose supported_parameters include "tools" (the agent is tool calls
     // end to end), and flags the free ones (pricing.prompt and .completion both "0"). Free models

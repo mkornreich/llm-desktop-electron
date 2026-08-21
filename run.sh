@@ -433,6 +433,20 @@ if [ "$PROVIDER" = "proxy" ]; then
     fi
   fi
 
+  # Composite (fallback) model. OPENAI_COMPOSITE_MODELS (in .openai-model, or the env) is the ordered
+  # member list; when non-empty, hand it to the preload as LLMD_COMPOSITE so it injects a "Composite" entry
+  # FIRST in the Code-tab dropdown and makes it the default for new sessions. The proxy owns the actual
+  # chain + failover (it reads OPENAI_COMPOSITE_MODELS itself); this only drives the picker entry. Built
+  # via node to JSON-quote member ids safely (env-passed so members with odd characters can't break it).
+  COMPOSITE_MODELS_VAL="${OPENAI_COMPOSITE_MODELS:-$(sed -n 's/^OPENAI_COMPOSITE_MODELS=//p' .openai-model 2>/dev/null | head -1)}"
+  if [ -n "$COMPOSITE_MODELS_VAL" ] && command -v node >/dev/null 2>&1; then
+    LLMD_COMPOSITE_VAL="$(OPENAI_COMPOSITE_MODELS="$COMPOSITE_MODELS_VAL" node -e 'const m=(process.env.OPENAI_COMPOSITE_MODELS||"").split(",").map(s=>s.trim()).filter(Boolean); if(m.length) process.stdout.write(JSON.stringify({members:m}))' 2>/dev/null || true)"
+    if [ -n "$LLMD_COMPOSITE_VAL" ]; then
+      export LLMD_COMPOSITE="$LLMD_COMPOSITE_VAL"
+      echo "[run] composite model: ${COMPOSITE_MODELS_VAL} (first + default in the Code-tab picker)"
+    fi
+  fi
+
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:
   #   * a model change did not take effect, because the OLD proxy answered /health and got
   #     reused while the launcher printed "proxy healthy";

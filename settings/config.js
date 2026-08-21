@@ -113,6 +113,18 @@ const SCHEMA = [
     default: "", placeholder: "gpt-5.3-codex:GPT-5.3 Codex,gpt-5.4:GPT-5.4",
     label: "Models offered in the picker", help: "Comma-separated id:Label pairs served from the proxy's /v1/models. Blank uses the built-in list." },
 
+  // Composite (fallback) model. OPENAI_COMPOSITE_MODELS is an ordered comma-separated member list edited by
+  // the reorderable picker (type "composite"); it is stored as a single .openai-model line. The "Composite"
+  // entry appears first in the Code-tab dropdown and is the default for new sessions.
+  { group: "Composite model", file: ".openai-model", key: "OPENAI_COMPOSITE_MODELS", type: "composite",
+    default: "", placeholder: "openai:gpt-5.6-sol,gemini:gemini-3-flash-preview,local:qwen3:8b",
+    label: "Fallback chain (ordered)",
+    help: "The models the 'Composite' entry tries in turn. When a turn runs on Composite — the FIRST entry in the Code-tab dropdown and the default for new sessions — the proxy calls each member until one answers, falling over on any transport/HTTP error and honoring Retry-After on 429s. Add / remove / reorder members below; each is a specific provider model you hold a key for (openai:/gemini:/cohere:/openrouter:) or a local Ollama model (local:). Empty = no Composite entry. Every OTHER model keeps its normal single-shot behaviour. Changing this restarts the proxy." },
+  { group: "Composite model", file: ".openai-model", key: "OPENAI_COMPOSITE_MAX_WAIT_MS", type: "int",
+    default: "30000",
+    label: "Max wait when all members are rate-limited (ms)",
+    help: "Fast-failover means a 429 never blocks while another member is still available. Only once EVERY member is rate-limited does the proxy wait — for the soonest member's Retry-After, capped here per-member and cumulatively — then retry. Past the cap it returns the 429 with Retry-After so the agent backs off. Default 30000 (30s)." },
+
   { group: "Reasoning", file: ".openai-model", key: "OPENAI_REASONING_EFFORT", type: "enum",
     options: ["none", "minimal", "low", "medium", "high", "xhigh", "max"], default: "max",
     label: "Reasoning effort",

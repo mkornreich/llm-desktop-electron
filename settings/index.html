@@ -109,11 +109,12 @@ window.settings = {
   relaunch: ()        => api("/api/relaunch", { method: "POST" }),
   ollamaModels: ()    => api("/api/ollama-models"),
   openrouterModels: () => api("/api/openrouter-models"),
+  compositeChoices: () => api("/api/composite-choices"),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
-let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {};
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [];
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 // The model's MAXIMUM supported context (from Ollama's model_info) — what the picker snaps the
@@ -227,6 +228,53 @@ function control(s) {
     }
     sel.onchange = () => { DRAFT[s.key] = sel.value; refreshDirty(); };
     return sel;
+  }
+  if (s.type === "composite") {
+    // Reorderable member picker. DRAFT[key] is a comma-separated ordered string; each row is a model
+    // choice (a <select> of the fetched catalog, or a text field when the catalog is empty) plus
+    // move-up / move-down / remove, followed by an "Add model" button. Every edit rejoins the rows and
+    // re-renders. A member set but absent from the catalog is kept (so a valid id is never dropped).
+    const members = (DRAFT[s.key] || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const choiceIds = COMPOSITE_CHOICES.map((c) => c.id);
+    const labelOf = Object.fromEntries(COMPOSITE_CHOICES.map((c) => [c.id, c.label]));
+    const commit = (arr) => { DRAFT[s.key] = arr.map((x) => (x || "").trim()).filter(Boolean).join(","); render(); };
+    const wrap = document.createElement("div");
+    const mkBtn = (txt, title, fn, disabled) => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = txt; b.title = title;
+      b.disabled = !!disabled; b.style.cssText = "min-width:2em;padding:2px 6px;";
+      b.onclick = fn; return b;
+    };
+    members.forEach((mid, i) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0;";
+      let field;
+      if (choiceIds.length) {
+        const opts = [...new Set([mid, ...choiceIds])].filter(Boolean);
+        field = document.createElement("select");
+        for (const o of opts) { const op = document.createElement("option"); op.value = o; op.textContent = labelOf[o] || o; if (o === mid) op.selected = true; field.append(op); }
+        field.onchange = () => { const a = members.slice(); a[i] = field.value; commit(a); };
+      } else {
+        field = document.createElement("input"); field.type = "text"; field.value = mid;
+        if (s.placeholder) field.placeholder = s.placeholder.split(",")[0];
+        field.onchange = () => { const a = members.slice(); a[i] = field.value.trim(); commit(a); };
+      }
+      field.style.flex = "1";
+      row.append(field,
+        mkBtn("▲", "Move up", () => { const a = members.slice(); const t = a[i - 1]; a[i - 1] = a[i]; a[i] = t; commit(a); }, i === 0),
+        mkBtn("▼", "Move down", () => { const a = members.slice(); const t = a[i + 1]; a[i + 1] = a[i]; a[i] = t; commit(a); }, i === members.length - 1),
+        mkBtn("✕", "Remove", () => { const a = members.slice(); a.splice(i, 1); commit(a); }));
+      wrap.append(row);
+    });
+    const add = document.createElement("button"); add.type = "button"; add.textContent = "+ Add model";
+    add.style.cssText = "margin-top:4px;padding:3px 10px;";
+    add.onclick = () => { commit([...members, choiceIds[0] || ""]); };
+    wrap.append(add);
+    if (!members.length) {
+      const hint = document.createElement("div"); hint.className = "help";
+      hint.textContent = "No members yet — the Composite entry stays hidden until you add at least one.";
+      wrap.append(hint);
+    }
+    return wrap;
   }
   if (s.type === "bool") {
     const w = document.createElement("label"); w.className = "sw";
@@ -428,6 +476,9 @@ async function load() {
   } catch { /* no Ollama */ }
   // OpenRouter model catalog — also best-effort; offline just falls the picker back to a text field.
   try { OPENROUTER_MODELS = (await window.settings.openrouterModels()).models || []; render(); } catch { /* offline */ }
+  // Composite editor choices — model ids aggregated across providers (openai/gemini/cohere suggestions +
+  // live OpenRouter + live Ollama). Best-effort; the picker falls back to free-text rows when it is empty.
+  try { COMPOSITE_CHOICES = (await window.settings.compositeChoices()).choices || []; render(); } catch { /* offline */ }
 }
 
 async function save() {

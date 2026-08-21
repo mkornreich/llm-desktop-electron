@@ -233,6 +233,11 @@ test("fingerprint ignores the timestamp, or every turn would look like a change"
 process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_API_KEY = "test-key-not-real";
 process.env.OPENAI_API = "responses";
+// Pin the safety model via ENV so it stays distinct from the main model. The upstream below is a loopback
+// (non-OpenAI) base, and config.mjs rewrites an unset classifier/safety model to the model-in-use there
+// (a local server can't serve the gpt-5.x default) — but only when the value is NOT an env override. This
+// test's point is that a safety verdict on a DIFFERENT model is its own provenance epoch, so pin it.
+process.env.OPENAI_CLASSIFIER_SAFETY_MODEL = "gpt-5.4-2026-03-05";
 
 const provDir = tmp();
 process.env.PROXY_PROVENANCE_DIR = provDir;

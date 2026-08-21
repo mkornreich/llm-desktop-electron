@@ -147,6 +147,21 @@ export const SETTINGS = [
     default: "gpt-5.6-sol:GPT-5.6 Sol,gpt-5.5:GPT-5.5,gpt-5.3-codex:GPT-5.3 Codex," +
              "gpt-5.4:GPT-5.4,gpt-4.1:GPT-4.1,gpt-4.1-mini:GPT-4.1 mini,gpt-4o:GPT-4o" },
 
+  // Composite (fallback) model. An ordered comma-separated list of member ids the composite tries in
+  // turn: when a MAIN request names the reserved id "composite", the proxy runs each member until one
+  // answers, falling through on any transport/HTTP error and honoring Retry-After on 429s. Each member is
+  // a "<provider>:<model>" id (openai:/gemini:/cohere:/openrouter:/local:) or a bare id (-> the default
+  // provider). Empty = feature off (no composite dropdown entry, no chain). Edited by the reorderable
+  // Settings picker; every OTHER model keeps its current single-shot behaviour.
+  { name: "OPENAI_COMPOSITE_MODELS", env: "OPENAI_COMPOSITE_MODELS", project: ["OPENAI_COMPOSITE_MODELS"],
+    type: "str", default: "" },
+  // Upper bound (ms) on how long the composite waits when EVERY member is rate-limited (429). Fast-
+  // failover means a 429 never blocks while another member is still available; only once the whole chain
+  // is exhausted does it sleep to the soonest member's Retry-After — capped here per-member AND
+  // cumulatively — then retry. Past the cap it surfaces the 429 (with Retry-After) so the agent backs off.
+  { name: "OPENAI_COMPOSITE_MAX_WAIT_MS", env: "OPENAI_COMPOSITE_MAX_WAIT_MS",
+    project: ["OPENAI_COMPOSITE_MAX_WAIT_MS"], type: "int", default: "30000", zero: 30000 },
+
   { name: "OPENAI_BASE_URL", env: "OPENAI_BASE_URL", type: "str",
     default: "https://api.openai.com/v1" },
   // Extra headers sent to the upstream, as comma-separated `Key:Value` pairs. Used for OpenRouter's
@@ -504,6 +519,20 @@ export function validate(opts = {}) {
   // A loopback OPENAI_BASE_URL is an on-device server (Ollama etc.) that serves the OpenAI API
   // without a key, so a missing key there is fine — mirrors the proxy's own startup gate.
   if (!v.OPENAI_API_KEY && !isLocalEndpoint(v.OPENAI_BASE_URL)) errors.push(`no OpenAI API key (checked OPENAI_API_KEY, .openai-model, .openai-key)`);
+
+  // Composite members: a member whose provider is unknown, or a remote provider with no key in
+  // .openai-key, is skipped at runtime rather than failing the config — warn so it is not a silent drop.
+  // A bare id (no "<provider>:") targets the default provider and is always usable; `local:` is keyless.
+  if (v.OPENAI_COMPOSITE_MODELS) {
+    const active = new Set(activeProviders(opts.keyfile).map((p) => p.id));
+    for (const id of v.OPENAI_COMPOSITE_MODELS.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const i = id.indexOf(":");
+      if (i <= 0) continue;
+      const prov = id.slice(0, i);
+      if (!PROVIDERS[prov]) warnings.push(`composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
+      else if (prov !== "local" && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
+    }
+  }
 
   return { errors, warnings };
 }

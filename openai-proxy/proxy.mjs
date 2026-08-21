@@ -118,6 +118,12 @@ const CLASSIFIER_MAX_TOOLS = CFG.OPENAI_CLASSIFIER_MAX_TOOLS;
 const PICKER_MODELS = CFG.OPENAI_PICKER_MODELS
   .split(",").map((s) => { const [id, ...n] = s.split(":"); return { id: (id || "").trim(), name: (n.join(":").trim() || (id || "").trim()) }; })
   .filter((m) => m.id);
+// Composite (fallback) model — see config.mjs. COMPOSITE_ID is the reserved request model that triggers
+// the ordered chain (MAIN turns only), OPENAI_COMPOSITE_MODELS is that ordered member list, and
+// OPENAI_COMPOSITE_MAX_WAIT_MS bounds the wait once every member is rate-limited.
+const COMPOSITE_ID = "composite";
+const OPENAI_COMPOSITE_MODELS = CFG.OPENAI_COMPOSITE_MODELS;
+const OPENAI_COMPOSITE_MAX_WAIT_MS = CFG.OPENAI_COMPOSITE_MAX_WAIT_MS;
 const OPENAI_BASE = CFG.OPENAI_BASE_URL;
 // A loopback OPENAI_BASE_URL means an on-device server (Ollama, llama.cpp, LM Studio, vLLM):
 // those serve the OpenAI API without authenticating, so the key is OPTIONAL there. An off-box
@@ -169,6 +175,43 @@ function resolvePickedProvider(reqModel) {
   const auth = providerAuth(reg);
   if (!auth) return null;
   return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {} }, model: s.slice(i + 1) };
+}
+
+// ---------- composite (fallback) model ----------
+// Split a comma-separated composite member list into trimmed, non-empty ids.
+export function parseCompositeMembers(str) {
+  return String(str || "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+// Expand the reserved composite id into an ordered list of resolved members [{ id, provider, model }],
+// or null when reqModel is not the composite id or no member resolves. Each member id is either a
+// "<provider>:<model>" (routed via resolvePickedProvider — dropped when the provider is unknown or has no
+// key) or a bare id (-> the default provider). The override args keep it unit-testable without env.
+export function resolveComposite(reqModel, { compositeId = COMPOSITE_ID, membersStr = OPENAI_COMPOSITE_MODELS } = {}) {
+  if (!compositeId || String(reqModel) !== compositeId) return null;
+  const out = [];
+  for (const id of parseCompositeMembers(membersStr)) {
+    if (id.includes(":")) {
+      const picked = resolvePickedProvider(id);
+      if (picked) out.push({ id, provider: picked.provider, model: picked.model });
+      else log(`  composite: skipping ${id} — unknown provider or no key`);
+    } else {
+      out.push({ id, provider: DEFAULT_PROVIDER, model: id });
+    }
+  }
+  return out.length ? out : null;
+}
+// Parse a Retry-After header (delta-seconds or an HTTP-date) into milliseconds from `now`, or null.
+export function parseRetryAfter(headers, now = Date.now()) {
+  const v = headers?.get?.("retry-after");
+  if (!v) return null;
+  if (/^\s*\d+\s*$/.test(v)) return parseInt(v, 10) * 1000;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : Math.max(0, t - now);
+}
+// Classify an upstream fetch Response for the composite fallthrough decision, WITHOUT consuming its body.
+export function classifyUpstream(upstream, now = Date.now()) {
+  return { ok: upstream.ok, status: upstream.status, rateLimited: upstream.status === 429,
+           retryAfterMs: upstream.status === 429 ? parseRetryAfter(upstream.headers, now) : null };
 }
 const providerALS = new AsyncLocalStorage();
 const curProvider = () => providerALS.getStore() || DEFAULT_PROVIDER;
@@ -2988,8 +3031,8 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
 function readBody(req) {
   return new Promise((resolve) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => resolve(b)); });
 }
-function sendJSON(res, code, obj) { const s = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json" }); res.end(s); }
-function anthropicError(res, code, type, message) { sendJSON(res, code, { type: "error", error: { type, message } }); }
+function sendJSON(res, code, obj, extraHeaders = {}) { const s = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json", ...extraHeaders }); res.end(s); }
+function anthropicError(res, code, type, message, extraHeaders = {}) { sendJSON(res, code, { type: "error", error: { type, message } }, extraHeaders); }
 
 // ---------- provenance ----------
 //
@@ -3051,6 +3094,101 @@ function recordProvenance(req, body, { route, model, surface }) {
 // them without a word. Counted on the response's close rather than after the handler returns,
 // because a streaming turn's handler resolves long before the stream ends.
 let inflight = 0;
+
+// Obtain a working upstream Response for one turn, trying members in order: a single member for every
+// non-composite turn (byte-for-byte today's behaviour), or the ordered composite chain, falling through
+// on any transport/HTTP error until one member answers. Returns the winner
+// { upstream, provider, useResp, payload, registry, model, startedAt } on the first `.ok` member, or null
+// after it has already written a terminal error to `res`. A 429 is fast-failover: recorded and skipped
+// immediately; only once EVERY member is rate-limited does it wait (bounded by OPENAI_COMPOSITE_MAX_WAIT_MS)
+// for the soonest Retry-After and retry. All waiting happens BEFORE any byte is streamed, so the
+// point-of-no-return (writeHead+message_start) is only crossed by the winning member. (`sleep` is the
+// module-level helper defined above.)
+async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, sessionId, composite, attempts }) {
+  const rateHeld = [];            // 429'd members awaiting Retry-After: { member, notBefore }
+  let allowRequeue = true;        // false during the wait phase, so each held member is retried at most once
+  let bestErr = null;             // worst error seen, surfaced when every member fails (composite only)
+  const rank = { transport: 0, http: 1, rate_limit: 2 };
+  const worseOf = (a, b) => (!a ? b : (rank[b.kind] >= rank[a.kind] ? b : a));
+
+  // One attempt against ONE member. Returns the winner object on `.ok`; "skip" to fall through (composite
+  // only); or null after writing a terminal error (an encode reject, or a single-member failure — which
+  // reproduces today's exact 502 / OpenAI-status error string).
+  const tryMember = async (m) => {
+    providerALS.enterWith(m.provider);                   // pin THIS member for encode + fetch + headers
+    const useResp = apiForModel(m.model) === "responses";
+    const surface = useResp ? "responses" : "chat";
+    let payload, registry, imagesSent;
+    try { ({ payload, registry, imagesSent } = useResp ? toResponses(body, m.model, route) : toOpenAI(body, m.model, route)); }
+    catch (e) {
+      const r = errorResponse(e);
+      if (!useResp) recordProvenance(req, body, { route, model: m.model, surface: "chat" });  // matches today's placement
+      log(`/v1/messages [${surface}] rejected: ${r.body.error.message}`);
+      sendJSON(res, r.status, r.body);                   // encode error is deterministic — never a fallthrough
+      return null;
+    }
+    if (useResp) recordProvenance(req, body, { route, model: m.model, surface: "responses" });
+    const shape = requestShape(body);
+    const compacting = compactionKind(body);
+    if (useResp) {
+      const hintOn = policy.hints && (OUTPUT_FIXUPS || PERSISTENCE);
+      log(`/v1/messages [responses] model=${reqModel}->${m.model} ${contextFields(shape)}` +
+        ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
+        `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
+        `${routeLabel(route)}${isCls ? " reasoning=off tools=none" : ""}` +
+        `${req.headers["x-claude-code-session-id"] ? ` session=${String(req.headers["x-claude-code-session-id"]).slice(0, 8)}` : ""}`);
+    } else {
+      log(`/v1/messages [chat] model=${reqModel}->${m.model} ${contextFields(shape)}` +
+        ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
+        `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}`);
+    }
+    if (compacting) log(compactionWarning(compacting, shape, reqModel, m.model));
+    const startedAt = Date.now();
+    let upstream;
+    try { upstream = useResp ? await callResponses(payload, policy.reservedPool, sessionId)
+                             : await callOpenAI(payload, policy.reservedPool, sessionId); }
+    catch (e) {
+      bestErr = worseOf(bestErr, { kind: "transport", message: e.message });
+      if (!composite) { anthropicError(res, 502, "api_error", useResp ? `proxy->OpenAI(responses) fetch failed: ${e.message}` : `proxy->OpenAI fetch failed: ${e.message}`); return null; }
+      return "skip";
+    }
+    const cls = classifyUpstream(upstream);
+    if (cls.ok) return { upstream, provider: m.provider, useResp, payload, registry, model: m.model, startedAt };
+    const errTxt = await upstream.text();                // consume ONCE; a failed member is never replayed
+    log(useResp ? `OpenAI(responses) ${cls.status}: ${errTxt.slice(0, 300)}` : `OpenAI ${cls.status}: ${errTxt.slice(0, 300)}`);
+    bestErr = worseOf(bestErr, { kind: cls.rateLimited ? "rate_limit" : "http", status: cls.status, bodyText: errTxt, retryAfterMs: cls.retryAfterMs });
+    if (!composite) { anthropicError(res, cls.status, "api_error", `OpenAI ${cls.status}: ${errTxt.slice(0, 500)}`); return null; }
+    if (cls.rateLimited && allowRequeue) rateHeld.push({ member: m, notBefore: Date.now() + (cls.retryAfterMs ?? 0) });
+    return "skip";
+  };
+
+  // Pass 1: strict order, first `.ok` wins; a 429 is fast-failover.
+  for (const m of attempts) {
+    const r = await tryMember(m);
+    if (r === null) return null;                         // terminal already written
+    if (r !== "skip") return r;                          // winner
+  }
+  // Bounded wait: only reached when EVERY member failed and some were 429s. Each held member gets ONE
+  // retry (no re-queue: allowRequeue is now false, so a fresh 429 here only updates bestErr), so this
+  // drains rateHeld and always terminates. Wait for the soonest within the cap, retry, repeat.
+  allowRequeue = false;
+  let waited = 0;
+  while (rateHeld.length) {
+    const soonest = rateHeld.reduce((a, b) => (b.notBefore < a.notBefore ? b : a));
+    const wait = Math.max(0, soonest.notBefore - Date.now());
+    if (wait > OPENAI_COMPOSITE_MAX_WAIT_MS || waited + wait > OPENAI_COMPOSITE_MAX_WAIT_MS) break;
+    if (wait > 0) { log(`  composite: all members rate-limited; waiting ${Math.round(wait / 1000)}s for ${soonest.member.id}`); await sleep(wait); waited += wait; }
+    rateHeld.splice(rateHeld.indexOf(soonest), 1);
+    const r = await tryMember(soonest.member);           // re-pins ALS, re-encodes, re-calls; a fresh 429 re-queues
+    if (r === null) return null;
+    if (r !== "skip") return r;
+  }
+  // Every member failed. Surface the worst error; echo Retry-After on a final 429 so the agent backs off.
+  const hdrs = (bestErr?.kind === "rate_limit" && bestErr.retryAfterMs != null) ? { "Retry-After": String(Math.ceil(bestErr.retryAfterMs / 1000)) } : {};
+  if (bestErr?.kind === "transport") anthropicError(res, 502, "api_error", `composite: all members failed; last transport error: ${bestErr.message}`);
+  else anthropicError(res, bestErr?.status ?? 502, "api_error", `composite: all members failed; best upstream ${bestErr?.status}: ${(bestErr?.bodyText || "").slice(0, 500)}`, hdrs);
+  return null;
+}
 
 const server = http.createServer(async (req, res) => {
   const url = req.url.split("?")[0];
@@ -3132,15 +3270,17 @@ const server = http.createServer(async (req, res) => {
     const policy = policyFor(route);
     const family = route === ROUTE.PREFIX ? "prefix" : isSafety(route) ? "safety" : null;
     const isCls = isClassifier(route);
-    // Resolve the upstream provider: a picked "<provider>:<model>" id on a MAIN turn routes to that
-    // provider + its key; everything else (un-prefixed, classifier, compaction) uses the default. The
-    // provider is stashed in AsyncLocalStorage so the wire helpers below use it without extra params.
-    const picked = route === ROUTE.MAIN ? resolvePickedProvider(reqModel) : null;
-    const activeProvider = picked ? picked.provider : DEFAULT_PROVIDER;
-    providerALS.enterWith(activeProvider);
-    const model = picked ? picked.model : pickModel(body, route);   // FROM THE ROUTE — never inherited
-    const useResp = apiForModel(model) === "responses";  // the provider's surface (chat/responses)
-    if (picked) log(`  routed to provider ${activeProvider.id} (${activeProvider.baseURL})`);
+    // Composite (fallback) model: when a MAIN turn names the reserved "composite" id, expand it into an
+    // ordered member list the proxy tries in turn (obtainUpstream below). Everything else keeps today's
+    // single-shot behaviour — a picked "<provider>:<model>" routes to that provider + its key; un-prefixed,
+    // classifier and compaction use the default provider. The active provider is stashed in
+    // AsyncLocalStorage so the wire helpers use it without extra params; the composite re-pins it per
+    // member and again on the winner below. The upstream model/surface come from `got`, not from here.
+    const members = route === ROUTE.MAIN ? resolveComposite(reqModel) : null;
+    const picked = members ? null : (route === ROUTE.MAIN ? resolvePickedProvider(reqModel) : null);
+    const bootProvider = picked ? picked.provider : DEFAULT_PROVIDER;
+    providerALS.enterWith(bootProvider);
+    if (picked) log(`  routed to provider ${bootProvider.id} (${bootProvider.baseURL})`);
     // Claude Code's WebSearch is Anthropic's server-side tool; the local model can't run it. When this
     // is that search sub-request, run the search here and inject the results, so it actually works.
     if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log, proxy: WEB_SEARCH_PROXY });
@@ -3154,39 +3294,18 @@ const server = http.createServer(async (req, res) => {
     // No-op for a cloud endpoint (it takes `input_file` itself) and for a turn with no PDF.
     if (IS_LOCAL_ENDPOINT) await localizePdfsInBody(body, { extract: extractPdf });
 
-    // Both encoders build the tool registry, which validates the whole declared catalog. A name
-    // collision throws here rather than being sanitized into an alias, because two tools sharing a
-    // wire name means a returned call cannot be attributed — see tool-registry.mjs.
+    // Obtain a working upstream — a single member for every non-composite turn (byte-for-byte today's
+    // behaviour), or the ordered composite chain, trying members until one answers. Each encoder builds
+    // the tool registry per member; a name collision throws there and becomes a clean error response.
+    const attempts = members || [{ provider: bootProvider, model: picked ? picked.model : pickModel(body, route) }];
+    const got = await obtainUpstream(res, req, { body, reqModel, route, policy, isCls, sessionId, composite: !!members, attempts });
+    if (!got) return;                                    // obtainUpstream already wrote a terminal error
+    // Pin the WINNER for the whole stream (mirrors the old single enterWith; a no-op for the single
+    // member). enterWith, NOT run: the streaming below runs in THIS handler after the helper resolved.
+    providerALS.enterWith(got.provider);
+    const { upstream, useResp, payload, registry, model, startedAt } = got;
+
     if (useResp) {
-      let payload, registry, imagesSent;
-      try { ({ payload, registry, imagesSent } = toResponses(body, model, route)); }
-      catch (e) {
-        const r = errorResponse(e);
-        log(`/v1/messages [responses] rejected: ${r.body.error.message}`);
-        return sendJSON(res, r.status, r.body);
-      }
-      const hintOn = policy.hints && (OUTPUT_FIXUPS || PERSISTENCE);
-      // `msgs=`, not `input=`: the old name read like a token count and was a message count.
-      // ~total includes the tool schemas, biggest= names the single largest item, and the
-      // compaction line below fires when the client is asking us to summarise its own transcript.
-      recordProvenance(req, body, { route, model, surface: "responses" });
-      const shape = requestShape(body);
-      const compacting = compactionKind(body);
-      log(`/v1/messages [responses] model=${reqModel}->${model} ${contextFields(shape)}` +
-        ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
-        `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
-        `${routeLabel(route)}${isCls ? " reasoning=off tools=none" : ""}` +
-        `${req.headers["x-claude-code-session-id"] ? ` session=${String(req.headers["x-claude-code-session-id"]).slice(0, 8)}` : ""}`);
-      if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
-      let upstream;
-      const startedAt = Date.now();
-      try { upstream = await callResponses(payload, policy.reservedPool, sessionId); }
-      catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI(responses) fetch failed: ${e.message}`); }
-      if (!upstream.ok) {
-        const errTxt = await upstream.text();
-        log(`OpenAI(responses) ${upstream.status}: ${errTxt.slice(0, 300)}`);
-        return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
-      }
       if (payload.stream) {
         const mayContinue = policy.continuation && !!payload.tools?.length;
         const taskState = TASK_ECHO && !isCls ? collectPriorTasks(body) : null;
@@ -3245,28 +3364,7 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, msg); }
     }
 
-    let payload, registry, imagesSent;
-    try { ({ payload, registry, imagesSent } = toOpenAI(body, model, route)); }
-    catch (e) {
-      const r = errorResponse(e);
-    recordProvenance(req, body, { route, model, surface: "chat" });
-      log(`/v1/messages [chat] rejected: ${r.body.error.message}`);
-      return sendJSON(res, r.status, r.body);
-    }
-    const shape = requestShape(body);
-    const compacting = compactionKind(body);
-    log(`/v1/messages [chat] model=${reqModel}->${model} ${contextFields(shape)}` +
-      ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
-      `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}`);
-    if (compacting) log(compactionWarning(compacting, shape, reqModel, model));
-    let upstream;
-    try { upstream = await callOpenAI(payload, policy.reservedPool, sessionId); }
-    catch (e) { return anthropicError(res, 502, "api_error", `proxy->OpenAI fetch failed: ${e.message}`); }
-    if (!upstream.ok) {
-      const errTxt = await upstream.text();
-      log(`OpenAI ${upstream.status}: ${errTxt.slice(0, 300)}`);
-      return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
-    }
+    // Chat post-ok — the winning member's upstream/payload/registry/model come from `got` above.
     if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model, route); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,

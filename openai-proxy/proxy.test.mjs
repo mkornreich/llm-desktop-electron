@@ -18,6 +18,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel, resolvePickedProvider,
+        parseCompositeMembers, resolveComposite, parseRetryAfter, classifyUpstream,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
@@ -404,6 +405,57 @@ test("resolvePickedProvider routes a keyless local:<model> pick to the on-device
   assert.match(l.provider.baseURL, /\/v1$/);   // an Ollama /v1 base (LLMD_LOCAL_BASE, or the loopback default)
   // Split on the FIRST colon, so a model id keeps any colons of its own (an :tag / hf.co path).
   assert.equal(resolvePickedProvider("local:hf.co/org/model:Q4").model, "hf.co/org/model:Q4");
+});
+
+// ---------- composite (fallback) model ----------
+
+test("parseCompositeMembers trims, drops empties, keeps order", () => {
+  assert.deepEqual(parseCompositeMembers("openai:gpt-5.6-sol, local:qwen3:8b ,,  gemini:g "),
+    ["openai:gpt-5.6-sol", "local:qwen3:8b", "gemini:g"]);
+  assert.deepEqual(parseCompositeMembers(""), []);
+  assert.deepEqual(parseCompositeMembers(null), []);
+});
+
+test("resolveComposite returns null unless reqModel is the composite id with a non-empty list", () => {
+  assert.equal(resolveComposite("claude-opus-4-8", { membersStr: "local:qwen3:8b" }), null);   // not the composite id
+  assert.equal(resolveComposite("composite", { membersStr: "" }), null);                        // empty list
+  assert.equal(resolveComposite("composite", { compositeId: "", membersStr: "local:x" }), null);// feature off
+});
+
+test("resolveComposite expands members in order, keyless local + bare, dropping unkeyed remotes", () => {
+  // local: is keyless (always resolves); a bare id -> the default provider; a remote member with no key
+  // in .openai-key resolves to null and is dropped. So the surviving list is order-preserving.
+  const r = resolveComposite("composite", { membersStr: "local:qwen3:8b, some-bare-model, cohere:command-a-03-2025" });
+  assert.ok(Array.isArray(r) && r.length >= 2, "local + bare always survive");
+  assert.equal(r[0].id, "local:qwen3:8b");
+  assert.equal(r[0].provider.id, "local");
+  assert.equal(r[0].model, "qwen3:8b");
+  assert.equal(r[1].id, "some-bare-model");
+  assert.equal(r[1].model, "some-bare-model");        // bare -> default provider, model unchanged
+  assert.ok(r[1].provider && r[1].provider.baseURL);  // resolved to the default provider object
+  // cohere only survives if a cohere key is present (gitignored) — assert conditionally.
+  const cohere = r.find((m) => m.id.startsWith("cohere:"));
+  if (cohere) { assert.equal(cohere.provider.id, "cohere"); assert.equal(cohere.model, "command-a-03-2025"); }
+});
+
+test("parseRetryAfter handles delta-seconds and HTTP-date, else null", () => {
+  const h = (v) => ({ get: (k) => (k === "retry-after" ? v : null) });
+  assert.equal(parseRetryAfter(h("120")), 120000);
+  assert.equal(parseRetryAfter(h("  5 ")), 5000);
+  assert.equal(parseRetryAfter(h(null)), null);
+  assert.equal(parseRetryAfter(h("not-a-date")), null);
+  const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+  assert.equal(parseRetryAfter(h("Thu, 01 Jan 2026 00:00:30 GMT"), now), 30000);   // 30s in the future
+  assert.equal(parseRetryAfter(h("Thu, 01 Jan 2026 00:00:00 GMT"), now + 5000), 0); // past -> clamped to 0
+});
+
+test("classifyUpstream flags 429 with its Retry-After and never consumes the body", () => {
+  const mk = (status, ra) => ({ ok: status >= 200 && status < 300, status,
+    headers: { get: (k) => (k === "retry-after" ? ra : null) } });
+  assert.deepEqual(classifyUpstream(mk(200)), { ok: true, status: 200, rateLimited: false, retryAfterMs: null });
+  assert.deepEqual(classifyUpstream(mk(503)), { ok: false, status: 503, rateLimited: false, retryAfterMs: null });
+  assert.deepEqual(classifyUpstream(mk(429, "7")), { ok: false, status: 429, rateLimited: true, retryAfterMs: 7000 });
+  assert.deepEqual(classifyUpstream(mk(429, null)), { ok: false, status: 429, rateLimited: true, retryAfterMs: null });
 });
 
 // ---------- tool-argument pruning ----------
@@ -2053,8 +2105,10 @@ test("both surfaces log context through the one shared formatter", () => {
     assert.match(s, /\$\{contextFields\(shape\)\}/, `site must use the shared formatter: ${s.slice(0, 60)}`);
     assert.ok(!/~ctx=/.test(s), "the old ~ctx field excluded tool schemas and must be gone");
   }
+  // The composite refactor funnels both surfaces through obtainUpstream, so the compaction warning is
+  // now a SINGLE shared call both surfaces reach — drift is impossible by construction.
   const warns = src.match(/if \(compacting\) log\(compactionWarning\(/g) || [];
-  assert.equal(warns.length, 2, "both surfaces must use the shared compaction warning");
+  assert.equal(warns.length, 1, "the compaction warning is one shared call both surfaces flow through");
 });
 
 test("the compaction warning states what each prompt family actually retains", () => {

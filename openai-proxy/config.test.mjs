@@ -336,6 +336,7 @@ test("every behaviour-affecting setting is part of the hash", () => {
     PROXY_DUMP_TOOLS: "1", OPENAI_API_KEY: "k2", OPENAI_EXTRA_HEADERS: "X-Test:1",
     PROXY_SEND_CHROME_TOOLS: "0", PROXY_SEND_IOS_TOOLS: "0", PROXY_WEB_SEARCH: "0",
     PROXY_WEB_SEARCH_PROXY: "http://p:1",
+    OPENAI_COMPOSITE_MODELS: "openai:gpt-5.6-sol,local:qwen3:8b", OPENAI_COMPOSITE_MAX_WAIT_MS: "9999",
   };
   const baseline = configHash({ resolved: resolve({ env: {}, project: {}, home: {} }) });
   const missing = [];
