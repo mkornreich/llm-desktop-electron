@@ -370,8 +370,8 @@ if [ "$PROVIDER" = "proxy" ]; then
     [ -n "${OPENAI_EXTRA_HEADERS_VAL}" ] && export OPENAI_EXTRA_HEADERS="${OPENAI_EXTRA_HEADERS_VAL}"
     echo "[run] openrouter model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
     # The sk-or- key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
-    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
-      echo "[run] WARNING: no OpenRouter key found — put 'apiKey=sk-or-...' in .openai-key (cp .openai-key.example .openai-key)"
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(openrouterApiKey|apiKey)=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no OpenRouter key found — put 'openrouterApiKey=sk-or-...' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
 
@@ -390,8 +390,8 @@ if [ "$PROVIDER" = "proxy" ]; then
     export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.cohere.ai/compatibility/v1}"
     echo "[run] cohere model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
     # The Cohere key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
-    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
-      echo "[run] WARNING: no Cohere key found — put 'apiKey=<your-cohere-key>' in .openai-key (cp .openai-key.example .openai-key)"
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(cohereApiKey|apiKey)=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no Cohere key found — put 'cohereApiKey=<your-cohere-key>' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
 
@@ -410,8 +410,8 @@ if [ "$PROVIDER" = "proxy" ]; then
     export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}"
     echo "[run] gemini model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
     # The Gemini key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
-    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
-      echo "[run] WARNING: no Gemini key found — put 'apiKey=<your-gemini-key>' in .openai-key (cp .openai-key.example .openai-key)"
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(googleApiKey|geminiApiKey|apiKey)=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no Gemini key found — put 'googleApiKey=<your-gemini-key>' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
 
