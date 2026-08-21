@@ -146,10 +146,20 @@ test("local mode defaults the classifier, safety, and compact models to the mode
   assert.equal(v.OPENAI_CLASSIFIER_MODEL, "gemma4:latest");
   assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gemma4:latest");   // was the remote gpt-5.4 default
   assert.equal(v.OPENAI_COMPACT_MODEL, "gemma4:latest");
-  assert.equal(s.OPENAI_CLASSIFIER_SAFETY_MODEL, "local -> main model");
+  assert.equal(s.OPENAI_CLASSIFIER_SAFETY_MODEL, "non-openai upstream -> model in use");
 });
 
-test("an explicit env classifier model still wins in local mode", () => {
+test("a non-OpenAI remote upstream (e.g. Cohere) also defaults the aux models to the model in use", () => {
+  const env = { OPENAI_BASE_URL: "https://api.cohere.ai/compatibility/v1", OPENAI_MODEL: "command-a-03-2025",
+                OPENAI_API_KEY: "x" };
+  const project = { OPENAI_CLASSIFIER_MODEL: "gpt-5.4-nano" };   // bled over from .openai-model
+  const v = R(env, project);
+  assert.equal(v.OPENAI_CLASSIFIER_MODEL, "command-a-03-2025");
+  assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "command-a-03-2025");
+  assert.equal(v.OPENAI_COMPACT_MODEL, "command-a-03-2025");
+});
+
+test("an explicit env classifier model still wins on a non-OpenAI upstream", () => {
   const env = { OPENAI_BASE_URL: "http://127.0.0.1:11435/v1", OPENAI_MODEL: "gemma4:latest",
                 OPENAI_CLASSIFIER_MODEL: "qwen3:8b" };
   const v = R(env);
@@ -157,12 +167,12 @@ test("an explicit env classifier model still wins in local mode", () => {
   assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gemma4:latest");   // still defaults to the model in use
 });
 
-test("a remote endpoint keeps the remote classifier/compact defaults", () => {
+test("the real OpenAI API keeps the remote classifier/compact defaults", () => {
   const env = { OPENAI_BASE_URL: "https://api.openai.com/v1", OPENAI_MODEL: "gpt-4.1", OPENAI_API_KEY: "x" };
   const v = R(env), s = S(env);
   assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4-2026-03-05");
   assert.equal(v.OPENAI_COMPACT_MODEL, "gpt-4.1-mini");
-  assert.notEqual(s.OPENAI_CLASSIFIER_MODEL, "local -> main model");
+  assert.notEqual(s.OPENAI_CLASSIFIER_MODEL, "non-openai upstream -> model in use");
 });
 
 test("local mode does not warn about a blank safety model (main-model verdicts are the intent there)", () => {
@@ -329,7 +339,7 @@ test("every setting the proxy reads is declared here", () => {
   const declared = new Set(SETTINGS.map((s) => s.env).filter(Boolean));
   // Runtime plumbing, not configuration: these select a test mode or are read for their own
   // sake and deliberately stay out of the identity of the process.
-  const exempt = new Set(["PROXY_NO_LISTEN"]);
+  const exempt = new Set(["PROXY_NO_LISTEN", "PROXY_FORCE_IPV4"]);
   const found = new Set();
   for (const m of src.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)) found.add(m[1]);
   const undeclared = [...found].filter((k) => !declared.has(k) && !exempt.has(k));

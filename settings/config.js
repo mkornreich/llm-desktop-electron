@@ -15,9 +15,9 @@ const filePath = (f) => path.join(ROOT, f);
 // Every parameter the launcher or the proxy actually reads. `file` is where it is persisted.
 const SCHEMA = [
   { group: "Provider", file: ".provider", key: "PROVIDER", type: "enum",
-    options: ["openai", "local", "openrouter", "anthropic"], default: "openai",
+    options: ["openai", "local", "openrouter", "cohere", "anthropic"], default: "openai",
     label: "Model backing the agent",
-    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. openrouter = the same proxy pointed at OpenRouter (any model it serves, incl. free ones); configure it in .openrouter-model and put an sk-or- key in .openai-key. Only the agent is affected; the chat window is always remote claude.ai." },
+    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. openrouter = the same proxy pointed at OpenRouter (any model it serves, incl. free ones); configure it in .openrouter-model and put an sk-or- key in .openai-key. cohere = the same proxy pointed at Cohere's OpenAI-compatible endpoint; configure it in .cohere-model and put your Cohere key in .openai-key. Only the agent is affected; the chat window is always remote claude.ai." },
 
   // The local (on-device) model, its own file. .local-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)
@@ -57,6 +57,19 @@ const SCHEMA = [
     type: "enum", options: ["chat", "responses"], default: "chat",
     label: "API surface",
     help: "chat = /chat/completions (broadest OpenRouter model support; caps tools at 128 — the app sends ~93, so it fits). responses = /responses (stateless; OpenRouter supports it per-model and it sends every tool, avoiding the 128 cap). Leave as chat unless your model needs responses." },
+
+  // Cohere, its own file. Same OPENAI_MODEL/OPENAI_API reuse as the OpenRouter group; the Cohere key
+  // lives in .openai-key (gitignored). Cohere's compatibility API is Chat Completions only, and its
+  // model list is not a public catalog, so the model is a text field (not a live picker).
+  { group: "Cohere model", file: ".cohere-model", key: "COHERE_MODEL", fileKey: "OPENAI_MODEL",
+    type: "text", default: "command-a-03-2025", placeholder: "command-a-03-2025",
+    suggestions: ["command-a-03-2025", "command-a-plus-05-2026", "command-r-plus-08-2024", "command-r7b-12-2024"],
+    label: "Cohere model",
+    help: "Any Cohere model id that supports tool calling (the agent is tool calls end to end) — e.g. command-a-03-2025 (default), command-a-plus-05-2026, command-r-plus-08-2024. Put your Cohere key in .openai-key. Trial keys are rate-limited (~20 req/min plus a monthly cap); a production key is recommended for agentic use." },
+  { group: "Cohere model", file: ".cohere-model", key: "COHERE_API", fileKey: "OPENAI_API",
+    type: "enum", options: ["chat"], default: "chat",
+    label: "API surface",
+    help: "Cohere's OpenAI-compatible endpoint speaks Chat Completions only (no /responses), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
 
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",

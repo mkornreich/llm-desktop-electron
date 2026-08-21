@@ -124,6 +124,8 @@ fi
 #                 (Ollama by default) so the agent runs on THIS machine's GPU, no API key
 #   openrouter -> same translation proxy, pointed at OpenRouter (openrouter.ai) with an sk-or-
 #                 key in .openai-key, so the agent runs on any model OpenRouter serves
+#   cohere     -> same translation proxy, pointed at Cohere's OpenAI-compatible endpoint
+#                 (api.cohere.ai/compatibility/v1) with a Cohere key in .openai-key
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
@@ -132,8 +134,8 @@ fi
 PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
 PROVIDER="${PROVIDER:-openai}"
 case "$PROVIDER" in
-  openai|anthropic|local|openrouter) ;;
-  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic|openrouter)"; exit 1 ;;
+  openai|anthropic|local|openrouter|cohere) ;;
+  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic|openrouter|cohere)"; exit 1 ;;
 esac
 echo "[run] provider: $PROVIDER"
 
@@ -250,7 +252,7 @@ unload_managed_ollama() {
   done
 }
 
-if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "openrouter" ]; then
+if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "openrouter" ] || [ "$PROVIDER" = "cohere" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
 
@@ -341,6 +343,26 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
     # The sk-or- key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
     if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
       echo "[run] WARNING: no OpenRouter key found — put 'apiKey=sk-or-...' in .openai-key (cp .openai-key.example .openai-key)"
+    fi
+  fi
+
+  # `cohere` provider: the SAME translation proxy, pointed at Cohere's OpenAI-compatible endpoint
+  # instead of api.openai.com. Reads model/api from .cohere-model; the Cohere key resolves from
+  # .openai-key (the proxy's keyfile source) — NOT handled here. Cohere's compatibility API exposes
+  # Chat Completions only (no /responses), so api stays chat. Base URL is overridable from CONF for
+  # the api.cohere.com alias; it defaults to the confirmed-working api.cohere.ai.
+  if [ "$PROVIDER" = "cohere" ]; then
+    CONF=".cohere-model"
+    export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-command-a-03-2025}"
+    export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_API="${OPENAI_API:-chat}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$(sed -n 's/^OPENAI_BASE_URL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.cohere.ai/compatibility/v1}"
+    echo "[run] cohere model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
+    # The Cohere key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no Cohere key found — put 'apiKey=<your-cohere-key>' in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:

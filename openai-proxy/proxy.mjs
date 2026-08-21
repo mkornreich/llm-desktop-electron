@@ -665,10 +665,16 @@ log(`web search: ${WEB_SEARCH_ENABLED ? "ON" : "off"}${WEB_SEARCH_PROXY ? " via 
 let classifierFetch = fetch;
 try {
   const { Agent, setGlobalDispatcher, fetch: undiciFetch } = await import("undici");
-  setGlobalDispatcher(new Agent({ connections: 64, pipelining: 0, keepAliveTimeout: 30_000 }));
-  const classifierAgent = new Agent({ connections: 8, pipelining: 0, keepAliveTimeout: 30_000 });
+  // Force IPv4 for upstream connections. Some hosts' resolvers hang on AAAA (IPv6) lookups — remote
+  // APIs like api.cohere.ai have instantly-resolving A records but no working AAAA, so undici's
+  // getaddrinfo stalls until UND_ERR_CONNECT_TIMEOUT (the same failure the web-search `-4` flag fixes
+  // for curl; autoSelectFamily can't help because the stall is in DNS, before connection racing).
+  // connect.family=4 queries A only. Set PROXY_FORCE_IPV4=0 to disable on an IPv6-only network.
+  const v4 = process.env.PROXY_FORCE_IPV4 === "0" ? {} : { connect: { family: 4 } };
+  setGlobalDispatcher(new Agent({ connections: 64, pipelining: 0, keepAliveTimeout: 30_000, ...v4 }));
+  const classifierAgent = new Agent({ connections: 8, pipelining: 0, keepAliveTimeout: 30_000, ...v4 });
   classifierFetch = (url, opts) => undiciFetch(url, { ...opts, dispatcher: classifierAgent });
-  log("connection pools: 64 shared, 8 reserved for classifier verdicts");
+  log(`connection pools: 64 shared, 8 reserved for classifier verdicts${v4.connect ? " (IPv4-forced)" : ""}`);
 } catch (e) {
   log(`! undici unavailable (${e.code || e.message}) — using the default pool for everything`);
 }

@@ -239,11 +239,16 @@ export const SETTINGS = [
 const BY_NAME = new Map(SETTINGS.map((s) => [s.name, s]));
 
 // A loopback OPENAI_BASE_URL is an on-device server (Ollama etc.): it serves the OpenAI API without a
-// key and can only run models it hosts locally. Used both to relax the key requirement and to keep the
-// auxiliary LLM calls (safety classifier, prefix classifier, compaction) on the local model rather than
-// a remote default the local upstream cannot reach.
+// key. Used to relax the key requirement — a missing key is fine for a local server, but an error for
+// any remote endpoint (OpenRouter, Cohere, OpenAI).
 export function isLocalEndpoint(url) {
   return /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(url || "");
+}
+// Only OpenAI's own API serves the gpt-5.x model ids that the classifier/compaction settings default
+// to. Every other upstream — a loopback local server, OpenRouter, Cohere — can only run its own models,
+// so on those the auxiliary LLM calls must fall back to the model actually in use (see resolve()).
+export function servesOpenAiDefaults(url) {
+  return /^https?:\/\/api\.openai\.com(:|\/|$)/i.test(url || "");
 }
 
 // ---------- resolution ----------
@@ -298,16 +303,16 @@ export function resolve({ env = process.env, project, home, keyfile } = {}) {
   sources.OPENAI_COMPACT_MODEL = cmRaw ? cmSrc
     : values.OPENAI_CLASSIFIER_MODEL ? "OPENAI_CLASSIFIER_MODEL" : "default";
 
-  // In local mode the on-device upstream can only serve the model it is running, so the auxiliary LLM
-  // calls cannot use the remote defaults (the gpt-5.4 safety classifier, gpt-4.1-mini compaction) or a
-  // classifier carried over from .openai-model — every safety verdict would fail ("auto mode cannot
-  // determine the safety of …"). Default them to the model currently in use. An explicit env override
-  // still wins (e.g. pointing the classifier at a smaller local model for faster verdicts).
-  if (isLocalEndpoint(values.OPENAI_BASE_URL)) {
+  // Unless the upstream is OpenAI's own API, the classifier/compaction settings' remote gpt-5.x
+  // defaults (and any value carried over from .openai-model) point at models the upstream cannot
+  // serve — so every prefix/safety verdict and compaction call would 404 ("auto mode cannot determine
+  // the safety of …"). On a local server, OpenRouter or Cohere, default those auxiliary calls to the
+  // model actually in use. An explicit env override still wins (e.g. a smaller/cheaper classifier).
+  if (!servesOpenAiDefaults(values.OPENAI_BASE_URL)) {
     for (const name of ["OPENAI_CLASSIFIER_MODEL", "OPENAI_CLASSIFIER_SAFETY_MODEL", "OPENAI_COMPACT_MODEL"]) {
       if (sources[name] !== "env") {
         values[name] = values.OPENAI_MODEL;
-        sources[name] = "local -> main model";
+        sources[name] = "non-openai upstream -> model in use";
       }
     }
   }
@@ -438,7 +443,7 @@ export function validate(opts = {}) {
       `Set OPENAI_API=responses unless you specifically need Chat Completions`);
   // Blank is legal and documented, and it is also the configuration measured to miss the CLI's
   // deadline. Saying so is the difference between a choice and an accident.
-  if (v.OPENAI_CLASSIFIER_SAFETY_MODEL === "" && !isLocalEndpoint(v.OPENAI_BASE_URL))
+  if (v.OPENAI_CLASSIFIER_SAFETY_MODEL === "" && servesOpenAiDefaults(v.OPENAI_BASE_URL))
     // Re-measured against the real classifier corpus (eval/reports/safety-classifier.md). The old
     // warning blamed LATENCY, from figures taken on gpt-5.3-codex. On today's main model latency is
     // fine — p50 2.4s, p95 6.1s, nothing near the deadline — but 8 of 14 verdicts came back
