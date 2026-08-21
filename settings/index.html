@@ -150,13 +150,15 @@ const OPENAI_ONLY = (s) => s.file === ".openai-model";
 const LOCAL_ONLY = (s) => s.file === ".local-model";
 const OPENROUTER_ONLY = (s) => s.file === ".openrouter-model";
 const COHERE_ONLY = (s) => s.file === ".cohere-model";
+const GEMINI_ONLY = (s) => s.file === ".gemini-model";
 // .openai-model applies in openai (and local) mode; .local-model only in local mode;
-// .openrouter-model only in openrouter mode; .cohere-model only in cohere mode. Inert rows are
-// dimmed and marked, never hidden or cleared — the value still applies when you switch back.
+// .openrouter-model only in openrouter mode; .cohere-model only in cohere mode; .gemini-model only in
+// gemini mode. Inert rows are dimmed and marked, never hidden or cleared — the value applies on switch back.
 const isInert = (s) => (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s))
   || (DRAFT.PROVIDER !== "local" && LOCAL_ONLY(s))
   || (DRAFT.PROVIDER !== "openrouter" && OPENROUTER_ONLY(s))
-  || (DRAFT.PROVIDER !== "cohere" && COHERE_ONLY(s));
+  || (DRAFT.PROVIDER !== "cohere" && COHERE_ONLY(s))
+  || (DRAFT.PROVIDER !== "gemini" && GEMINI_ONLY(s));
 
 function control(s) {
   const v = DRAFT[s.key];
@@ -294,6 +296,8 @@ function render() {
           ? "Not in effect: the agent is not set to openrouter. Saved, and applied when you switch the provider to openrouter."
           : COHERE_ONLY(s)
           ? "Not in effect: the agent is not set to cohere. Saved, and applied when you switch the provider to cohere."
+          : GEMINI_ONLY(s)
+          ? "Not in effect: the agent is not set to gemini. Saved, and applied when you switch the provider to gemini."
           : "Not in effect: the agent is set to Anthropic. Saved, and applied again when you switch back to OpenAI.";
         left.append(n);
       }

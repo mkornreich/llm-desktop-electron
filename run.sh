@@ -126,6 +126,8 @@ fi
 #                 key in .openai-key, so the agent runs on any model OpenRouter serves
 #   cohere     -> same translation proxy, pointed at Cohere's OpenAI-compatible endpoint
 #                 (api.cohere.ai/compatibility/v1) with a Cohere key in .openai-key
+#   gemini     -> same translation proxy, pointed at Google Gemini's OpenAI-compatible endpoint
+#                 (generativelanguage.googleapis.com/v1beta/openai) with a Gemini key in .openai-key
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
@@ -134,8 +136,8 @@ fi
 PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
 PROVIDER="${PROVIDER:-openai}"
 case "$PROVIDER" in
-  openai|anthropic|local|openrouter|cohere) ;;
-  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic|openrouter|cohere)"; exit 1 ;;
+  openai|anthropic|local|openrouter|cohere|gemini) ;;
+  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic|openrouter|cohere|gemini)"; exit 1 ;;
 esac
 echo "[run] provider: $PROVIDER"
 
@@ -252,7 +254,7 @@ unload_managed_ollama() {
   done
 }
 
-if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "openrouter" ] || [ "$PROVIDER" = "cohere" ]; then
+if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "openrouter" ] || [ "$PROVIDER" = "cohere" ] || [ "$PROVIDER" = "gemini" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
 
@@ -363,6 +365,26 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
     # The Cohere key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
     if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
       echo "[run] WARNING: no Cohere key found — put 'apiKey=<your-cohere-key>' in .openai-key (cp .openai-key.example .openai-key)"
+    fi
+  fi
+
+  # `gemini` provider: the SAME translation proxy, pointed at Google Gemini's OpenAI-compatible
+  # endpoint instead of api.openai.com. Reads model/api from .gemini-model; the Gemini (AI Studio) key
+  # resolves from .openai-key (the proxy's keyfile source) — NOT handled here. Gemini's compat surface
+  # is Chat Completions only (no /responses — it 404s), so api stays chat. Base URL is overridable
+  # from CONF but defaults to the v1beta/openai gateway.
+  if [ "$PROVIDER" = "gemini" ]; then
+    CONF=".gemini-model"
+    export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-gemini-3-flash-preview}"
+    export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_API="${OPENAI_API:-chat}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$(sed -n 's/^OPENAI_BASE_URL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}"
+    echo "[run] gemini model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
+    # The Gemini key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^apiKey=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no Gemini key found — put 'apiKey=<your-gemini-key>' in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:

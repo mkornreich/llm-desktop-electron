@@ -10,6 +10,8 @@
 #                 .openrouter-model; sk-or- key in .openai-key.
 #   cohere     -> same proxy, pointed at Cohere's OpenAI-compatible endpoint. Model from
 #                 .cohere-model; Cohere key in .openai-key.
+#   gemini     -> same proxy, pointed at Google Gemini's OpenAI-compatible endpoint. Model from
+#                 .gemini-model; Gemini key in .openai-key.
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude, exactly
 #                 as the shipped app does. The proxy is not started, and the OpenAI-only
 #                 CLAUDE_CODE_* settings from .openai-model are NOT applied — sending an
@@ -19,6 +21,6 @@
 # this setting only affects the agent. The bundle patches are env-gated, so in anthropic
 # mode they are inert and no files need reverting.
 #
-# Convenience wrappers: ./run-openai.sh, ./run-local.sh, ./run-openrouter.sh, ./run-cohere.sh and
-# ./run-anthropic.sh force one mode.
-PROVIDER=cohere
+# Convenience wrappers: ./run-openai.sh, ./run-local.sh, ./run-openrouter.sh, ./run-cohere.sh,
+# ./run-gemini.sh and ./run-anthropic.sh force one mode.
+PROVIDER=gemini

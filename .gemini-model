@@ -1,0 +1,38 @@
+# Gemini model config for `gemini` provider mode.
+# Used by run.sh when PROVIDER=gemini (./run-gemini.sh, or `PROVIDER=gemini ./run.sh`).
+#
+# `gemini` routes the agent's Claude Code sub-layer through the openai-proxy pointed at Google
+# Gemini's OpenAI-compatible endpoint (https://generativelanguage.googleapis.com/v1beta/openai). The
+# chat window is still remote claude.ai. KEY=VALUE format (same parser as .local-model / .provider).
+#
+# API KEY: this file does NOT hold the key. Put your Gemini (AI Studio) key in .openai-key:
+#     cp .openai-key.example .openai-key   # then set:  apiKey=<your-gemini-key>   (starts with AIza)
+# .openai-key is gitignored; the proxy reads it as the keyfile source. A key is REQUIRED (a remote
+# endpoint is never keyless, unlike local mode). Get one at https://aistudio.google.com/apikey
+
+# ---- model ----
+# Any Gemini model id that supports TOOL CALLING (the agent is tool calls end to end). Recommended:
+#   gemini-3-flash-preview   fast, confirmed tool use (the default)
+#   gemini-3.6-flash         Google's current recommended flash (may be busy on the free tier)
+#   gemini-flash-latest      always-current flash alias
+#   gemini-3.1-pro-preview   larger/stronger, slower
+# NOTE: gemini-2.5-flash is retired for new keys. Full list: GET /v1beta/openai/models with your key.
+OPENAI_MODEL=gemini-3-flash-preview
+
+# OpenAI surface. Gemini's compatibility endpoint is Chat Completions only (/responses 404s), so keep
+# this as chat. chat caps tools at 128 — the app sends ~93, so it fits.
+OPENAI_API=chat
+
+# ---- endpoint (optional) ----
+# Defaults to https://generativelanguage.googleapis.com/v1beta/openai. Uncomment to override:
+# OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+
+# ---- rate-limit notes ----
+# Free-tier Gemini keys are rate-limited per model (requests/min and requests/day) and popular models
+# can return transient "high demand" (503) errors — an agentic coding loop makes many requests, so
+# expect throttling. A paid (billing-enabled) key raises the limits.
+
+# ---- Claude Code identity (required; do not remove) ----
+# run.sh exports this so bundled Claude Code resolves a supported context window; it still sends
+# claude-opus-4-8 on the wire, which the proxy maps to OPENAI_MODEL above.
+OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]

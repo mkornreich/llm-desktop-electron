@@ -15,9 +15,9 @@ const filePath = (f) => path.join(ROOT, f);
 // Every parameter the launcher or the proxy actually reads. `file` is where it is persisted.
 const SCHEMA = [
   { group: "Provider", file: ".provider", key: "PROVIDER", type: "enum",
-    options: ["openai", "local", "openrouter", "cohere", "anthropic"], default: "openai",
+    options: ["openai", "local", "openrouter", "cohere", "gemini", "anthropic"], default: "openai",
     label: "Model backing the agent",
-    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. openrouter = the same proxy pointed at OpenRouter (any model it serves, incl. free ones); configure it in .openrouter-model and put an sk-or- key in .openai-key. cohere = the same proxy pointed at Cohere's OpenAI-compatible endpoint; configure it in .cohere-model and put your Cohere key in .openai-key. Only the agent is affected; the chat window is always remote claude.ai." },
+    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. openrouter = the same proxy pointed at OpenRouter (any model it serves, incl. free ones); configure it in .openrouter-model and put an sk-or- key in .openai-key. cohere = the same proxy pointed at Cohere's OpenAI-compatible endpoint; configure it in .cohere-model and put your Cohere key in .openai-key. gemini = the same proxy pointed at Google Gemini's OpenAI-compatible endpoint; configure it in .gemini-model and put your Gemini key in .openai-key. Only the agent is affected; the chat window is always remote claude.ai." },
 
   // The local (on-device) model, its own file. .local-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)
@@ -70,6 +70,19 @@ const SCHEMA = [
     type: "enum", options: ["chat"], default: "chat",
     label: "API surface",
     help: "Cohere's OpenAI-compatible endpoint speaks Chat Completions only (no /responses), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
+
+  // Gemini, its own file. Same OPENAI_MODEL/OPENAI_API reuse as the Cohere group; the Gemini key lives
+  // in .openai-key (gitignored). Gemini's compatibility API is Chat Completions only, and its model
+  // list is fetched per-key rather than a public catalog, so the model is a text field (no live picker).
+  { group: "Gemini model", file: ".gemini-model", key: "GEMINI_MODEL", fileKey: "OPENAI_MODEL",
+    type: "text", default: "gemini-3-flash-preview", placeholder: "gemini-3-flash-preview",
+    suggestions: ["gemini-3-flash-preview", "gemini-3.6-flash", "gemini-flash-latest", "gemini-3.1-pro-preview"],
+    label: "Gemini model",
+    help: "Any Gemini model id that supports tool calling (the agent is tool calls end to end) — e.g. gemini-3-flash-preview (default), gemini-3.6-flash, gemini-flash-latest. gemini-2.5-flash is retired for new keys. Put your Gemini (AI Studio) key in .openai-key. Free-tier keys are rate-limited and popular models can return transient 'high demand' errors." },
+  { group: "Gemini model", file: ".gemini-model", key: "GEMINI_API", fileKey: "OPENAI_API",
+    type: "enum", options: ["chat"], default: "chat",
+    label: "API surface",
+    help: "Gemini's OpenAI-compatible endpoint speaks Chat Completions only (/responses returns 404), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
 
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",

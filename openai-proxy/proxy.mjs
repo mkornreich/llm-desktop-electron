@@ -121,6 +121,10 @@ const OPENAI_BASE = CFG.OPENAI_BASE_URL;
 // those serve the OpenAI API without authenticating, so the key is OPTIONAL there. An off-box
 // endpoint still requires a key — that is the difference the FATAL check below turns on.
 const IS_LOCAL_ENDPOINT = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i.test(OPENAI_BASE);
+// Only the real OpenAI API accepts OpenAI-proprietary request fields (prompt_cache_key, etc.). Other
+// OpenAI-compatible upstreams range from lenient (Cohere/OpenRouter ignore unknown fields) to strict
+// (Gemini 400s on them: `Unknown name "prompt_cache_key"`). Gate OpenAI-only extensions on this.
+const IS_OPENAI_ENDPOINT = /^https?:\/\/api\.openai\.com(:|\/|$)/i.test(OPENAI_BASE);
 // The bearer token actually put on the wire: the real key wherever it exists, and a harmless
 // placeholder for a keyless local server (which ignores Authorization entirely). Never empty,
 // so a local endpoint that DOES want a token still gets a well-formed header.
@@ -1672,7 +1676,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   if (out.stream) out.stream_options = { include_usage: true };
   // Same cache routing as the Responses path; both surfaces accept the field.
   const cacheKey = cacheKeyFor(body);
-  if (cacheKey) out.prompt_cache_key = cacheKey;
+  if (cacheKey && IS_OPENAI_ENDPOINT) out.prompt_cache_key = cacheKey;   // OpenAI-only field; Gemini 400s on it
   if (notesEmitted) log(`  ! ${notesEmitted} content part(s) could not be translated and were replaced ` +
     `with a labelled note rather than dropped`);
   return { payload: out, registry, imagesSent, filesSent, notesEmitted };
@@ -1967,7 +1971,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   // Route this conversation to its own cache node rather than the bucket every session
   // shares by default. Stable for the session's life; see cacheKeyFor.
   const cacheKey = cacheKeyFor(body);
-  if (cacheKey) out.prompt_cache_key = cacheKey;
+  if (cacheKey && IS_OPENAI_ENDPOINT) out.prompt_cache_key = cacheKey;   // OpenAI-only field; Gemini 400s on it
   // Both fields are required for summaries to appear; effort alone or summary alone gives none.
   //
   // Never for a classifier call. Two independent reasons: its prompt asks for reasoning IN
