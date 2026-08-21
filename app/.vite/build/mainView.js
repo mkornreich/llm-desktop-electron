@@ -242,6 +242,11 @@ try {
                       am.models.push({ model_id: m.id, minimum_tier: "free" });
                   });
                 }
+                // Experiment: tag each injected model with a per-provider `section`, to see whether the
+                // remote model picker groups them under headers / a submenu (vs one flat list). The
+                // composite entry above deliberately has NO section so it stays first.
+                var PROV_LABEL = { cohere: "Cohere", gemini: "Gemini", mistral: "Mistral", groq: "Groq", ollama: "Ollama Cloud", local: "Local (on-device)" };
+                function sectionFor(id) { var p = String(id).split(":")[0]; return PROV_LABEL[p] || p; }
                 if (Array.isArray(data.model_selector_config)) {
                   data.model_selector_config.forEach(function (surf) {
                     if (!surf || !Array.isArray(surf.models)) return;
@@ -250,7 +255,7 @@ try {
                       surf.models.push({
                         id: m.id, name: m.name, short_name: m.short,
                         description: "Runs on " + m.id.split(":")[0] + " via the local proxy",
-                        section: "main",
+                        section: sectionFor(m.id),
                         capabilities: { compass: false, gsuite_tools: false, mm_images: false, mm_pdf: false, web_search: false },
                         thinking: { type: "effort_and_mode",
                           effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High" }, { id: "xhigh", name: "Extra" }, { id: "max", name: "Max", recommended: true }],
