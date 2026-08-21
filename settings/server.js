@@ -343,10 +343,14 @@ async function handle(req, res) {
     if (url.pathname === "/api/composite-choices" && req.method === "GET") {
       const sug = (key) => (config.SCHEMA.find((s) => s.key === key) || {}).suggestions || [];
       const configured = (file) => { const v = config.readFile(file).values.OPENAI_MODEL; return v ? [v] : []; };
+      // ?responses=1 -> only providers that serve /responses (the compaction summariser calls it). Mirrors
+      // config.mjs RESPONSES_PROVIDER_IDS (kept in sync by hand — server.js is CommonJS, can't import the ESM).
+      const respOnly = url.searchParams.get("responses") === "1";
+      const RESPONSES_PROVIDERS = new Set(["openai", "groq", "ollama", "local"]);
       const choices = [];
       const seen = new Set();
       const add = (provider, model) => {
-        if (!model) return;
+        if (!model || (respOnly && !RESPONSES_PROVIDERS.has(provider))) return;
         const id = `${provider}:${model}`;
         if (seen.has(id)) return; seen.add(id);
         choices.push({ id, label: `${provider}: ${model}`, provider });

@@ -110,11 +110,12 @@ window.settings = {
   ollamaModels: ()    => api("/api/ollama-models"),
   openrouterModels: () => api("/api/openrouter-models"),
   compositeChoices: () => api("/api/composite-choices"),
+  compactChoices: () => api("/api/composite-choices?responses=1"),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
-let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [];
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [], COMPACT_CHOICES = [];
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 // The model's MAXIMUM supported context (from Ollama's model_info) — what the picker snaps the
@@ -230,9 +231,10 @@ function control(s) {
     // choice (a <select> of the fetched catalog, or a text field when the catalog is empty) plus
     // move-up / move-down / remove, followed by an "Add model" button. Every edit rejoins the rows and
     // re-renders. A member set but absent from the catalog is kept (so a valid id is never dropped).
+    const CH = s.responsesOnly ? COMPACT_CHOICES : COMPOSITE_CHOICES;   // responsesOnly -> only /responses providers
     const members = (DRAFT[s.key] || "").split(",").map((x) => x.trim()).filter(Boolean);
-    const choiceIds = COMPOSITE_CHOICES.map((c) => c.id);
-    const labelOf = Object.fromEntries(COMPOSITE_CHOICES.map((c) => [c.id, c.label]));
+    const choiceIds = CH.map((c) => c.id);
+    const labelOf = Object.fromEntries(CH.map((c) => [c.id, c.label]));
     const commit = (arr) => { DRAFT[s.key] = arr.map((x) => (x || "").trim()).filter(Boolean).join(","); render(); };
     const wrap = document.createElement("div");
     const mkBtn = (txt, title, fn, disabled) => {
@@ -485,6 +487,8 @@ async function load() {
   // Composite editor choices — model ids aggregated across providers (openai/gemini/cohere suggestions +
   // live OpenRouter + live Ollama). Best-effort; the picker falls back to free-text rows when it is empty.
   try { COMPOSITE_CHOICES = (await window.settings.compositeChoices()).choices || []; render(); } catch { /* offline */ }
+  // Responses-only subset, for the compaction chain picker (the summariser calls /responses).
+  try { COMPACT_CHOICES = (await window.settings.compactChoices()).choices || []; render(); } catch { /* offline */ }
 }
 
 async function save() {

@@ -238,6 +238,12 @@ export const SETTINGS = [
   // fast", so configuring one used to configure the other. Derived for that reason.
   { name: "OPENAI_COMPACT_MODEL", env: "OPENAI_COMPACT_MODEL", project: ["OPENAI_COMPACT_MODEL"],
     derived: true },
+  // Composite (fallback) COMPACTION chain: an ordered comma-separated list of "<provider>:<model>" ids the
+  // summariser tries in turn (each routed to its own provider + key), falling over on any failure. The
+  // summariser calls /responses, so only responses-capable providers belong here (the Settings picker
+  // enforces that). Empty -> the single OPENAI_COMPACT_MODEL on the default provider (today's behaviour).
+  { name: "OPENAI_COMPACT_MODELS", env: "OPENAI_COMPACT_MODELS", project: ["OPENAI_COMPACT_MODELS"],
+    type: "str", default: "" },
 
   // Client-side capability identity and context bound. The proxy only reports these; the
   // launcher and the disclaimer helper are what apply them.
@@ -295,6 +301,11 @@ export const PROVIDERS = {
   // the specific remote hosts above win providerForBase() before this broad loopback match.
   local:      { id: "local",      label: "Local",      baseURL: (process.env.LLMD_LOCAL_BASE || "http://127.0.0.1:11434/v1"),           api: "chat",      keyNames: [],                                        isOpenAI: false, match: /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i },
 };
+// Providers that serve the OpenAI Responses API (/responses). The compaction summariser calls /responses,
+// so a compaction chain member must be one of these; gemini/cohere/mistral are chat-only (their /responses
+// 404s). local = on-device Ollama, which serves /responses on recent versions. (openrouter is per-model, so
+// left out to be safe.) Used by validate() and mirrored by the settings picker's responses-only filter.
+export const RESPONSES_PROVIDER_IDS = new Set(["openai", "groq", "ollama", "local"]);
 // The registry entry whose host matches this base URL, or null (loopback / unknown host).
 export function providerForBase(url) {
   return Object.values(PROVIDERS).find((p) => p.match.test(String(url || ""))) || null;
@@ -540,6 +551,19 @@ export function validate(opts = {}) {
       const prov = id.slice(0, i);
       if (!PROVIDERS[prov]) warnings.push(`composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
       else if (prov !== "local" && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
+    }
+  }
+
+  // Compaction chain members: like the composite, plus each must serve /responses (the summariser calls it).
+  if (v.OPENAI_COMPACT_MODELS) {
+    const active = new Set(activeProviders(opts.keyfile).map((p) => p.id));
+    for (const id of v.OPENAI_COMPACT_MODELS.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const i = id.indexOf(":");
+      if (i <= 0) continue;
+      const prov = id.slice(0, i);
+      if (!PROVIDERS[prov]) warnings.push(`compaction member '${id}' names an unknown provider '${prov}' — it will be skipped`);
+      else if (prov !== "local" && !active.has(prov)) warnings.push(`compaction member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
+      else if (!RESPONSES_PROVIDER_IDS.has(prov)) warnings.push(`compaction member '${id}' uses '${prov}', which does not serve /responses — the summariser will fail over past it`);
     }
   }
 

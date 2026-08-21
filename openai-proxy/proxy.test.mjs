@@ -18,7 +18,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel, resolvePickedProvider,
-        parseCompositeMembers, resolveComposite, parseRetryAfter, classifyUpstream, noteCompositeModel,
+        parseCompositeMembers, resolveComposite, parseRetryAfter, classifyUpstream, noteCompositeModel, resolveCompactChain,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
@@ -447,6 +447,18 @@ test("parseRetryAfter handles delta-seconds and HTTP-date, else null", () => {
   const now = Date.UTC(2026, 0, 1, 0, 0, 0);
   assert.equal(parseRetryAfter(h("Thu, 01 Jan 2026 00:00:30 GMT"), now), 30000);   // 30s in the future
   assert.equal(parseRetryAfter(h("Thu, 01 Jan 2026 00:00:00 GMT"), now + 5000), 0); // past -> clamped to 0
+});
+
+test("resolveCompactChain: empty -> single default member, else ordered members", () => {
+  const dflt = resolveCompactChain({ membersStr: "" });
+  assert.equal(dflt.length, 1, "empty chain -> one member (default provider + COMPACT_MODEL)");
+  assert.ok(dflt[0].provider && dflt[0].provider.baseURL);
+  const chain = resolveCompactChain({ membersStr: "local:qwen3:8b, some-bare, cohere:command-a-03-2025" });
+  assert.ok(chain.length >= 2, "local + bare always survive (cohere only with a key)");
+  assert.equal(chain[0].provider.id, "local");
+  assert.equal(chain[0].model, "qwen3:8b");
+  assert.equal(chain[1].model, "some-bare");              // bare id -> the default provider
+  assert.ok(chain[1].provider && chain[1].provider.baseURL);
 });
 
 test("noteCompositeModel logs on change, else at most once per second", () => {
@@ -2350,7 +2362,8 @@ test("the compaction summariser records its own upstream call", () => {
   // while the README claimed all four were counted.
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   const fn = src.slice(src.indexOf("async function summariseDropped"), src.indexOf("async function compactResponsesInputSummarised"));
-  assert.match(fn, /recordUsage\(COMPACT_MODEL/, "summariseDropped must record its own usage");
+  // Now a fallback chain: each member records its own usage as a COMPACTION_SUMMARY (keyed on the member's model).
+  assert.match(fn, /recordUsage\(m\.model[\s\S]*?KIND\.COMPACTION_SUMMARY/, "summariseDropped must record its own usage");
 });
 
 test("every recordUsage call site passes the cached figure and the resolved model", () => {

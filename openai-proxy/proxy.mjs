@@ -468,6 +468,28 @@ function isTransportError(e) {
 const MAX_TURN_OUTPUT_TOKENS = CFG.OPENAI_MAX_TURN_OUTPUT_TOKENS;
 const COMPACT_SUMMARY = CFG.OPENAI_COMPACT_SUMMARY;
 const COMPACT_MODEL = CFG.OPENAI_COMPACT_MODEL;
+// Composite (fallback) compaction chain — see config.mjs. Ordered "<provider>:<model>" ids the summariser
+// tries in turn; empty -> the single COMPACT_MODEL on the default provider.
+const OPENAI_COMPACT_MODELS = CFG.OPENAI_COMPACT_MODELS;
+// Resolve the compaction chain into an ordered list of { provider, model } the summariser tries in turn.
+// Each "<provider>:<model>" routes via resolvePickedProvider (dropped if unknown/keyless); a bare id -> the
+// default provider. Empty/none -> the single COMPACT_MODEL on the default provider (today's behaviour).
+export function resolveCompactChain({ membersStr = OPENAI_COMPACT_MODELS } = {}) {
+  const single = [{ provider: DEFAULT_PROVIDER, model: COMPACT_MODEL }];
+  const ids = parseCompositeMembers(membersStr);
+  if (!ids.length) return single;
+  const out = [];
+  for (const id of ids) {
+    if (id.includes(":")) {
+      const picked = resolvePickedProvider(id);
+      if (picked) out.push({ provider: picked.provider, model: picked.model });
+      else log(`  ! compaction: skipping ${id} — unknown provider or no key`);
+    } else {
+      out.push({ provider: DEFAULT_PROVIDER, model: id });
+    }
+  }
+  return out.length ? out : single;
+}
 const AUTO_CONTINUE = CFG.OPENAI_AUTO_CONTINUE;
 const MAX_CONTINUATIONS = CFG.OPENAI_MAX_CONTINUATIONS;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -1050,35 +1072,43 @@ async function summariseDropped(pieces) {
     "what a coding agent would still need: file paths, symbol and function names, key values, " +
     "errors, counts, and conclusions reached. Omit boilerplate and repetition. Use terse " +
     "bullets. Do not invent anything not present below.\n\n" + parts.join("\n\n");
-  try {
-    // Compaction is a system operation on the DEFAULT provider (that is where COMPACT_MODEL lives),
-    // never the turn's picked provider — sending COMPACT_MODEL to a picked upstream would 404.
-    const r = await fetch(`${DEFAULT_PROVIDER.baseURL}/responses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${DEFAULT_PROVIDER.auth}`, ...DEFAULT_PROVIDER.extraHeaders },
-      body: JSON.stringify({
-        model: COMPACT_MODEL, max_output_tokens: SUMMARY_MAX_TOKENS,
-        input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
-      }),
-      signal: AbortSignal.timeout(60000),
-    });
-    if (!r.ok) { log(`  ! compaction summary failed (${r.status}); falling back to truncation`); return null; }
-    const j = await r.json();
-    // This is a real upstream call on the account's key, and it was the one request the
-    // ledger never saw — /usage claimed to cover every path while silently omitting it.
-    recordUsage(COMPACT_MODEL, j?.usage?.input_tokens, j?.usage?.output_tokens,
-                j?.usage?.output_tokens_details?.reasoning_tokens,
-                j?.usage?.input_tokens_details?.cached_tokens, { kind: KIND.COMPACTION_SUMMARY, route: "compaction", surface: "responses" });
-    let text = "";
-    for (const it of j.output || [])
-      if (it.type === "message") for (const c of it.content || []) if (c.type === "output_text") text += c.text || "";
-    text = text.trim();
-    if (!text) { log("  ! compaction summary came back empty; falling back to truncation"); return null; }
-    return text;
-  } catch (e) {
-    log(`  ! compaction summary error (${e.message}); falling back to truncation`);
-    return null;
+  // Compaction is a system operation on the compaction chain (OPENAI_COMPACT_MODELS), or the single
+  // COMPACT_MODEL on the DEFAULT provider when that's empty — NEVER the turn's picked provider. Each member
+  // runs on its own provider (baseURL + key); the summariser always calls /responses, so a chat-only member
+  // 404s and we fall over to the next. All failing -> null, and the caller falls back to plain truncation.
+  const chain = resolveCompactChain();
+  const many = chain.length > 1;
+  for (const m of chain) {
+    const who = `${m.provider.id}:${m.model}`;
+    try {
+      const r = await fetch(`${m.provider.baseURL}/responses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${m.provider.auth}`, ...(m.provider.extraHeaders || {}) },
+        body: JSON.stringify({
+          model: m.model, max_output_tokens: SUMMARY_MAX_TOKENS,
+          input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+        }),
+        signal: AbortSignal.timeout(60000),
+      });
+      if (!r.ok) { log(`  ! compaction summary via ${who} failed (${r.status})${many ? " — trying next" : ""}`); continue; }
+      const j = await r.json();
+      // A real upstream call on the account's key — recorded so /usage covers this path too.
+      recordUsage(m.model, j?.usage?.input_tokens, j?.usage?.output_tokens,
+                  j?.usage?.output_tokens_details?.reasoning_tokens,
+                  j?.usage?.input_tokens_details?.cached_tokens, { kind: KIND.COMPACTION_SUMMARY, route: "compaction", surface: "responses" });
+      let text = "";
+      for (const it of j.output || [])
+        if (it.type === "message") for (const c of it.content || []) if (c.type === "output_text") text += c.text || "";
+      text = text.trim();
+      if (!text) { log(`  ! compaction summary via ${who} came back empty${many ? " — trying next" : ""}`); continue; }
+      return text;
+    } catch (e) {
+      log(`  ! compaction summary via ${who} error (${e.message})${many ? " — trying next" : ""}`);
+      continue;
+    }
   }
+  log("  ! all compaction models failed; falling back to truncation");
+  return null;
 }
 
 // Compact, and if summarisation is enabled put a digest of what was dropped into the OLDEST
