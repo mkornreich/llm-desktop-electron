@@ -136,6 +136,8 @@ fi
 #     mistral    -> Mistral's OpenAI-compatible endpoint; model in .mistral-model, Mistral key in .openai-key
 #     groq       -> Groq's OpenAI-compatible endpoint (fast LPU inference, serves /responses); model in
 #                   .groq-model, Groq key in .openai-key
+#     ollama     -> Ollama Cloud (ollama.com) remote hosted models (serves /responses); model in
+#                   .ollama-model, Ollama key in .openai-key. (DISTINCT from `local` = on-device Ollama.)
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
 # The bundle patches read PROXY_ANTHROPIC_BASE_URL, so leaving it unset restores the
@@ -147,7 +149,7 @@ DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-$(sed -n 's/^DEFAULT_PROVIDER=//p' .provid
 # DEFAULT_PROVIDER. An old PROVIDER value (in .provider, or `PROVIDER=cohere ./run.sh`) still works —
 # it selects proxy mode with that provider as the default upstream.
 case "$PROVIDER" in
-  openai|local|openrouter|cohere|gemini|mistral|groq) DEFAULT_PROVIDER="$PROVIDER"; PROVIDER="proxy" ;;
+  openai|local|openrouter|cohere|gemini|mistral|groq|ollama) DEFAULT_PROVIDER="$PROVIDER"; PROVIDER="proxy" ;;
 esac
 DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-openai}"
 case "$PROVIDER" in
@@ -155,8 +157,8 @@ case "$PROVIDER" in
   *) echo "[run] unknown PROVIDER='$PROVIDER' (expected proxy|anthropic)"; exit 1 ;;
 esac
 case "$DEFAULT_PROVIDER" in
-  openai|local|openrouter|cohere|gemini|mistral|groq) ;;
-  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected openai|local|openrouter|cohere|gemini|mistral|groq)"; exit 1 ;;
+  openai|local|openrouter|cohere|gemini|mistral|groq|ollama) ;;
+  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected openai|local|openrouter|cohere|gemini|mistral|groq|ollama)"; exit 1 ;;
 esac
 if [ "$PROVIDER" = "proxy" ]; then
   echo "[run] provider: proxy (default upstream: $DEFAULT_PROVIDER)"
@@ -451,6 +453,24 @@ if [ "$PROVIDER" = "proxy" ]; then
     echo "[run] groq model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
     if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(groqApiKey|grokApiKey|apiKey)=' .openai-key 2>/dev/null; then
       echo "[run] WARNING: no Groq key found — put 'groqApiKey=<your-groq-key>' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
+    fi
+  fi
+
+  # `ollama` provider: the SAME translation proxy, pointed at Ollama Cloud (ollama.com/v1) — REMOTE hosted
+  # models, keyed. DISTINCT from `local` (on-device Ollama, keyless, loopback). Reads model/api from
+  # .ollama-model; the Ollama key resolves from .openai-key (ollamaApiKey=). Serves /responses, so api
+  # defaults to responses.
+  if [ "$DEFAULT_PROVIDER" = "ollama" ]; then
+    CONF=".ollama-model"
+    export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-gpt-oss:120b}"
+    export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_API="${OPENAI_API:-responses}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$(sed -n 's/^OPENAI_BASE_URL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://ollama.com/v1}"
+    echo "[run] ollama-cloud model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(ollamaApiKey|apiKey)=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no Ollama Cloud key found — put 'ollamaApiKey=<your-ollama-key>' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
 

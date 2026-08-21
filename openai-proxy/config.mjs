@@ -284,6 +284,10 @@ export const PROVIDERS = {
   // /responses, so default to responses (no 128-tool cap, reasoning). keyNames accept groqApiKey and the
   // easy-to-mistype grokApiKey. isOpenAI:false so OpenAI-only fields (prompt_cache_key) are not sent.
   groq:       { id: "groq",       label: "Groq",       baseURL: "https://api.groq.com/openai/v1",                          api: "responses", keyNames: ["groqApiKey", "grokApiKey", "apiKey"],    isOpenAI: false, match: /api\.groq\.com/i },
+  // Ollama Cloud (ollama.com) — REMOTE, keyed hosted models (gpt-oss, deepseek, qwen3.5, kimi, …). Distinct
+  // from the keyless on-device `local` provider below. Serves both /chat/completions and /responses, so
+  // defaults to responses. keyNames: ollamaApiKey. (`local` matches loopback; this matches ollama.com.)
+  ollama:     { id: "ollama",     label: "Ollama Cloud", baseURL: "https://ollama.com/v1",                                  api: "responses", keyNames: ["ollamaApiKey", "apiKey"],                 isOpenAI: false, match: /ollama\.com/i },
   // On-device Ollama (or any loopback OpenAI-compatible server). KEYLESS — its keyNames are empty,
   // so it never appears in activeProviders and is never advertised by /v1/models; a `local:<model>`
   // pick is special-cased in proxy.mjs (resolvePickedProvider) to route here with no key. baseURL is

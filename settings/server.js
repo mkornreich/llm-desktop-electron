@@ -356,6 +356,7 @@ async function handle(req, res) {
       for (const m of [...sug("COHERE_MODEL"), ...configured(".cohere-model")]) add("cohere", m);
       for (const m of [...sug("MISTRAL_MODEL"), ...configured(".mistral-model")]) add("mistral", m);
       for (const m of [...sug("GROQ_MODEL"), ...configured(".groq-model")]) add("groq", m);
+      for (const m of [...sug("OLLAMA_MODEL"), ...configured(".ollama-model")]) add("ollama", m);
       for (const m of configured(".openrouter-model")) add("openrouter", m);
       // Local Ollama thinking models (live) — same discovery as /api/ollama-models.
       try {

@@ -1,0 +1,39 @@
+# Ollama Cloud model config for `ollama` provider mode.
+# Used by run.sh when DEFAULT_PROVIDER=ollama (proxy mode: ./run-proxy.sh, or `PROVIDER=ollama ./run.sh`).
+#
+# `ollama` routes the agent's Claude Code sub-layer through the openai-proxy pointed at Ollama Cloud's
+# OpenAI-compatible endpoint (https://ollama.com/v1) — REMOTE hosted models. NOTE: this is the CLOUD
+# service (ollama.com), NOT your on-device Ollama — that's the keyless `local` provider (.local-model).
+# The chat window is still remote claude.ai. KEY=VALUE format (same parser as .groq-model / .provider).
+#
+# API KEY: this file does NOT hold the key. Put your Ollama Cloud key in .openai-key:
+#     cp .openai-key.example .openai-key   # then set:  ollamaApiKey=<your-ollama-key>
+# .openai-key is gitignored; the proxy reads it as the keyfile source. A key is REQUIRED (a remote
+# endpoint is never keyless, unlike local mode). Get one at https://ollama.com/settings/keys
+
+# ---- model ----
+# Any Ollama Cloud model id that supports TOOL CALLING (the agent is tool calls end to end). Examples:
+#   gpt-oss:120b                large open model, tool + reasoning (the default)
+#   gpt-oss:20b                 smaller/faster
+#   qwen3.5:397b                large Qwen
+#   deepseek-v4-pro:preview     DeepSeek
+#   kimi-k3                     Moonshot Kimi
+# Model ids can contain a ":". Full list: GET https://ollama.com/v1/models with your key.
+OPENAI_MODEL=gpt-oss:120b
+
+# OpenAI surface. Ollama Cloud serves BOTH /chat/completions and /responses. Prefer responses: no
+# 128-tool cap and reasoning support. Set to chat only if a specific model needs it.
+OPENAI_API=responses
+
+# ---- endpoint (optional) ----
+# Defaults to https://ollama.com/v1. Uncomment to override:
+# OPENAI_BASE_URL=https://ollama.com/v1
+
+# ---- rate-limit notes ----
+# Ollama Cloud keys are rate-limited by plan (requests/min and hourly/daily caps); an agentic coding
+# loop makes many requests, so expect throttling on a free key.
+
+# ---- Claude Code identity (required; do not remove) ----
+# run.sh exports this so bundled Claude Code resolves a supported context window; it still sends
+# claude-opus-4-8 on the wire, which the proxy maps to OPENAI_MODEL above.
+OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]

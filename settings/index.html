@@ -154,12 +154,13 @@ const COHERE_ONLY = (s) => s.file === ".cohere-model";
 const GEMINI_ONLY = (s) => s.file === ".gemini-model";
 const MISTRAL_ONLY = (s) => s.file === ".mistral-model";
 const GROQ_ONLY = (s) => s.file === ".groq-model";
+const OLLAMACLOUD_ONLY = (s) => s.file === ".ollama-model";
 // Only anthropic mode makes proxy-side settings inert — the agent then talks to Claude directly and none
 // of the proxy config is read. In proxy mode NOTHING is dimmed: every provider's model group is shown
 // active, because each provider is usable per-turn from the Code-tab dropdown regardless of which one is
 // the DEFAULT_PROVIDER (that field only picks a provider's model for when it IS the default upstream).
 const isInert = (s) => DRAFT.PROVIDER === "anthropic"
-  && (OPENAI_ONLY(s) || LOCAL_ONLY(s) || OPENROUTER_ONLY(s) || COHERE_ONLY(s) || GEMINI_ONLY(s) || MISTRAL_ONLY(s) || GROQ_ONLY(s));
+  && (OPENAI_ONLY(s) || LOCAL_ONLY(s) || OPENROUTER_ONLY(s) || COHERE_ONLY(s) || GEMINI_ONLY(s) || MISTRAL_ONLY(s) || GROQ_ONLY(s) || OLLAMACLOUD_ONLY(s));
 
 function control(s) {
   const v = DRAFT[s.key];
