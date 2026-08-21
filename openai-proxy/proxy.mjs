@@ -2097,8 +2097,10 @@ function toResponses(body, model, route = routeForRequest(body)) {
   if (policy.reasoning && SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
     out.reasoning = { effort: effortFor(model, "responses", route), summary: "detailed" };
   }
-  // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding.
-  if (VERBOSITY && policy.verbosity) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
+  // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding. text.verbosity is
+  // an OpenAI-proprietary Responses field — other OpenAI-compatible /responses upstreams reject it (Groq
+  // 400s: `unknown field verbosity`), so gate it on the same isOpenAI flag as prompt_cache_key.
+  if (VERBOSITY && policy.verbosity && curProvider().isOpenAI) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
   if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, exposedTools);
   // Responses tools are flat: {type,name,description,parameters}
   if (exposedTools.length) {

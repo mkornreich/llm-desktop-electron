@@ -134,6 +134,8 @@ fi
 #     cohere     -> Cohere's OpenAI-compatible endpoint; model in .cohere-model, Cohere key in .openai-key
 #     gemini     -> Google Gemini's OpenAI-compatible endpoint; model in .gemini-model, Gemini key in .openai-key
 #     mistral    -> Mistral's OpenAI-compatible endpoint; model in .mistral-model, Mistral key in .openai-key
+#     groq       -> Groq's OpenAI-compatible endpoint (fast LPU inference, serves /responses); model in
+#                   .groq-model, Groq key in .openai-key
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
 # The bundle patches read PROXY_ANTHROPIC_BASE_URL, so leaving it unset restores the
@@ -145,7 +147,7 @@ DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-$(sed -n 's/^DEFAULT_PROVIDER=//p' .provid
 # DEFAULT_PROVIDER. An old PROVIDER value (in .provider, or `PROVIDER=cohere ./run.sh`) still works —
 # it selects proxy mode with that provider as the default upstream.
 case "$PROVIDER" in
-  openai|local|openrouter|cohere|gemini|mistral) DEFAULT_PROVIDER="$PROVIDER"; PROVIDER="proxy" ;;
+  openai|local|openrouter|cohere|gemini|mistral|groq) DEFAULT_PROVIDER="$PROVIDER"; PROVIDER="proxy" ;;
 esac
 DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-openai}"
 case "$PROVIDER" in
@@ -153,8 +155,8 @@ case "$PROVIDER" in
   *) echo "[run] unknown PROVIDER='$PROVIDER' (expected proxy|anthropic)"; exit 1 ;;
 esac
 case "$DEFAULT_PROVIDER" in
-  openai|local|openrouter|cohere|gemini|mistral) ;;
-  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected openai|local|openrouter|cohere|gemini|mistral)"; exit 1 ;;
+  openai|local|openrouter|cohere|gemini|mistral|groq) ;;
+  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected openai|local|openrouter|cohere|gemini|mistral|groq)"; exit 1 ;;
 esac
 if [ "$PROVIDER" = "proxy" ]; then
   echo "[run] provider: proxy (default upstream: $DEFAULT_PROVIDER)"
@@ -431,6 +433,24 @@ if [ "$PROVIDER" = "proxy" ]; then
     echo "[run] mistral model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
     if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(mistralApiKey|apiKey)=' .openai-key 2>/dev/null; then
       echo "[run] WARNING: no Mistral key found — put 'mistralApiKey=<your-mistral-key>' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
+    fi
+  fi
+
+  # `groq` provider: the SAME translation proxy, pointed at Groq's OpenAI-compatible endpoint
+  # (api.groq.com/openai/v1) — fast LPU inference, NOT xAI's Grok. Reads model/api from .groq-model; the
+  # Groq key resolves from .openai-key (groqApiKey=). Groq serves BOTH /chat/completions and /responses,
+  # so api defaults to responses (no 128-tool cap, reasoning). Base URL overridable from CONF.
+  if [ "$DEFAULT_PROVIDER" = "groq" ]; then
+    CONF=".groq-model"
+    export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_MODEL="${OPENAI_MODEL:-openai/gpt-oss-120b}"
+    export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_API="${OPENAI_API:-responses}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-$(sed -n 's/^OPENAI_BASE_URL=//p' "$CONF" 2>/dev/null | head -1)}"
+    export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.groq.com/openai/v1}"
+    echo "[run] groq model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
+    if [ -z "${OPENAI_API_KEY:-}" ] && ! grep -qE '^(groqApiKey|grokApiKey|apiKey)=' .openai-key 2>/dev/null; then
+      echo "[run] WARNING: no Groq key found — put 'groqApiKey=<your-groq-key>' (or apiKey=) in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
 

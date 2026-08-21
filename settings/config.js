@@ -19,7 +19,7 @@ const SCHEMA = [
     label: "Model backing the agent",
     help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). proxy = route the agent through the local translation proxy (Anthropic Messages in, OpenAI out) to whichever upstream you choose below — OpenAI, an on-device Ollama, OpenRouter, Cohere or Gemini. A single turn can also run on any provider you hold a key for by picking a <provider>:<model> from the Code-tab model dropdown. Only the agent is affected; the chat window is always remote claude.ai." },
   { group: "Provider", file: ".provider", key: "DEFAULT_PROVIDER", type: "enum",
-    options: ["openai", "local", "openrouter", "cohere", "gemini", "mistral"], default: "openai",
+    options: ["openai", "local", "openrouter", "cohere", "gemini", "mistral", "groq"], default: "openai",
     label: "Default upstream (proxy mode)",
     help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, local -> Local model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
 
@@ -100,6 +100,19 @@ const SCHEMA = [
     type: "enum", options: ["chat"], default: "chat",
     label: "API surface",
     help: "Mistral's OpenAI-compatible endpoint speaks Chat Completions only (/responses 404s), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
+
+  // Groq (fast LPU inference — NOT xAI's Grok). Same OPENAI_MODEL/OPENAI_API reuse; key lives in
+  // .openai-key (groqApiKey=). Groq serves BOTH /chat/completions and /responses, so the API surface is a
+  // real choice — default to responses (no 128-tool cap, reasoning). Model ids can contain a "/".
+  { group: "Groq model", file: ".groq-model", key: "GROQ_MODEL", fileKey: "OPENAI_MODEL",
+    type: "text", default: "openai/gpt-oss-120b", placeholder: "openai/gpt-oss-120b",
+    suggestions: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b", "groq/compound", "groq/compound-mini"],
+    label: "Groq model",
+    help: "Any Groq model id that supports tool calling (the agent is tool calls end to end) — e.g. openai/gpt-oss-120b (default), openai/gpt-oss-20b, qwen/qwen3.6-27b, groq/compound (agentic). Put your Groq key in .openai-key as groqApiKey=. Full list: GET https://api.groq.com/openai/v1/models. (This is Groq the inference cloud, not xAI's Grok.)" },
+  { group: "Groq model", file: ".groq-model", key: "GROQ_API", fileKey: "OPENAI_API",
+    type: "enum", options: ["responses", "chat"], default: "responses",
+    label: "API surface",
+    help: "Groq serves both. responses = /responses (no tool cap, reasoning) — recommended. chat = /chat/completions (caps tools at 128; the app sends ~93, so it fits). Leave as responses unless a model needs chat." },
 
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",

@@ -280,6 +280,10 @@ export const PROVIDERS = {
   cohere:     { id: "cohere",     label: "Cohere",     baseURL: "https://api.cohere.ai/compatibility/v1",                  api: "chat",      keyNames: ["cohereApiKey", "apiKey"],                isOpenAI: false, match: /api\.cohere\.(ai|com)/i },
   openrouter: { id: "openrouter", label: "OpenRouter", baseURL: "https://openrouter.ai/api/v1",                            api: "chat",      keyNames: ["openrouterApiKey", "apiKey"],            isOpenAI: false, match: /openrouter\.ai/i },
   mistral:    { id: "mistral",    label: "Mistral",    baseURL: "https://api.mistral.ai/v1",                                api: "chat",      keyNames: ["mistralApiKey", "apiKey"],               isOpenAI: false, match: /api\.mistral\.ai/i },
+  // Groq (fast LPU inference — NOT xAI's Grok). OpenAI-compatible; it serves BOTH /chat/completions and
+  // /responses, so default to responses (no 128-tool cap, reasoning). keyNames accept groqApiKey and the
+  // easy-to-mistype grokApiKey. isOpenAI:false so OpenAI-only fields (prompt_cache_key) are not sent.
+  groq:       { id: "groq",       label: "Groq",       baseURL: "https://api.groq.com/openai/v1",                          api: "responses", keyNames: ["groqApiKey", "grokApiKey", "apiKey"],    isOpenAI: false, match: /api\.groq\.com/i },
   // On-device Ollama (or any loopback OpenAI-compatible server). KEYLESS — its keyNames are empty,
   // so it never appears in activeProviders and is never advertised by /v1/models; a `local:<model>`
   // pick is special-cased in proxy.mjs (resolvePickedProvider) to route here with no key. baseURL is

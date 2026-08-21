@@ -153,18 +153,20 @@ const OPENROUTER_ONLY = (s) => s.file === ".openrouter-model";
 const COHERE_ONLY = (s) => s.file === ".cohere-model";
 const GEMINI_ONLY = (s) => s.file === ".gemini-model";
 const MISTRAL_ONLY = (s) => s.file === ".mistral-model";
+const GROQ_ONLY = (s) => s.file === ".groq-model";
 // In anthropic mode nothing proxy-side is in effect (run.sh exports none of it). In proxy mode
 // .openai-model always applies (it holds the shared proxy/agent settings and is the default upstream's
 // model), while each secondary provider's model file (.local/.openrouter/.cohere/.gemini) applies only
 // when it is the selected DEFAULT_PROVIDER. Inert rows are dimmed and marked, never hidden or cleared —
 // the value applies again as soon as the provider/default matches.
 const isInert = (s) => {
-  if (DRAFT.PROVIDER === "anthropic") return OPENAI_ONLY(s) || LOCAL_ONLY(s) || OPENROUTER_ONLY(s) || COHERE_ONLY(s) || GEMINI_ONLY(s) || MISTRAL_ONLY(s);
+  if (DRAFT.PROVIDER === "anthropic") return OPENAI_ONLY(s) || LOCAL_ONLY(s) || OPENROUTER_ONLY(s) || COHERE_ONLY(s) || GEMINI_ONLY(s) || MISTRAL_ONLY(s) || GROQ_ONLY(s);
   if (LOCAL_ONLY(s))      return DRAFT.DEFAULT_PROVIDER !== "local";
   if (OPENROUTER_ONLY(s)) return DRAFT.DEFAULT_PROVIDER !== "openrouter";
   if (COHERE_ONLY(s))     return DRAFT.DEFAULT_PROVIDER !== "cohere";
   if (GEMINI_ONLY(s))     return DRAFT.DEFAULT_PROVIDER !== "gemini";
   if (MISTRAL_ONLY(s))    return DRAFT.DEFAULT_PROVIDER !== "mistral";
+  if (GROQ_ONLY(s))       return DRAFT.DEFAULT_PROVIDER !== "groq";
   return false;
 };
 
@@ -358,6 +360,8 @@ function render() {
           ? "Not in effect: the default upstream is not gemini. Saved, and applied when you set the default provider to gemini."
           : MISTRAL_ONLY(s)
           ? "Not in effect: the default upstream is not mistral. Saved, and applied when you set the default provider to mistral."
+          : GROQ_ONLY(s)
+          ? "Not in effect: the default upstream is not groq. Saved, and applied when you set the default provider to groq."
           : "Not in effect. Saved, and applied when the provider is set to proxy.";
         left.append(n);
       }

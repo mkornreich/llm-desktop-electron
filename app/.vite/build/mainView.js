@@ -218,7 +218,11 @@ try {
                   { id: "mistral:mistral-large-latest",  name: "Mistral: Large",         short: "Large" },
                   { id: "mistral:mistral-medium-latest", name: "Mistral: Medium",        short: "Medium" },
                   { id: "mistral:devstral-medium-latest",name: "Mistral: Devstral",      short: "Devstral" },
-                  { id: "mistral:codestral-latest",      name: "Mistral: Codestral",     short: "Codestral" }
+                  { id: "mistral:codestral-latest",      name: "Mistral: Codestral",     short: "Codestral" },
+                  { id: "groq:openai/gpt-oss-120b",      name: "Groq: GPT-OSS 120B",     short: "GPT-OSS 120B" },
+                  { id: "groq:openai/gpt-oss-20b",       name: "Groq: GPT-OSS 20B",      short: "GPT-OSS 20B" },
+                  { id: "groq:qwen/qwen3.6-27b",         name: "Groq: Qwen3.6 27B",      short: "Qwen3.6 27B" },
+                  { id: "groq:groq/compound",            name: "Groq: Compound",         short: "Compound" }
                 ];
                 // On-device Ollama thinking models, discovered at launch by run.sh and handed over via
                 // the preload bridge (the page can't read env or reach localhost). Routed as local:<model>.

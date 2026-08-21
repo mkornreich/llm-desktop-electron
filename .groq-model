@@ -1,0 +1,38 @@
+# Groq model config for `groq` provider mode.
+# Used by run.sh when DEFAULT_PROVIDER=groq (proxy mode: ./run-proxy.sh, or `PROVIDER=groq ./run.sh`).
+#
+# `groq` routes the agent's Claude Code sub-layer through the openai-proxy pointed at Groq's
+# OpenAI-compatible endpoint (https://api.groq.com/openai/v1) — fast LPU inference. NOTE: this is Groq
+# the inference cloud, NOT xAI's "Grok" model. The chat window is still remote claude.ai. KEY=VALUE
+# format (same parser as .mistral-model / .provider).
+#
+# API KEY: this file does NOT hold the key. Put your Groq key in .openai-key:
+#     cp .openai-key.example .openai-key   # then set:  groqApiKey=<your-groq-key>   (starts with gsk_)
+# .openai-key is gitignored; the proxy reads it as the keyfile source. A key is REQUIRED (a remote
+# endpoint is never keyless, unlike local mode). Get one at https://console.groq.com/keys
+
+# ---- model ----
+# Any Groq model id that supports TOOL CALLING (the agent is tool calls end to end). Recommended:
+#   openai/gpt-oss-120b   large open model, tool + reasoning (the default)
+#   openai/gpt-oss-20b    smaller/faster
+#   qwen/qwen3.6-27b      Qwen, tool + thinking
+#   groq/compound         Groq's agentic model (built-in tools)
+# Model ids can contain a "/". Full list: GET https://api.groq.com/openai/v1/models with your key.
+OPENAI_MODEL=openai/gpt-oss-120b
+
+# OpenAI surface. Groq serves BOTH /chat/completions and /responses. Prefer responses: no 128-tool cap
+# and reasoning support. Set to chat only if a specific model needs it.
+OPENAI_API=responses
+
+# ---- endpoint (optional) ----
+# Defaults to https://api.groq.com/openai/v1. Uncomment to override:
+# OPENAI_BASE_URL=https://api.groq.com/openai/v1
+
+# ---- rate-limit notes ----
+# Groq free-tier keys are rate-limited (requests/min and a daily token cap); an agentic coding loop
+# makes many requests, so expect throttling on a free key. A paid plan raises the limits.
+
+# ---- Claude Code identity (required; do not remove) ----
+# run.sh exports this so bundled Claude Code resolves a supported context window; it still sends
+# claude-opus-4-8 on the wire, which the proxy maps to OPENAI_MODEL above.
+OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]
