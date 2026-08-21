@@ -223,7 +223,7 @@ try {
                         section: "main",
                         capabilities: { compass: false, gsuite_tools: false, mm_images: false, mm_pdf: false, web_search: false },
                         thinking: { type: "effort_and_mode",
-                          effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High", recommended: true }],
+                          effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High" }, { id: "xhigh", name: "Extra" }, { id: "max", name: "Max", recommended: true }],
                           mode_options: [{ id: "auto", name: "Thinking" }, { id: "off", name: "Off" }] }
                       });
                     });
