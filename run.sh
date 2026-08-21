@@ -424,6 +424,12 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
   while IFS='=' read -r k v; do
     case "$k" in CLAUDE_CODE_*) export "$k=$v"; echo "[run] $k=$v" ;; esac
   done < <(grep -E '^CLAUDE_CODE_[A-Z_]+=' "$CONF" 2>/dev/null)
+  # Gateway model discovery: let the app populate its model dropdown from the proxy's GET /v1/models,
+  # so it lists the models the configured provider(s) actually serve. On in EVERY proxy mode — the loop
+  # above only forwards it when it happens to sit in CONF (it lives in .openai-model), so default it on
+  # here for local/openrouter/cohere/gemini too. The anthropic branch unsets it.
+  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="${CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY:-1}"
+  echo "[run] CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=${CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY}"
   # A local model's compaction window must track its real context: a fixed value can exceed a
   # small model's window (so compaction never fires and the prompt overflows) or waste a big
   # one. Derive it from the per-model context — 3/4, leaving headroom for the tools + reply —

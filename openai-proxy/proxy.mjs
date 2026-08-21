@@ -18,8 +18,10 @@ import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   resolve as resolveConfig, snapshot, configHash, codeVersion, validate, provider,
+  PROVIDERS, providerForBase, providerKeys, isLocalEndpoint,
 } from "./config.mjs";
 import {
   newInstanceId, writeManifest, readManifest, clearManifest, REPO,
@@ -137,7 +139,65 @@ const EXTRA_HEADERS = Object.fromEntries(
     .map((p) => p.trim()).filter(Boolean)
     .map((p) => { const i = p.indexOf(":"); return i > 0 ? [p.slice(0, i).trim(), p.slice(i + 1).trim()] : null; })
     .filter(Boolean));
-const upstreamHeaders = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_AUTH}`, ...EXTRA_HEADERS });
+const upstreamHeaders = () => { const p = curProvider(); return { "Content-Type": "application/json", Authorization: `Bearer ${p.auth}`, ...p.extraHeaders }; };
+
+// ---------- provider routing ----------
+// The proxy can target more than the one configured upstream: a picked model id "<provider>:<model>"
+// (advertised on /v1/models) routes THAT turn to the named provider with its own key, while everything
+// else — claude-*/un-prefixed turns, the classifier, compaction — uses the default provider below. The
+// active provider for a request is carried in AsyncLocalStorage, so the wire helpers (upstreamHeaders,
+// callOpenAI/callResponses, apiForModel) pick it up without threading it through every retry path.
+const DEFAULT_PROVIDER = {
+  id: providerForBase(OPENAI_BASE)?.id || (IS_LOCAL_ENDPOINT ? "local" : "custom"),
+  baseURL: OPENAI_BASE, auth: OPENAI_AUTH, api: OPENAI_API, isOpenAI: IS_OPENAI_ENDPOINT, extraHeaders: EXTRA_HEADERS,
+};
+const PROVIDER_KEYS = providerKeys();   // { googleApiKey, cohereApiKey, … } from .openai-key
+const providerAuth = (reg) => reg.keyNames.map((n) => PROVIDER_KEYS[n]).find(Boolean) || "";
+// Resolve a picked "<provider>:<model>" id to { provider, model }, or null when the prefix is not a
+// known provider that has a key — the caller then uses the default provider and the id unchanged.
+function resolvePickedProvider(reqModel) {
+  const s = String(reqModel || ""); const i = s.indexOf(":");
+  if (i <= 0) return null;
+  const reg = PROVIDERS[s.slice(0, i)];
+  if (!reg) return null;
+  const auth = providerAuth(reg);
+  if (!auth) return null;
+  return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {} }, model: s.slice(i + 1) };
+}
+const providerALS = new AsyncLocalStorage();
+const curProvider = () => providerALS.getStore() || DEFAULT_PROVIDER;
+
+// ---------- live model catalog for /v1/models ----------
+// The Code-tab dropdown is populated from GET /v1/models (gateway model discovery). Advertise the
+// models each ACTIVE key actually serves, prefixed with the provider id so a pick routes back through
+// resolvePickedProvider. Fetched live per provider (cached briefly), with the static PICKER_MODELS as
+// the fallback when every provider fetch fails. Neither Gemini nor Cohere expose tool-capability in
+// their catalog, so a coarse name filter drops the obviously non-chat modalities.
+const NON_CHAT_MODEL_RE = /(embed|embedding|tts|whisper|transcrib|rerank|moderation|guard|imagen|image-generation|veo|aqa|dialog|-vision-|nano-banana)/i;
+let _catalogCache = { at: 0, list: null };
+const CATALOG_TTL_MS = 60_000;
+async function fetchProviderCatalog(reg) {
+  const auth = providerAuth(reg);
+  if (!auth) return [];
+  try {
+    const r = await fetch(`${reg.baseURL}/models`, { headers: { Authorization: `Bearer ${auth}` }, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) { log(`  /v1/models: ${reg.id} catalog HTTP ${r.status}`); return []; }
+    const data = (await r.json())?.data || [];
+    return data
+      .map((m) => String(m.id || "").replace(/^models\//, ""))    // Gemini ids arrive as "models/gemini-…"
+      .filter((id) => id && !NON_CHAT_MODEL_RE.test(id))
+      .map((id) => ({ id: `${reg.id}:${id}`, name: `${reg.label}: ${id}` }));
+  } catch (e) { log(`  /v1/models: ${reg.id} catalog fetch failed (${e.message})`); return []; }
+}
+async function aggregateCatalog() {
+  if (_catalogCache.list && Date.now() - _catalogCache.at < CATALOG_TTL_MS) return _catalogCache.list;
+  const active = Object.values(PROVIDERS).filter((p) => providerAuth(p));
+  const lists = await Promise.all(active.map(fetchProviderCatalog));
+  const all = lists.flat();
+  const list = all.length ? all : PICKER_MODELS;   // fall back to the static list if all fetches failed
+  _catalogCache = { at: Date.now(), list };
+  return list;
+}
 // Budget used only when the client omits max_tokens. It deliberately does NOT read
 // FILE.maxTokens any more: ~/.dbeaver-ai-complete is a DBeaver config and carries
 // maxTokens=512, which is fine for a SQL assistant and far too small for an agent — a request
@@ -650,6 +710,10 @@ const extractPdf = makePdfExtractor({ log });
 // up there references `log` before its initialization (a TDZ crash when a tool group is disabled).
 if (DISABLED_TOOL_PREFIXES.length) log(`not forwarding tool group(s): ${DISABLED_TOOL_PREFIXES.join(", ")}`);
 log(`web search: ${WEB_SEARCH_ENABLED ? "ON" : "off"}${WEB_SEARCH_PROXY ? " via proxy " + WEB_SEARCH_PROXY : " (direct)"}`);
+{
+  const routable = Object.values(PROVIDERS).filter((p) => providerAuth(p)).map((p) => p.id);
+  log(`providers: default=${DEFAULT_PROVIDER.id}; routable=[${routable.join(", ") || "none"}] — a picked "<provider>:<model>" runs on that provider's key`);
+}
 
 // ---- connection pooling (the real cause of classifier timeouts) ----
 //
@@ -938,9 +1002,11 @@ async function summariseDropped(pieces) {
     "errors, counts, and conclusions reached. Omit boilerplate and repetition. Use terse " +
     "bullets. Do not invent anything not present below.\n\n" + parts.join("\n\n");
   try {
-    const r = await fetch(`${OPENAI_BASE}/responses`, {
+    // Compaction is a system operation on the DEFAULT provider (that is where COMPACT_MODEL lives),
+    // never the turn's picked provider — sending COMPACT_MODEL to a picked upstream would 404.
+    const r = await fetch(`${DEFAULT_PROVIDER.baseURL}/responses`, {
       method: "POST",
-      headers: upstreamHeaders(),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${DEFAULT_PROVIDER.auth}`, ...DEFAULT_PROVIDER.extraHeaders },
       body: JSON.stringify({
         model: COMPACT_MODEL, max_output_tokens: SUMMARY_MAX_TOKENS,
         input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
@@ -1483,10 +1549,10 @@ function pickModel(body, route = routeForRequest(body)) {
 //   "Function tools with reasoning_effort are not supported for gpt-5.6-sol in
 //    /v1/chat/completions"
 // and fails every tool-using turn outright.
-const apiForModel = (model) =>
-  (OPENAI_API === "responses" || OPENAI_API === "chat")
-    ? OPENAI_API
-    : (/codex/i.test(model) ? "responses" : "chat");
+const apiForModel = (model) => {
+  const api = curProvider().api;
+  return (api === "responses" || api === "chat") ? api : (/codex/i.test(model) ? "responses" : "chat");
+};
 
 // Token usage, mapped into the shape the Anthropic client expects. This is what drives the
 // "context left" indicator, and it was reporting nothing usable: on a STREAMED turn — which is
@@ -1676,7 +1742,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   if (out.stream) out.stream_options = { include_usage: true };
   // Same cache routing as the Responses path; both surfaces accept the field.
   const cacheKey = cacheKeyFor(body);
-  if (cacheKey && IS_OPENAI_ENDPOINT) out.prompt_cache_key = cacheKey;   // OpenAI-only field; Gemini 400s on it
+  if (cacheKey && curProvider().isOpenAI) out.prompt_cache_key = cacheKey;   // OpenAI-only field; Gemini 400s on it
   if (notesEmitted) log(`  ! ${notesEmitted} content part(s) could not be translated and were replaced ` +
     `with a labelled note rather than dropped`);
   return { payload: out, registry, imagesSent, filesSent, notesEmitted };
@@ -1708,7 +1774,7 @@ function toAnthropic(oai, reqModel, registry) {
 // ---------- OpenAI call with a max_tokens/param fallback ----------
 async function callOpenAI(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
-  const doFetch = (body) => f(`${OPENAI_BASE}/chat/completions`, {
+  const doFetch = (body) => f(`${curProvider().baseURL}/chat/completions`, {
     method: "POST",
     headers: upstreamHeaders(),
     body: JSON.stringify(stripUnsupported(body, "chat")),
@@ -1971,7 +2037,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   // Route this conversation to its own cache node rather than the bucket every session
   // shares by default. Stable for the session's life; see cacheKeyFor.
   const cacheKey = cacheKeyFor(body);
-  if (cacheKey && IS_OPENAI_ENDPOINT) out.prompt_cache_key = cacheKey;   // OpenAI-only field; Gemini 400s on it
+  if (cacheKey && curProvider().isOpenAI) out.prompt_cache_key = cacheKey;   // OpenAI-only field; Gemini 400s on it
   // Both fields are required for summaries to appear; effort alone or summary alone gives none.
   //
   // Never for a classifier call. Two independent reasons: its prompt asks for reasoning IN
@@ -2019,7 +2085,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
 async function callResponses(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   let accepted = payload;                        // updated by each fallback that gets used
-  const doFetch = (b) => { accepted = b; return f(`${OPENAI_BASE}/responses`, { method: "POST", headers: upstreamHeaders(), body: JSON.stringify(stripUnsupported(b)) }); };
+  const doFetch = (b) => { accepted = b; return f(`${curProvider().baseURL}/responses`, { method: "POST", headers: upstreamHeaders(), body: JSON.stringify(stripUnsupported(b)) }); };
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();
@@ -3028,10 +3094,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url === "/v1/models") {
-    log(`/v1/models discovery -> ${PICKER_MODELS.map((m) => m.id).join(", ")}`);
+    const models = await aggregateCatalog();
+    const byProvider = new Set(models.map((m) => m.id.split(":")[0]));
+    log(`/v1/models discovery -> ${models.length} models across ${byProvider.size} provider(s): ${[...byProvider].join(", ")}`);
     return sendJSON(res, 200, {
-      data: PICKER_MODELS.map((m) => ({ type: "model", id: m.id, display_name: m.name, created_at: "2025-01-01T00:00:00Z" })),
-      has_more: false, first_id: PICKER_MODELS[0]?.id ?? null, last_id: PICKER_MODELS[PICKER_MODELS.length - 1]?.id ?? null,
+      data: models.map((m) => ({ type: "model", id: m.id, display_name: m.name, created_at: "2025-01-01T00:00:00Z" })),
+      has_more: false, first_id: models[0]?.id ?? null, last_id: models[models.length - 1]?.id ?? null,
     });
   }
 
@@ -3058,8 +3126,15 @@ const server = http.createServer(async (req, res) => {
     const policy = policyFor(route);
     const family = route === ROUTE.PREFIX ? "prefix" : isSafety(route) ? "safety" : null;
     const isCls = isClassifier(route);
-    const model = pickModel(body, route);                // FROM THE ROUTE — never inherited
-    const useResp = apiForModel(model) === "responses";  // codex -> Responses, else Chat Completions
+    // Resolve the upstream provider: a picked "<provider>:<model>" id on a MAIN turn routes to that
+    // provider + its key; everything else (un-prefixed, classifier, compaction) uses the default. The
+    // provider is stashed in AsyncLocalStorage so the wire helpers below use it without extra params.
+    const picked = route === ROUTE.MAIN ? resolvePickedProvider(reqModel) : null;
+    const activeProvider = picked ? picked.provider : DEFAULT_PROVIDER;
+    providerALS.enterWith(activeProvider);
+    const model = picked ? picked.model : pickModel(body, route);   // FROM THE ROUTE — never inherited
+    const useResp = apiForModel(model) === "responses";  // the provider's surface (chat/responses)
+    if (picked) log(`  routed to provider ${activeProvider.id} (${activeProvider.baseURL})`);
     // Claude Code's WebSearch is Anthropic's server-side tool; the local model can't run it. When this
     // is that search sub-request, run the search here and inject the results, so it actually works.
     if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log, proxy: WEB_SEARCH_PROXY });
@@ -3224,7 +3299,7 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          compactResponsesInputSummarised, summariseDropped,
          compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
-         toResponses, toOpenAI, pickModel,
+         toResponses, toOpenAI, pickModel, resolvePickedProvider, DEFAULT_PROVIDER,
          taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
          newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
          rememberUnsupported, stripUnsupported, effortFor, lowerEffort,

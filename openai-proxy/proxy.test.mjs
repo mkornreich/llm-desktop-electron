@@ -17,7 +17,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
-        isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel,
+        isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel, resolvePickedProvider,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
@@ -371,6 +371,24 @@ test("auto-continue NEVER fires on a confirmation request for something destruct
 test("auto-continue leaves a genuine user-only decision alone", () => {
   assert.ok(!shouldAutoContinue("Which of these two designs do you prefer — the flat one or the nested one?"));
   assert.ok(!shouldAutoContinue("I could not find a Gerrit remote after checking git config, .gitreview and ~/.ssh/config."));
+});
+
+// ---------- multi-provider routing ----------
+
+test("resolvePickedProvider parses a <provider>:<model> id, or null for unprefixed/unknown", () => {
+  assert.equal(resolvePickedProvider("claude-opus-4-8"), null);   // no prefix -> default provider
+  assert.equal(resolvePickedProvider("gpt-4.1"), null);
+  assert.equal(resolvePickedProvider("bogusprovider:whatever"), null);   // unknown provider id
+  assert.equal(resolvePickedProvider(""), null);
+  assert.equal(resolvePickedProvider(null), null);
+  // Positive cases need the provider's key in .openai-key (gitignored) — assert only when present.
+  const c = resolvePickedProvider("cohere:vendor/model:tag");
+  if (c) {
+    assert.equal(c.provider.id, "cohere");
+    assert.equal(c.provider.baseURL, "https://api.cohere.ai/compatibility/v1");
+    assert.equal(c.model, "vendor/model:tag");   // split on the FIRST colon, so ids keep their own colons
+    assert.equal(c.provider.api, "chat");
+  }
 });
 
 // ---------- tool-argument pruning ----------
@@ -1674,14 +1692,16 @@ test("issue #14: the measured context limits are recorded next to the ladder", (
 // /codex/i.test(model). So every non-codex model was forced onto Chat Completions with its
 // 128-tool cap, against the 236 tools this app sends — 108 dropped, silently.
 
-test("OPENAI_API overrides the per-request surface choice", () => {
+test("the provider's configured surface overrides the per-request codex heuristic", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   const fn = src.slice(src.indexOf("const apiForModel"), src.indexOf("const apiForModel") + 400);
-  assert.match(fn, /OPENAI_API === "responses" \|\| OPENAI_API === "chat"/,
+  // apiForModel now reads the ACTIVE provider's surface (curProvider().api — which is OPENAI_API for
+  // the default provider) and only falls back to the /codex/ name heuristic when it isn't chat/responses.
+  assert.match(fn, /curProvider\(\)\.api/, "the active provider's surface is consulted");
+  assert.match(fn, /api === "responses" \|\| api === "chat"/,
     "the override must be consulted before the codex heuristic");
   assert.match(fn, /\/codex\/i\.test\(model\)/, "the heuristic remains the fallback");
-  // the ordering matters: an explicit override must win
-  assert.ok(fn.indexOf("OPENAI_API ===") < fn.indexOf("/codex/i.test(model)"),
+  assert.ok(fn.indexOf('api === "responses"') < fn.indexOf("/codex/i.test(model)"),
     "the override has to be checked first or it cannot override anything");
 });
 

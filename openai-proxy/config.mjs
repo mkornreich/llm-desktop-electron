@@ -251,6 +251,34 @@ export function servesOpenAiDefaults(url) {
   return /^https?:\/\/api\.openai\.com(:|\/|$)/i.test(url || "");
 }
 
+// ---------- provider registry ----------
+//
+// The OpenAI-compatible upstreams the proxy can target. Historically the proxy is single-provider
+// (one OPENAI_BASE_URL/OPENAI_API_KEY per process); this table is what lets it ALSO recognize other
+// providers — to resolve the default provider's key from a provider-named line in .openai-key, and
+// (in proxy.mjs) to aggregate each active key's models and route a picked model to its own upstream.
+//   keyNames: field names looked up in .openai-key, in order (a provider is "active" when one exists)
+//   match:    recognizes an OPENAI_BASE_URL as belonging to this provider
+export const PROVIDERS = {
+  openai:     { id: "openai",     label: "OpenAI",     baseURL: "https://api.openai.com/v1",                               api: "responses", keyNames: ["openaiApiKey", "apiKey"],                isOpenAI: true,  match: /^https?:\/\/api\.openai\.com\b/i },
+  gemini:     { id: "gemini",     label: "Gemini",     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", api: "chat",      keyNames: ["googleApiKey", "geminiApiKey", "apiKey"], isOpenAI: false, match: /generativelanguage\.googleapis\.com/i },
+  cohere:     { id: "cohere",     label: "Cohere",     baseURL: "https://api.cohere.ai/compatibility/v1",                  api: "chat",      keyNames: ["cohereApiKey", "apiKey"],                isOpenAI: false, match: /api\.cohere\.(ai|com)/i },
+  openrouter: { id: "openrouter", label: "OpenRouter", baseURL: "https://openrouter.ai/api/v1",                            api: "chat",      keyNames: ["openrouterApiKey", "apiKey"],            isOpenAI: false, match: /openrouter\.ai/i },
+};
+// The registry entry whose host matches this base URL, or null (loopback / unknown host).
+export function providerForBase(url) {
+  return Object.values(PROVIDERS).find((p) => p.match.test(String(url || ""))) || null;
+}
+// The keys present in .openai-key, as { <keyName>: value }. Every named key, verbatim (loadKV).
+export function providerKeys(keyfile) {
+  return keyfile ?? loadKV(KEY_FILE);
+}
+// Registry providers that have a usable key in .openai-key — the ones to advertise/route.
+export function activeProviders(keyfile) {
+  const K = providerKeys(keyfile);
+  return Object.values(PROVIDERS).filter((p) => p.keyNames.some((n) => K[n]));
+}
+
 // ---------- resolution ----------
 
 // Returns { values, sources } where sources[name] is
@@ -291,6 +319,17 @@ export function resolve({ env = process.env, project, home, keyfile } = {}) {
   // serving on 8123 when asked for something else is worse — that is how you end up with two
   // proxies and a launcher that trusts the wrong one.
   values.OPENAI_BASE_URL = values.OPENAI_BASE_URL.replace(/\/$/, "");
+
+  // The key file may hold provider-named keys (googleApiKey, cohereApiKey, …) rather than the generic
+  // `apiKey`. If OPENAI_API_KEY did not resolve above, fill it from the DEFAULT provider's keyName —
+  // the default provider is the registry entry whose host matches OPENAI_BASE_URL. Env/`apiKey` still
+  // win (they resolve in the loop above); this only covers the named-key case.
+  if (!values.OPENAI_API_KEY && !isLocalEndpoint(values.OPENAI_BASE_URL)) {
+    const dp = providerForBase(values.OPENAI_BASE_URL);
+    for (const kn of dp?.keyNames || []) {
+      if (K[kn]) { values.OPENAI_API_KEY = K[kn]; sources.OPENAI_API_KEY = "keyfile:" + kn; break; }
+    }
+  }
 
   // Derived, in dependency order.
   const [apiRaw, apiSrc] = pick(BY_NAME.get("OPENAI_API"));

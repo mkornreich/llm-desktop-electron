@@ -12,6 +12,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   SETTINGS, resolve, snapshot, configHash, keyFingerprint, codeVersion, validate, loadKV,
+  PROVIDERS, providerForBase, activeProviders,
 } from "./config.mjs";
 
 // Resolve against explicit sources so the developer's own dotfiles cannot change a result.
@@ -173,6 +174,33 @@ test("the real OpenAI API keeps the remote classifier/compact defaults", () => {
   assert.equal(v.OPENAI_CLASSIFIER_SAFETY_MODEL, "gpt-5.4-2026-03-05");
   assert.equal(v.OPENAI_COMPACT_MODEL, "gpt-4.1-mini");
   assert.notEqual(s.OPENAI_CLASSIFIER_MODEL, "non-openai upstream -> model in use");
+});
+
+test("providerForBase recognizes each provider's host", () => {
+  assert.equal(providerForBase("https://generativelanguage.googleapis.com/v1beta/openai")?.id, "gemini");
+  assert.equal(providerForBase("https://api.cohere.ai/compatibility/v1")?.id, "cohere");
+  assert.equal(providerForBase("https://api.cohere.com/compatibility/v1")?.id, "cohere");
+  assert.equal(providerForBase("https://openrouter.ai/api/v1")?.id, "openrouter");
+  assert.equal(providerForBase("https://api.openai.com/v1")?.id, "openai");
+  assert.equal(providerForBase("http://127.0.0.1:11435/v1"), null);   // loopback -> not in the registry
+});
+
+test("activeProviders returns the registry entries whose named key is present", () => {
+  assert.deepEqual(activeProviders({ googleApiKey: "a", cohereApiKey: "b" }).map((p) => p.id).sort(),
+    ["cohere", "gemini"]);
+  assert.deepEqual(activeProviders({ apiKey: "a" }).map((p) => p.id).sort(),
+    ["cohere", "gemini", "openai", "openrouter"]);   // generic apiKey satisfies every provider's fallback
+  assert.deepEqual(activeProviders({}).map((p) => p.id), []);
+});
+
+test("a named key resolves the default provider's OPENAI_API_KEY (googleApiKey for gemini)", () => {
+  // The keyfile holds googleApiKey/cohereApiKey, not the generic `apiKey`; the default provider is the
+  // one whose host matches OPENAI_BASE_URL, and its key comes from that provider's keyName.
+  const env = { OPENAI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai", OPENAI_MODEL: "gemini-3-flash-preview" };
+  const keyfile = { googleApiKey: "AIzaTESTKEY", cohereApiKey: "cohereTESTKEY" };
+  const { values: v, sources: s } = resolve({ env, project: {}, home: {}, keyfile });
+  assert.equal(v.OPENAI_API_KEY, "AIzaTESTKEY");
+  assert.equal(s.OPENAI_API_KEY, "keyfile:googleApiKey");
 });
 
 test("local mode does not warn about a blank safety model (main-model verdicts are the intent there)", () => {
