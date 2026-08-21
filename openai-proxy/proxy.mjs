@@ -2527,7 +2527,7 @@ function fromResponses(resp, reqModel, registry) {
 // makes (transport retry, truncation continuation, auto-continue, context recovery, empty retry)
 // must keep using the classifier's reserved connection pool, or a verdict can queue behind agent
 // traffic and miss the CLI's fail-closed 60s deadline.
-async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false, sessionId = null) {
+async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false, sessionId = null, fallover = []) {
   // Measured, not inferred. Pairing a request line with a completion line in this log is
   // unreliable because turns overlap — two earlier attempts to answer "how slow is a turn"
   // from the log produced confidently wrong medians (34s, then 483s) before that was noticed.
@@ -3021,6 +3021,32 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
                       reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
   }
 
+  // Composite MID-STREAM fallover: the chosen member started streaming but produced NO answer (e.g. it
+  // dropped with no terminal event after only reasoning, and the same-member empty-retry above also failed).
+  // Try the remaining SAME-SURFACE composite members in order, appending into this same open message, until
+  // one produces an answer. Gated on `fallover`, so it is inert for every non-composite turn. Skipped for a
+  // refusal (that IS the answer) and a truncation (the continue-on-truncation loop owns that).
+  while (fallover.length && !hasTool && textLen === 0 && !refusalText && !incomplete) {
+    const next = fallover.shift();
+    log(`  -> no answer streamed; composite falling over to ${next.provider.id}:${next.model}`);
+    noteCompositeModel(`${next.provider.id}:${next.model}`, Date.now(), log, "composite");
+    providerALS.enterWith(next.provider);
+    const retry = { ...payload, model: next.model };
+    let up;
+    try { up = await callResponses(retry, isClassifierPayload); } catch (e) { log(`  -> fallover fetch failed: ${e.message}`); continue; }
+    if (!up.ok) { log(`  -> fallover to ${next.provider.id}:${next.model} got ${up.status}`); continue; }
+    payload = up.effectivePayload || retry;
+    sawTerminal = null; streamError = null; incomplete = false; incompleteReason = null;
+    await consume(up);
+    totalOutTokens += usage?.output_tokens || 0;
+    recordAttempt({ turnId, sessionId: turnSessionId, kind: KIND.EMPTY_RETRY, route: turnRoute,
+                    surface: "responses", resolvedModel: payload?.model,
+                    status: "completed", usage: {
+                      grossInput: usage?.input_tokens ?? null, cached: usage?.input_tokens_details?.cached_tokens || 0,
+                      output: usage?.output_tokens ?? null,
+                      reasoning: usage?.output_tokens_details?.reasoning_tokens || 0 } });
+  }
+
   // Never hand back a blank turn (issue #1).
   if (!hasTool && textLen === 0) {
     // Report what the API actually said. `status` used to be inferred as
@@ -3209,10 +3235,20 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
   };
 
   // Pass 1: strict order, first `.ok` wins; a 429 is fast-failover.
-  for (const m of attempts) {
-    const r = await tryMember(m);
+  for (let i = 0; i < attempts.length; i++) {
+    const r = await tryMember(attempts[i]);
     if (r === null) return null;                         // terminal already written
-    if (r !== "skip") return r;                          // winner
+    if (r !== "skip") {
+      // The remaining SAME-SURFACE members become the winner's mid-stream fallover list: if it starts
+      // streaming but drops without producing an answer, the stream path tries these in turn. Only for a
+      // composite turn, and same-surface because the stream translator can't switch chat<->responses mid-
+      // message. Empty for every non-composite turn -> the stream path is unaffected.
+      r.fallover = composite
+        ? attempts.slice(i + 1).filter((x) => (x.provider.api === "responses") === r.useResp)
+                               .map((x) => ({ provider: x.provider, model: x.model }))
+        : [];
+      return r;                                          // winner
+    }
   }
   // Bounded wait: only reached when EVERY member failed and some were 429s. Each held member gets ONE
   // retry (no re-queue: allowRequeue is now false, so a fresh 429 here only updates bestErr), so this
@@ -3368,7 +3404,7 @@ const server = http.createServer(async (req, res) => {
         // actually fire (images stripped, effort lowered, context compacted), so a later transport
         // retry inside the stream must not resurrect the pre-fallback request.
         const accepted = upstream.effectivePayload || payload;
-        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool, sessionId); }
+        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool, sessionId, got.fallover || []); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }

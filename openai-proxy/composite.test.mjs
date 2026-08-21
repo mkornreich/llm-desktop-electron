@@ -126,3 +126,24 @@ test("a client-side COMPACTION turn routes through the compaction chain with fal
   assert.deepEqual(calls.slice(0, 2), ["m-a", "m-b"], "compaction tried the chain in order, falling over m-a -> m-b");
   assert.match(body, /compacted by m-b/);
 });
+
+test("a composite member that streams NO answer falls over mid-stream to the next same-surface member", async () => {
+  // m-a streams reasoning then drops with no terminal event (no response.completed) — the exact failure the
+  // user hit on ollama:gpt-oss:120b. With no tools the empty-retry is skipped, so it goes straight to the
+  // mid-stream fallover, which switches to m-b (same responses surface) and appends its answer.
+  calls.length = 0;
+  handler = (m, req, res) => {
+    if (m === "m-a") {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "r" } })}\n\n`);
+      res.write(`event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: "thinking hard…" })}\n\n`);
+      res.end();   // dropped: NO response.completed terminal event
+      return;
+    }
+    return sseOk(res, "answered by m-b after fallover");
+  };
+  const { status, body } = await askComposite("composite");   // stream:true, no tools -> straight to fallover
+  assert.equal(status, 200);
+  assert.deepEqual(calls.slice(0, 2), ["m-a", "m-b"], "m-a streamed no answer -> fell over to m-b");
+  assert.match(body, /answered by m-b after fallover/, "the fallover member's answer reaches the client");
+});
