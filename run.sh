@@ -178,6 +178,13 @@ DESKTOP_LOG_LEVEL_VAL=$(sed -n 's/^DESKTOP_LOG_LEVEL=//p' .diagnostics 2>/dev/nu
 PROXY_DUMP_TOOLS_VAL=$(sed -n 's/^PROXY_DUMP_TOOLS=//p' .diagnostics 2>/dev/null | head -1)
 [ "${PROXY_DUMP_TOOLS_VAL}" = "1" ] && export PROXY_DUMP_TOOLS=1
 [ -n "${DESKTOP_LOG_LEVEL_VAL}" ] && echo "[run] DESKTOP_LOG_LEVEL=${DESKTOP_LOG_LEVEL_VAL}${PROXY_DUMP_TOOLS:+, PROXY_DUMP_TOOLS=1}"
+# Ultracode default: force every Code-tab session into ultracode (xhigh effort + standing dynamic-
+# workflow orchestration). There is no CLAUDE_CODE_* env hook for it, so the patched session-start
+# settings-spread (app/.vite/build/index.chunk-DT0P6tKR.js) injects ultracode:true into the SDK query
+# settings when LLMD_ULTRACODE=1 is in the app's environment. Toggled from the settings window.
+ULTRACODE_DEFAULT_VAL=$(sed -n 's/^ULTRACODE_DEFAULT=//p' .diagnostics 2>/dev/null | head -1)
+[ "${ULTRACODE_DEFAULT_VAL}" = "1" ] && export LLMD_ULTRACODE=1
+[ -n "${LLMD_ULTRACODE:-}" ] && echo "[run] ULTRACODE default: ON — every Code-tab session runs in ultracode"
 
 # Bring up a run.sh-managed Ollama on a side port with a big context and GPU tuning, sharing the
 # system Ollama's models. Non-destructive by design: a system Ollama is usually pinned to a small

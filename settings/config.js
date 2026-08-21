@@ -225,6 +225,14 @@ const SCHEMA = [
     default: "0",
     label: "Dump the tool list of each request",
     help: "When on, the proxy writes the exact tool list of every request to openai-proxy/tools-dump.txt (overwritten each request) — useful for seeing which tools, and how many, reach the local model. Only the proxy (openai/local mode) reads it. Changing it restarts the proxy." },
+
+  // Code-mode behaviour. Also persisted in .diagnostics (run.sh reads it and exports into the app's
+  // launch env). There is no CLAUDE_CODE_* env hook for ultracode, so run.sh maps this to LLMD_ULTRACODE
+  // and a patch to the app's session-start (index.chunk-DT0P6tKR.js) injects ultracode:true from it.
+  { group: "Code mode", file: ".diagnostics", key: "ULTRACODE_DEFAULT", type: "bool",
+    default: "0",
+    label: "Ultracode by default",
+    help: "When on, EVERY Code-tab session starts in ultracode — xhigh effort plus standing dynamic-workflow orchestration on every turn, without typing the 'ultracode' keyword. (The composer has no ultracode toggle — that UI is served remotely by claude.ai — so this Settings switch is how you turn it on.) Requires an xhigh-capable model and workflows enabled; restart the app to apply." },
 ];
 
 // Parse `KEY=value` lines, ignoring comments and blanks.
