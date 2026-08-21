@@ -177,3 +177,9 @@ OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]
 # Proxy overflow compaction remains an independent fallback after an upstream context error; it
 # is not the client-generated summary flow controlled by this setting.
 CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000
+
+# Added by the settings window.
+PROXY_SEND_CHROME_TOOLS=0
+
+# Added by the settings window.
+PROXY_SEND_IOS_TOOLS=0
