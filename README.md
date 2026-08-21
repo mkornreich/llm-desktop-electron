@@ -292,7 +292,7 @@ app.
 Two modes: **`anthropic`** (Claude, direct) or **`proxy`** (via the local translation proxy). In
 proxy mode a single **`DEFAULT_PROVIDER`** (in [`.provider`](.provider)) picks the upstream that
 backs the default turns, the background classifier and compaction — one of `openai`, `local`
-(on-device Ollama), `openrouter`, `cohere`, `gemini` — and any *individual* turn can run on a
+(on-device Ollama), `openrouter`, `cohere`, `gemini`, `mistral` — and any *individual* turn can run on a
 different provider by picking a `<provider>:<model>` from the Code-tab model dropdown (the proxy
 routes that turn to the named provider's key in `.openai-key`).
 
@@ -302,14 +302,14 @@ routes that turn to the named provider's key in `.openai-key`).
 ./run.sh              # whichever .provider says (default: proxy, upstream openai)
 ```
 
-An old `PROVIDER=openai|local|openrouter|cohere|gemini` (in `.provider` or on the command line)
+An old `PROVIDER=openai|local|openrouter|cohere|gemini|mistral` (in `.provider` or on the command line)
 still works — it selects proxy mode with that provider as the default upstream.
 
 | | `anthropic` | `proxy` |
 |---|---|---|
 | agent's `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `http://127.0.0.1:8123` |
 | translation proxy | not started | started, health-checked |
-| backend the proxy calls | — | the `DEFAULT_PROVIDER` upstream (OpenAI / on-device Ollama / OpenRouter / Cohere / Gemini), plus any provider picked per-turn |
+| backend the proxy calls | — | the `DEFAULT_PROVIDER` upstream (OpenAI / on-device Ollama / OpenRouter / Cohere / Gemini / Mistral), plus any provider picked per-turn |
 | API key | your Anthropic login | per upstream — `.openai-key` (remote) or none (loopback Ollama) |
 | model | Claude, as shipped | the upstream's model, or a `<provider>:<model>` chosen in the dropdown |
 

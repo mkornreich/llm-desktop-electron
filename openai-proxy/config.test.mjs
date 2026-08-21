@@ -181,6 +181,7 @@ test("providerForBase recognizes each provider's host", () => {
   assert.equal(providerForBase("https://api.cohere.ai/compatibility/v1")?.id, "cohere");
   assert.equal(providerForBase("https://api.cohere.com/compatibility/v1")?.id, "cohere");
   assert.equal(providerForBase("https://openrouter.ai/api/v1")?.id, "openrouter");
+  assert.equal(providerForBase("https://api.mistral.ai/v1")?.id, "mistral");
   assert.equal(providerForBase("https://api.openai.com/v1")?.id, "openai");
   assert.equal(providerForBase("http://127.0.0.1:11435/v1")?.id, "local");   // loopback -> the keyless local provider
   assert.equal(providerForBase("http://localhost:11434/v1")?.id, "local");
@@ -190,7 +191,7 @@ test("activeProviders returns the registry entries whose named key is present", 
   assert.deepEqual(activeProviders({ googleApiKey: "a", cohereApiKey: "b" }).map((p) => p.id).sort(),
     ["cohere", "gemini"]);
   assert.deepEqual(activeProviders({ apiKey: "a" }).map((p) => p.id).sort(),
-    ["cohere", "gemini", "openai", "openrouter"]);   // generic apiKey satisfies every provider's fallback
+    ["cohere", "gemini", "mistral", "openai", "openrouter"]);   // generic apiKey satisfies every provider's fallback
   assert.deepEqual(activeProviders({}).map((p) => p.id), []);
 });
 

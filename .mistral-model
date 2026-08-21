@@ -1,0 +1,38 @@
+# Mistral model config for `mistral` provider mode.
+# Used by run.sh when DEFAULT_PROVIDER=mistral (proxy mode: ./run-proxy.sh, or `PROVIDER=mistral ./run.sh`).
+#
+# `mistral` routes the agent's Claude Code sub-layer through the openai-proxy pointed at Mistral's
+# OpenAI-compatible endpoint (https://api.mistral.ai/v1). The chat window is still remote claude.ai.
+# KEY=VALUE format (same parser as .gemini-model / .provider).
+#
+# API KEY: this file does NOT hold the key. Put your Mistral key in .openai-key:
+#     cp .openai-key.example .openai-key   # then set:  mistralApiKey=<your-mistral-key>
+# .openai-key is gitignored; the proxy reads it as the keyfile source. A key is REQUIRED (a remote
+# endpoint is never keyless, unlike local mode). Get one at https://console.mistral.ai/api-keys
+
+# ---- model ----
+# Any Mistral model id that supports TOOL CALLING (the agent is tool calls end to end). Recommended:
+#   mistral-large-latest      flagship, confirmed tool use (the default)
+#   mistral-medium-latest     smaller/faster, tool-capable
+#   devstral-medium-latest    Mistral's AGENTIC coding model — suits the Code tab's tool-heavy loop
+#   codestral-latest          coding-focused
+#   magistral-medium-latest   reasoning model
+# Full list: GET https://api.mistral.ai/v1/models with your key.
+OPENAI_MODEL=mistral-large-latest
+
+# OpenAI surface. Mistral's compatibility endpoint is Chat Completions only (/responses 404s), so keep
+# this as chat. chat caps tools at 128 — the app sends ~93, so it fits.
+OPENAI_API=chat
+
+# ---- endpoint (optional) ----
+# Defaults to https://api.mistral.ai/v1. Uncomment to override:
+# OPENAI_BASE_URL=https://api.mistral.ai/v1
+
+# ---- rate-limit notes ----
+# Mistral keys are rate-limited (requests/min and a monthly token cap on the free tier); an agentic
+# coding loop makes many requests, so expect throttling on a free key. A paid plan raises the limits.
+
+# ---- Claude Code identity (required; do not remove) ----
+# run.sh exports this so bundled Claude Code resolves a supported context window; it still sends
+# claude-opus-4-8 on the wire, which the proxy maps to OPENAI_MODEL above.
+OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]

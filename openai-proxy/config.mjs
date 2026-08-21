@@ -279,6 +279,7 @@ export const PROVIDERS = {
   gemini:     { id: "gemini",     label: "Gemini",     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", api: "chat",      keyNames: ["googleApiKey", "geminiApiKey", "apiKey"], isOpenAI: false, match: /generativelanguage\.googleapis\.com/i },
   cohere:     { id: "cohere",     label: "Cohere",     baseURL: "https://api.cohere.ai/compatibility/v1",                  api: "chat",      keyNames: ["cohereApiKey", "apiKey"],                isOpenAI: false, match: /api\.cohere\.(ai|com)/i },
   openrouter: { id: "openrouter", label: "OpenRouter", baseURL: "https://openrouter.ai/api/v1",                            api: "chat",      keyNames: ["openrouterApiKey", "apiKey"],            isOpenAI: false, match: /openrouter\.ai/i },
+  mistral:    { id: "mistral",    label: "Mistral",    baseURL: "https://api.mistral.ai/v1",                                api: "chat",      keyNames: ["mistralApiKey", "apiKey"],               isOpenAI: false, match: /api\.mistral\.ai/i },
   // On-device Ollama (or any loopback OpenAI-compatible server). KEYLESS — its keyNames are empty,
   // so it never appears in activeProviders and is never advertised by /v1/models; a `local:<model>`
   // pick is special-cased in proxy.mjs (resolvePickedProvider) to route here with no key. baseURL is

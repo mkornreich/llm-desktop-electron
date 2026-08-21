@@ -112,7 +112,7 @@ test("the schema covers every parameter the proxy and launcher read", () => {
   // out of a dot file slipped past it — which is how CLAUDE_CODE_AUTO_COMPACT_WINDOW, the knob
   // that decides the context window the app displays, stayed invisible in the GUI. So assert
   // against the dot files themselves: if a setting is persisted, it is exposed.
-  for (const f of [".provider", ".privacy", ".sync", ".openai-model", ".diagnostics", ".openrouter-model", ".cohere-model", ".gemini-model"]) {
+  for (const f of [".provider", ".privacy", ".sync", ".openai-model", ".diagnostics", ".openrouter-model", ".cohere-model", ".gemini-model", ".mistral-model"]) {
     const txt = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
     const persisted = [...txt.matchAll(/^([A-Z][A-Z0-9_]+)=/gm)].map((m) => m[1]);
     assert.ok(persisted.length, `${f} should define at least one setting`);
@@ -127,7 +127,7 @@ test("the provider enum is proxy|anthropic with a default-upstream selector", ()
   const dp = SCHEMA.find((s) => s.key === "DEFAULT_PROVIDER");
   assert.ok(dp, "DEFAULT_PROVIDER must be exposed");
   assert.equal(dp.file, ".provider");
-  assert.deepEqual(dp.options, ["openai", "local", "openrouter", "cohere", "gemini"]);
+  assert.deepEqual(dp.options, ["openai", "local", "openrouter", "cohere", "gemini", "mistral"]);
 });
 
 test("every schema entry is well formed", () => {

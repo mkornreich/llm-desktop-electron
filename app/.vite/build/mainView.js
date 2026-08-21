@@ -214,7 +214,11 @@ try {
                   { id: "cohere:command-r-plus-08-2024", name: "Cohere: Command R+",     short: "Command R+" },
                   { id: "gemini:gemini-3-flash-preview", name: "Gemini: 3 Flash",        short: "3 Flash" },
                   { id: "gemini:gemini-flash-latest",    name: "Gemini: Flash (latest)", short: "Flash" },
-                  { id: "gemini:gemini-3.1-pro-preview", name: "Gemini: 3.1 Pro",        short: "3.1 Pro" }
+                  { id: "gemini:gemini-3.1-pro-preview", name: "Gemini: 3.1 Pro",        short: "3.1 Pro" },
+                  { id: "mistral:mistral-large-latest",  name: "Mistral: Large",         short: "Large" },
+                  { id: "mistral:mistral-medium-latest", name: "Mistral: Medium",        short: "Medium" },
+                  { id: "mistral:devstral-medium-latest",name: "Mistral: Devstral",      short: "Devstral" },
+                  { id: "mistral:codestral-latest",      name: "Mistral: Codestral",     short: "Codestral" }
                 ];
                 // On-device Ollama thinking models, discovered at launch by run.sh and handed over via
                 // the preload bridge (the page can't read env or reach localhost). Routed as local:<model>.
