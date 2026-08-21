@@ -192,6 +192,45 @@ try {
               }
               if (data.growthbook) dumpGrowthbook(data.growthbook);
               if (data.account || data.current_user_access) log("bootstrap top-level keys: " + Object.keys(data).join(","));
+              try {
+                // Inject the local proxy's provider models into the model picker. Their id is
+                // "<provider>:<model>", which the app sends as the request model and the proxy routes
+                // to that provider's key (resolvePickedProvider). minimum_tier:free + no disabled_reason
+                // keeps them selectable; the shape mirrors a real model_selector_config entry.
+                var MY = [
+                  { id: "cohere:command-a-03-2025",      name: "Cohere: Command A",      short: "Command A" },
+                  { id: "cohere:command-a-plus-05-2026", name: "Cohere: Command A+",     short: "Command A+" },
+                  { id: "cohere:command-r-plus-08-2024", name: "Cohere: Command R+",     short: "Command R+" },
+                  { id: "gemini:gemini-3-flash-preview", name: "Gemini: 3 Flash",        short: "3 Flash" },
+                  { id: "gemini:gemini-flash-latest",    name: "Gemini: Flash (latest)", short: "Flash" },
+                  { id: "gemini:gemini-3.1-pro-preview", name: "Gemini: 3.1 Pro",        short: "3.1 Pro" }
+                ];
+                var am = data.claude_ai_available_models;
+                if (am && Array.isArray(am.models)) {
+                  MY.forEach(function (m) {
+                    if (!am.models.some(function (x) { return x && x.model_id === m.id; }))
+                      am.models.push({ model_id: m.id, minimum_tier: "free" });
+                  });
+                }
+                if (Array.isArray(data.model_selector_config)) {
+                  data.model_selector_config.forEach(function (surf) {
+                    if (!surf || !Array.isArray(surf.models)) return;
+                    MY.forEach(function (m) {
+                      if (surf.models.some(function (x) { return x && x.id === m.id; })) return;
+                      surf.models.push({
+                        id: m.id, name: m.name, short_name: m.short,
+                        description: "Runs on " + m.id.split(":")[0] + " via the local proxy",
+                        section: "main",
+                        capabilities: { compass: false, gsuite_tools: false, mm_images: false, mm_pdf: false, web_search: false },
+                        thinking: { type: "effort_and_mode",
+                          effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High", recommended: true }],
+                          mode_options: [{ id: "auto", name: "Thinking" }, { id: "off", name: "Off" }] }
+                      });
+                    });
+                  });
+                  log("injected " + MY.length + " provider models into the picker");
+                }
+              } catch (e) { log("inject error " + e); }
               log("patched response " + url);
             } catch (e) { log("patch error " + e); }
             return data;

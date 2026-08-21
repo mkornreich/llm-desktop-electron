@@ -1866,7 +1866,7 @@ function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.string
 // `model` is the OpenAI model that actually answered, which is what the usage ledger must be
 // keyed on. They differ on every request (claude-opus-4-8 vs gpt-5.6-sol), and this path used
 // to file its usage under the client's name — the only one of the four that did.
-async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel) {
+async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel, route = ROUTE.MAIN) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -3261,7 +3261,7 @@ const server = http.createServer(async (req, res) => {
       log(`OpenAI ${upstream.status}: ${errTxt.slice(0, 300)}`);
       return anthropicError(res, upstream.status, "api_error", `OpenAI ${upstream.status}: ${errTxt.slice(0, 500)}`);
     }
-    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model, route); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
                 oai?.usage?.completion_tokens_details?.reasoning_tokens,
