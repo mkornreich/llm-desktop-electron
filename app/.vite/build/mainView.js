@@ -105,6 +105,11 @@ try {
       __llmdEl.contextBridge.exposeInMainWorld("__llmdComposite", function () {
         try { return JSON.parse(process.env.LLMD_COMPOSITE || "null"); } catch (e) { return null; }
       });
+      // The configured Code-tab model list (run.sh -> LLMD_DROPDOWN_MODELS, a JSON array of "<provider>:<model>"
+      // ids in order). Empty/unset -> the page uses its short built-in default list.
+      __llmdEl.contextBridge.exposeInMainWorld("__llmdDropdownModels", function () {
+        try { return JSON.parse(process.env.LLMD_DROPDOWN_MODELS || "[]"); } catch (e) { return []; }
+      });
       __llmdWrite("bridge exposed");
     } catch (e) { __llmdWrite("bridge expose FAILED: " + e); }
     try {
@@ -204,30 +209,27 @@ try {
               if (data.growthbook) dumpGrowthbook(data.growthbook);
               if (data.account || data.current_user_access) log("bootstrap top-level keys: " + Object.keys(data).join(","));
               try {
-                // Inject the local proxy's provider models into the model picker. Their id is
-                // "<provider>:<model>", which the app sends as the request model and the proxy routes
-                // to that provider's key (resolvePickedProvider). minimum_tier:free + no disabled_reason
-                // keeps them selectable; the shape mirrors a real model_selector_config entry.
-                var MY = [
-                  { id: "cohere:command-a-03-2025",      name: "Cohere: Command A",      short: "Command A" },
-                  { id: "cohere:command-a-plus-05-2026", name: "Cohere: Command A+",     short: "Command A+" },
-                  { id: "cohere:command-r-plus-08-2024", name: "Cohere: Command R+",     short: "Command R+" },
-                  { id: "gemini:gemini-3-flash-preview", name: "Gemini: 3 Flash",        short: "3 Flash" },
-                  { id: "gemini:gemini-flash-latest",    name: "Gemini: Flash (latest)", short: "Flash" },
-                  { id: "gemini:gemini-3.1-pro-preview", name: "Gemini: 3.1 Pro",        short: "3.1 Pro" },
-                  { id: "mistral:mistral-large-latest",  name: "Mistral: Large",         short: "Large" },
-                  { id: "mistral:mistral-medium-latest", name: "Mistral: Medium",        short: "Medium" },
-                  { id: "mistral:devstral-medium-latest",name: "Mistral: Devstral",      short: "Devstral" },
-                  { id: "mistral:codestral-latest",      name: "Mistral: Codestral",     short: "Codestral" },
-                  { id: "groq:openai/gpt-oss-120b",      name: "Groq: GPT-OSS 120B",     short: "GPT-OSS 120B" },
-                  { id: "groq:openai/gpt-oss-20b",       name: "Groq: GPT-OSS 20B",      short: "GPT-OSS 20B" },
-                  { id: "groq:qwen/qwen3.6-27b",         name: "Groq: Qwen3.6 27B",      short: "Qwen3.6 27B" },
-                  { id: "groq:groq/compound",            name: "Groq: Compound",         short: "Compound" },
-                  { id: "ollama:gpt-oss:120b",             name: "Ollama Cloud: GPT-OSS 120B", short: "OC GPT-OSS 120B" },
-                  { id: "ollama:qwen3.5:397b",             name: "Ollama Cloud: Qwen3.5 397B", short: "OC Qwen3.5" },
-                  { id: "ollama:deepseek-v4-pro:preview",  name: "Ollama Cloud: DeepSeek V4",  short: "OC DeepSeek V4" },
-                  { id: "ollama:kimi-k3",                  name: "Ollama Cloud: Kimi K3",   short: "OC Kimi K3" }
-                ];
+                // The Code-tab model list. LLMD_DROPDOWN_MODELS (run.sh, from the "Code-tab models" setting)
+                // is an ORDERED list of "<provider>:<model>" ids; when set it REPLACES the built-in default
+                // below, so you curate exactly which models appear and in what order — the app numbers the
+                // first ~9 selectable as keys 1-9. Empty -> the short default. On-device local thinking
+                // models auto-append after it. Each id routes via resolvePickedProvider; minimum_tier:free +
+                // no disabled_reason keeps them selectable; the shape mirrors a real entry.
+                var PROV_LABEL = { cohere: "Cohere", gemini: "Gemini", mistral: "Mistral", groq: "Groq", ollama: "Ollama Cloud", local: "Local", openrouter: "OpenRouter", openai: "OpenAI" };
+                function nameFor(id) { var i = String(id).indexOf(":"); if (i <= 0) return id; return (PROV_LABEL[id.slice(0, i)] || id.slice(0, i)) + ": " + id.slice(i + 1); }
+                function shortFor(id) { var i = String(id).indexOf(":"); return i <= 0 ? id : id.slice(i + 1); }
+                var CFGD = [];
+                try { CFGD = (window.__llmdDropdownModels && window.__llmdDropdownModels()) || []; } catch (e) {}
+                var MY = CFGD.length
+                  ? CFGD.map(function (id) { return { id: id, name: nameFor(id), short: shortFor(id) }; })
+                  : [
+                      { id: "cohere:command-a-03-2025",      name: "Cohere: Command A",          short: "Command A" },
+                      { id: "gemini:gemini-3-flash-preview", name: "Gemini: 3 Flash",            short: "3 Flash" },
+                      { id: "mistral:mistral-large-latest",  name: "Mistral: Large",             short: "Large" },
+                      { id: "groq:openai/gpt-oss-120b",      name: "Groq: GPT-OSS 120B",         short: "GPT-OSS 120B" },
+                      { id: "ollama:gpt-oss:120b",           name: "Ollama Cloud: GPT-OSS 120B", short: "OC GPT-OSS 120B" }
+                    ];
+                if (CFGD.length) log("using configured Code-tab model list (" + CFGD.length + " entries)");
                 // On-device Ollama thinking models, discovered at launch by run.sh and handed over via
                 // the preload bridge (the page can't read env or reach localhost). Routed as local:<model>.
                 try {
@@ -242,11 +244,6 @@ try {
                       am.models.push({ model_id: m.id, minimum_tier: "free" });
                   });
                 }
-                // Experiment: tag each injected model with a per-provider `section`, to see whether the
-                // remote model picker groups them under headers / a submenu (vs one flat list). The
-                // composite entry above deliberately has NO section so it stays first.
-                var PROV_LABEL = { cohere: "Cohere", gemini: "Gemini", mistral: "Mistral", groq: "Groq", ollama: "Ollama Cloud", local: "Local (on-device)" };
-                function sectionFor(id) { var p = String(id).split(":")[0]; return PROV_LABEL[p] || p; }
                 if (Array.isArray(data.model_selector_config)) {
                   data.model_selector_config.forEach(function (surf) {
                     if (!surf || !Array.isArray(surf.models)) return;
@@ -255,7 +252,7 @@ try {
                       surf.models.push({
                         id: m.id, name: m.name, short_name: m.short,
                         description: "Runs on " + m.id.split(":")[0] + " via the local proxy",
-                        section: sectionFor(m.id),
+                        section: "main",
                         capabilities: { compass: false, gsuite_tools: false, mm_images: false, mm_pdf: false, web_search: false },
                         thinking: { type: "effort_and_mode",
                           effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High" }, { id: "xhigh", name: "Extra" }, { id: "max", name: "Max", recommended: true }],

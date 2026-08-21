@@ -210,6 +210,18 @@ PROXY_DUMP_TOOLS_VAL=$(sed -n 's/^PROXY_DUMP_TOOLS=//p' .diagnostics 2>/dev/null
 ULTRACODE_DEFAULT_VAL=$(sed -n 's/^ULTRACODE_DEFAULT=//p' .diagnostics 2>/dev/null | head -1)
 [ "${ULTRACODE_DEFAULT_VAL}" = "1" ] && export LLMD_ULTRACODE=1
 [ -n "${LLMD_ULTRACODE:-}" ] && echo "[run] ULTRACODE default: ON — every Code-tab session runs in ultracode"
+# Code-tab dropdown model list (.diagnostics DROPDOWN_MODELS, edited by the settings picker). An ordered
+# comma-separated list of <provider>:<model> ids; hand it to the renderer-unlock preload as a JSON array
+# (LLMD_DROPDOWN_MODELS) so it injects exactly these into the Code-tab dropdown, in order (the app numbers
+# the first ~9 selectable as keys 1-9). Empty -> the preload's short built-in default list.
+DROPDOWN_MODELS_VAL=$(sed -n 's/^DROPDOWN_MODELS=//p' .diagnostics 2>/dev/null | head -1)
+if [ -n "$DROPDOWN_MODELS_VAL" ] && command -v node >/dev/null 2>&1; then
+  LLMD_DROPDOWN_MODELS_VAL="$(DROPDOWN_MODELS="$DROPDOWN_MODELS_VAL" node -e 'const m=(process.env.DROPDOWN_MODELS||"").split(",").map(s=>s.trim()).filter(Boolean); if(m.length) process.stdout.write(JSON.stringify(m))' 2>/dev/null || true)"
+  if [ -n "$LLMD_DROPDOWN_MODELS_VAL" ]; then
+    export LLMD_DROPDOWN_MODELS="$LLMD_DROPDOWN_MODELS_VAL"
+    echo "[run] Code-tab dropdown models: ${DROPDOWN_MODELS_VAL}"
+  fi
+fi
 
 # Bring up a run.sh-managed Ollama on a side port with a big context and GPU tuning, sharing the
 # system Ollama's models. Non-destructive by design: a system Ollama is usually pinned to a small

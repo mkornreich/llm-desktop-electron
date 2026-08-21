@@ -288,6 +288,14 @@ const SCHEMA = [
     default: "0",
     label: "Ultracode by default",
     help: "When on, EVERY Code-tab session starts in ultracode — xhigh effort plus standing dynamic-workflow orchestration on every turn, without typing the 'ultracode' keyword. (The composer has no ultracode toggle — that UI is served remotely by claude.ai — so this Settings switch is how you turn it on.) Requires an xhigh-capable model and workflows enabled; restart the app to apply." },
+
+  // The Code-tab model dropdown list. An ordered reorderable list of <provider>:<model> ids injected into
+  // the picker (run.sh -> LLMD_DROPDOWN_MODELS -> the renderer-unlock preload). Empty = a short built-in
+  // default. Reuses the reorderable "composite" widget + /api/composite-choices.
+  { group: "Code mode", file: ".diagnostics", key: "DROPDOWN_MODELS", type: "composite",
+    default: "",
+    label: "Code-tab dropdown models (ordered)",
+    help: "Which provider models appear in the Code-tab model dropdown, and in what order — the app assigns keys 1-9 to the first selectable entries (after Composite and Claude's own models). Add / remove / reorder with the picker (OpenAI / Gemini / Cohere / OpenRouter / Mistral / Groq / Ollama Cloud, plus live on-device Ollama). Empty = a short built-in default (one flagship per keyed provider). Your on-device local thinking models are always appended after this list. Restart the app to apply." },
 ];
 
 // Parse `KEY=value` lines, ignoring comments and blanks.
