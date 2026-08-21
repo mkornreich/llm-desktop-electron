@@ -3097,6 +3097,19 @@ function recordProvenance(req, body, { route, model, surface }) {
 // because a streaming turn's handler resolves long before the stream ends.
 let inflight = 0;
 
+// Throttled visibility into which member the composite is actually answering with: log the model when it
+// CHANGES from the last one, otherwise at most once per second. So a stable composite doesn't spam the log,
+// but a fall-over to a different member is announced immediately.
+let _compositeModelLast = null, _compositeModelAt = 0;
+export function noteCompositeModel(label, now = Date.now(), emit = log) {
+  if (label !== _compositeModelLast || now - _compositeModelAt >= 1000) {
+    emit(`  composite → answering with ${label}`);
+    _compositeModelLast = label; _compositeModelAt = now;
+    return true;
+  }
+  return false;
+}
+
 // Obtain a working upstream Response for one turn, trying members in order: a single member for every
 // non-composite turn (byte-for-byte today's behaviour), or the ordered composite chain, falling through
 // on any transport/HTTP error until one member answers. Returns the winner
@@ -3306,6 +3319,8 @@ const server = http.createServer(async (req, res) => {
     // member). enterWith, NOT run: the streaming below runs in THIS handler after the helper resolved.
     providerALS.enterWith(got.provider);
     const { upstream, useResp, payload, registry, model, startedAt } = got;
+    // Composite only: announce which member actually answered (throttled — on change, else <=1/s).
+    if (members) noteCompositeModel(`${got.provider.id}:${got.model}`);
 
     if (useResp) {
       if (payload.stream) {

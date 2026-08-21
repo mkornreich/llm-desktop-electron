@@ -18,7 +18,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel, resolvePickedProvider,
-        parseCompositeMembers, resolveComposite, parseRetryAfter, classifyUpstream,
+        parseCompositeMembers, resolveComposite, parseRetryAfter, classifyUpstream, noteCompositeModel,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
@@ -447,6 +447,22 @@ test("parseRetryAfter handles delta-seconds and HTTP-date, else null", () => {
   const now = Date.UTC(2026, 0, 1, 0, 0, 0);
   assert.equal(parseRetryAfter(h("Thu, 01 Jan 2026 00:00:30 GMT"), now), 30000);   // 30s in the future
   assert.equal(parseRetryAfter(h("Thu, 01 Jan 2026 00:00:00 GMT"), now + 5000), 0); // past -> clamped to 0
+});
+
+test("noteCompositeModel logs on change, else at most once per second", () => {
+  const seen = [];
+  const emit = (m) => seen.push(m);
+  const t = 5_000_000;   // far from any real Date.now() so prior module state can't collide
+  assert.equal(noteCompositeModel("groq:a", t, emit), true, "first is always emitted");
+  assert.equal(noteCompositeModel("groq:a", t + 200, emit), false, "same model within 1s is throttled");
+  assert.equal(noteCompositeModel("groq:a", t + 1200, emit), true, "same model after >=1s is emitted");
+  assert.equal(noteCompositeModel("mistral:b", t + 1250, emit), true, "a changed model is emitted immediately, even within 1s");
+  assert.equal(noteCompositeModel("mistral:b", t + 1300, emit), false, "then throttled again");
+  assert.deepEqual(seen, [
+    "  composite → answering with groq:a",
+    "  composite → answering with groq:a",
+    "  composite → answering with mistral:b",
+  ]);
 });
 
 test("classifyUpstream flags 429 with its Retry-After and never consumes the body", () => {
