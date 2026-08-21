@@ -475,6 +475,10 @@ test("noteCompositeModel logs on change, else at most once per second", () => {
     "  composite → answering with groq:a",
     "  composite → answering with mistral:b",
   ]);
+  // The compaction kind has its own independent throttle + label.
+  const seenC = [];
+  assert.equal(noteCompositeModel("ollama:x", t + 1300, (m) => seenC.push(m), "compaction"), true);
+  assert.deepEqual(seenC, ["  compaction → answering with ollama:x"]);
 });
 
 test("classifyUpstream flags 429 with its Retry-After and never consumes the body", () => {

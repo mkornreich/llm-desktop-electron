@@ -3127,14 +3127,15 @@ function recordProvenance(req, body, { route, model, surface }) {
 // because a streaming turn's handler resolves long before the stream ends.
 let inflight = 0;
 
-// Throttled visibility into which member the composite is actually answering with: log the model when it
-// CHANGES from the last one, otherwise at most once per second. So a stable composite doesn't spam the log,
-// but a fall-over to a different member is announced immediately.
-let _compositeModelLast = null, _compositeModelAt = 0;
-export function noteCompositeModel(label, now = Date.now(), emit = log) {
-  if (label !== _compositeModelLast || now - _compositeModelAt >= 1000) {
-    emit(`  composite → answering with ${label}`);
-    _compositeModelLast = label; _compositeModelAt = now;
+// Throttled visibility into which member a chain (composite MAIN turns, or the compaction chain) is actually
+// answering with: log the model when it CHANGES from the last one, otherwise at most once per second. So a
+// stable chain doesn't spam the log, but a fall-over is announced immediately. Keyed by `kind` so the
+// composite and compaction throttles are independent.
+const _noteLast = {}, _noteAt = {};
+export function noteCompositeModel(label, now = Date.now(), emit = log, kind = "composite") {
+  if (label !== _noteLast[kind] || now - (_noteAt[kind] || 0) >= 1000) {
+    emit(`  ${kind} → answering with ${label}`);
+    _noteLast[kind] = label; _noteAt[kind] = now;
     return true;
   }
   return false;
@@ -3321,7 +3322,13 @@ const server = http.createServer(async (req, res) => {
     // classifier and compaction use the default provider. The active provider is stashed in
     // AsyncLocalStorage so the wire helpers use it without extra params; the composite re-pins it per
     // member and again on the winner below. The upstream model/surface come from `got`, not from here.
-    const members = route === ROUTE.MAIN ? resolveComposite(reqModel) : null;
+    // An ordered member list obtainUpstream tries with fallover: the composite on a MAIN turn, or — when a
+    // compaction chain is configured — the client's own COMPACTION turns (its /compact, otherwise pinned to
+    // the default upstream). The safety/prefix classifier stays single-shot on the default. Everything else
+    // is a single member.
+    const members = route === ROUTE.MAIN ? resolveComposite(reqModel)
+      : (route === ROUTE.COMPACTION && OPENAI_COMPACT_MODELS) ? resolveCompactChain()
+      : null;
     const picked = members ? null : (route === ROUTE.MAIN ? resolvePickedProvider(reqModel) : null);
     const bootProvider = picked ? picked.provider : DEFAULT_PROVIDER;
     providerALS.enterWith(bootProvider);
@@ -3349,8 +3356,9 @@ const server = http.createServer(async (req, res) => {
     // member). enterWith, NOT run: the streaming below runs in THIS handler after the helper resolved.
     providerALS.enterWith(got.provider);
     const { upstream, useResp, payload, registry, model, startedAt } = got;
-    // Composite only: announce which member actually answered (throttled — on change, else <=1/s).
-    if (members) noteCompositeModel(`${got.provider.id}:${got.model}`);
+    // Announce which member of a chain actually answered (throttled — on change, else <=1/s). `members` is
+    // set for a composite MAIN turn or a chained COMPACTION turn; label the line accordingly.
+    if (members) noteCompositeModel(`${got.provider.id}:${got.model}`, Date.now(), log, route === ROUTE.COMPACTION ? "compaction" : "composite");
 
     if (useResp) {
       if (payload.stream) {
