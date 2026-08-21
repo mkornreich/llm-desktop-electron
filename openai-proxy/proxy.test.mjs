@@ -391,6 +391,21 @@ test("resolvePickedProvider parses a <provider>:<model> id, or null for unprefix
   }
 });
 
+test("resolvePickedProvider routes a keyless local:<model> pick to the on-device Ollama", () => {
+  // Local is keyless (no .openai-key entry), so unlike the remote providers it resolves
+  // unconditionally — the proxy routes it to the local Ollama /v1 and strips the "local:" prefix.
+  const l = resolvePickedProvider("local:qwen3:8b");
+  assert.ok(l, "local: pick must resolve without a key");
+  assert.equal(l.provider.id, "local");
+  assert.equal(l.provider.auth, "local");
+  assert.equal(l.provider.api, "chat");
+  assert.equal(l.provider.isOpenAI, false);
+  assert.equal(l.model, "qwen3:8b");
+  assert.match(l.provider.baseURL, /\/v1$/);   // an Ollama /v1 base (LLMD_LOCAL_BASE, or the loopback default)
+  // Split on the FIRST colon, so a model id keeps any colons of its own (an :tag / hf.co path).
+  assert.equal(resolvePickedProvider("local:hf.co/org/model:Q4").model, "hf.co/org/model:Q4");
+});
+
 // ---------- tool-argument pruning ----------
 
 const WORKFLOW_SCHEMA = {

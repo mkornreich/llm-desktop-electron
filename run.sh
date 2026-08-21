@@ -119,27 +119,47 @@ fi
 # ---------------------------------------------------------------------------------------
 # Provider selection (.provider dot file, or PROVIDER=… for one launch).
 #
-#   openai     -> start the translation proxy and point the agent at it (api.openai.com)
-#   local      -> same translation proxy, pointed at an on-device OpenAI-compatible server
-#                 (Ollama by default) so the agent runs on THIS machine's GPU, no API key
-#   openrouter -> same translation proxy, pointed at OpenRouter (openrouter.ai) with an sk-or-
-#                 key in .openai-key, so the agent runs on any model OpenRouter serves
-#   cohere     -> same translation proxy, pointed at Cohere's OpenAI-compatible endpoint
-#                 (api.cohere.ai/compatibility/v1) with a Cohere key in .openai-key
-#   gemini     -> same translation proxy, pointed at Google Gemini's OpenAI-compatible endpoint
-#                 (generativelanguage.googleapis.com/v1beta/openai) with a Gemini key in .openai-key
+#   proxy      -> start the translation proxy (Anthropic Messages API in, OpenAI out) and point the
+#                 agent at it. Which upstream backs the DEFAULT (un-picked) turns, the classifier and
+#                 compaction is DEFAULT_PROVIDER below; a single turn can still route to any other
+#                 provider you hold a key for by picking a "<provider>:<model>" from the Code-tab
+#                 dropdown (the proxy routes that turn to the named provider's key).
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
+#
+#   DEFAULT_PROVIDER (proxy mode only): openai | local | openrouter | cohere | gemini
+#     openai     -> api.openai.com (model in .openai-model, key in .openai-key)
+#     local      -> an on-device OpenAI-compatible server (Ollama by default) on THIS machine's GPU,
+#                   no API key; endpoint/model in .local-model
+#     openrouter -> OpenRouter (openrouter.ai), any model it serves; model in .openrouter-model, sk-or- key in .openai-key
+#     cohere     -> Cohere's OpenAI-compatible endpoint; model in .cohere-model, Cohere key in .openai-key
+#     gemini     -> Google Gemini's OpenAI-compatible endpoint; model in .gemini-model, Gemini key in .openai-key
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
 # The bundle patches read PROXY_ANTHROPIC_BASE_URL, so leaving it unset restores the
 # app's own Anthropic host — nothing needs un-patching for anthropic mode.
 PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
-PROVIDER="${PROVIDER:-openai}"
+PROVIDER="${PROVIDER:-proxy}"
+DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-$(sed -n 's/^DEFAULT_PROVIDER=//p' .provider 2>/dev/null | head -1)}"
+# Back-compat: the five non-anthropic modes were merged into one `proxy` mode with a configurable
+# DEFAULT_PROVIDER. An old PROVIDER value (in .provider, or `PROVIDER=cohere ./run.sh`) still works —
+# it selects proxy mode with that provider as the default upstream.
 case "$PROVIDER" in
-  openai|anthropic|local|openrouter|cohere|gemini) ;;
-  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected openai|local|anthropic|openrouter|cohere|gemini)"; exit 1 ;;
+  openai|local|openrouter|cohere|gemini) DEFAULT_PROVIDER="$PROVIDER"; PROVIDER="proxy" ;;
 esac
-echo "[run] provider: $PROVIDER"
+DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-openai}"
+case "$PROVIDER" in
+  proxy|anthropic) ;;
+  *) echo "[run] unknown PROVIDER='$PROVIDER' (expected proxy|anthropic)"; exit 1 ;;
+esac
+case "$DEFAULT_PROVIDER" in
+  openai|local|openrouter|cohere|gemini) ;;
+  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected openai|local|openrouter|cohere|gemini)"; exit 1 ;;
+esac
+if [ "$PROVIDER" = "proxy" ]; then
+  echo "[run] provider: proxy (default upstream: $DEFAULT_PROVIDER)"
+else
+  echo "[run] provider: $PROVIDER"
+fi
 
 # This packaged app resolves its pinned Claude Code executable from app resources or
 # user-data/claude-code/<version>; its dormant CLAUDE_CODE_LOCAL_BINARY initializer is never
@@ -261,7 +281,7 @@ unload_managed_ollama() {
   done
 }
 
-if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "openrouter" ] || [ "$PROVIDER" = "cohere" ] || [ "$PROVIDER" = "gemini" ]; then
+if [ "$PROVIDER" = "proxy" ]; then
   PORT="${PORT:-8123}"
   PROXY_URL="http://127.0.0.1:${PORT}"
 
@@ -273,7 +293,7 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
   # OPENAI_BASE_URL as keyless. Everything downstream (proxy start, PROXY_ANTHROPIC_BASE_URL,
   # the Claude Code identity) is shared with openai mode below; only CONF differs.
   CONF=".openai-model"
-  if [ "$PROVIDER" = "local" ]; then
+  if [ "$DEFAULT_PROVIDER" = "local" ]; then
     CONF=".local-model"
     export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_MODEL="${OPENAI_MODEL:-qwen2.5:7b-instruct}"
@@ -336,7 +356,7 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
   # `openrouter` provider: the SAME translation proxy, pointed at OpenRouter's OpenAI-compatible
   # gateway instead of api.openai.com. Reads model/api from .openrouter-model; the base URL is
   # fixed; the sk-or- key resolves from .openai-key (the proxy's keyfile source) — NOT handled here.
-  if [ "$PROVIDER" = "openrouter" ]; then
+  if [ "$DEFAULT_PROVIDER" = "openrouter" ]; then
     CONF=".openrouter-model"
     export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_MODEL="${OPENAI_MODEL:-poolside/laguna-s-2.1:free}"
@@ -360,7 +380,7 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
   # .openai-key (the proxy's keyfile source) — NOT handled here. Cohere's compatibility API exposes
   # Chat Completions only (no /responses), so api stays chat. Base URL is overridable from CONF for
   # the api.cohere.com alias; it defaults to the confirmed-working api.cohere.ai.
-  if [ "$PROVIDER" = "cohere" ]; then
+  if [ "$DEFAULT_PROVIDER" = "cohere" ]; then
     CONF=".cohere-model"
     export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_MODEL="${OPENAI_MODEL:-command-a-03-2025}"
@@ -380,7 +400,7 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
   # resolves from .openai-key (the proxy's keyfile source) — NOT handled here. Gemini's compat surface
   # is Chat Completions only (no /responses — it 404s), so api stays chat. Base URL is overridable
   # from CONF but defaults to the v1beta/openai gateway.
-  if [ "$PROVIDER" = "gemini" ]; then
+  if [ "$DEFAULT_PROVIDER" = "gemini" ]; then
     CONF=".gemini-model"
     export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_MODEL="${OPENAI_MODEL:-gemini-3-flash-preview}"
@@ -394,6 +414,25 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
       echo "[run] WARNING: no Gemini key found — put 'apiKey=<your-gemini-key>' in .openai-key (cp .openai-key.example .openai-key)"
     fi
   fi
+
+  # Local thinking models for the Code-tab dropdown. The picker is fed by the app bootstrap (the
+  # renderer-unlock preload injects the model list), not by the proxy's /v1/models, and that sandboxed
+  # preload cannot fetch localhost itself (claude.ai CORS/CSP). So discover the on-device Ollama
+  # thinking models here and hand them to the page through the app environment: the preload reads
+  # LLMD_LOCAL_MODELS (a JSON list) and injects them, and the proxy routes a picked "local:<model>" to
+  # LLMD_LOCAL_BASE (the reachable Ollama /v1). Best-effort — empty when no Ollama or no thinking model
+  # is installed — and set BEFORE ensure-proxy so a freshly-started proxy inherits the base for routing.
+  if command -v node >/dev/null 2>&1; then
+    LOCAL_INFO="$(node scripts/local-thinking-models.mjs 2>/dev/null || true)"
+    LLMD_LOCAL_BASE_VAL="$(printf '%s\n' "$LOCAL_INFO" | sed -n '1p')"
+    LLMD_LOCAL_MODELS_VAL="$(printf '%s\n' "$LOCAL_INFO" | sed -n '2p')"
+    if [ -n "$LLMD_LOCAL_BASE_VAL" ] && [ -n "$LLMD_LOCAL_MODELS_VAL" ]; then
+      export LLMD_LOCAL_BASE="$LLMD_LOCAL_BASE_VAL"
+      export LLMD_LOCAL_MODELS="$LLMD_LOCAL_MODELS_VAL"
+      echo "[run] local thinking models for the picker: ${LLMD_LOCAL_MODELS} via ${LLMD_LOCAL_BASE}"
+    fi
+  fi
+
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:
   #   * a model change did not take effect, because the OLD proxy answered /health and got
   #     reused while the launcher printed "proxy healthy";
@@ -426,7 +465,7 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
     exit 1
   fi
   export LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL="$OPENAI_CLAUDE_CODE_MODEL"
-  echo "[run] Claude Code internal model: ${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL} (${PROVIDER} mode)"
+  echo "[run] Claude Code internal model: ${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL} (${DEFAULT_PROVIDER} upstream)"
   # Other proxy-mode agent settings (classifier model, gateway model discovery, context cap).
   while IFS='=' read -r k v; do
     case "$k" in CLAUDE_CODE_*) export "$k=$v"; echo "[run] $k=$v" ;; esac
@@ -442,7 +481,7 @@ if [ "$PROVIDER" = "openai" ] || [ "$PROVIDER" = "local" ] || [ "$PROVIDER" = "o
   # one. Derive it from the per-model context — 3/4, leaving headroom for the tools + reply —
   # unless a per-model COMPACT_<model> or an explicit CLAUDE_CODE_AUTO_COMPACT_WINDOW was given
   # (the latter is exported by the loop above, so gate on it being unset).
-  if [ "$PROVIDER" = "local" ] && [ -z "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
+  if [ "$DEFAULT_PROVIDER" = "local" ] && [ -z "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
     export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${DESIRED_COMPACT:-$(( DESIRED_CTX * 3 / 4 ))}"
     echo "[run] CLAUDE_CODE_AUTO_COMPACT_WINDOW=${CLAUDE_CODE_AUTO_COMPACT_WINDOW} (${OPENAI_MODEL}, ${DESIRED_CTX}-token context)"
   fi

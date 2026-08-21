@@ -1,5 +1,5 @@
 # OpenRouter model config for `openrouter` provider mode.
-# Used by run.sh when PROVIDER=openrouter (./run-openrouter.sh, or `PROVIDER=openrouter ./run.sh`).
+# Used by run.sh when DEFAULT_PROVIDER=openrouter (proxy mode: ./run-proxy.sh, or `PROVIDER=openrouter ./run.sh`).
 #
 # `openrouter` routes the agent's Claude Code sub-layer through the openai-proxy pointed at
 # OpenRouter's OpenAI-compatible gateway (https://openrouter.ai/api/v1). The chat window is still
@@ -15,12 +15,12 @@
 # settings window's picker lists tool-capable models and flags the free ones. Notable FREE, tool-
 # capable coders (Aug 2026): poolside/laguna-s-2.1:free, z-ai/glm-5.2:free, openai/gpt-oss-20b:free.
 # Any paid model works too (higher rate limits). Browse: https://openrouter.ai/models
-OPENAI_MODEL=poolside/laguna-s-2.1:free
+OPENAI_MODEL=google/gemma-4-31b-it:free
 
 # OpenAI surface. chat = /chat/completions (broadest model support; caps tools at 128 — the app
 # sends ~93, so it fits). responses = /responses (stateless; OpenRouter supports it per-model and
 # it sends every tool, avoiding the 128 cap). Leave as chat unless your model needs responses.
-OPENAI_API=chat
+OPENAI_API=responses
 
 # ---- free-tier notes ----
 # Free (:free) models are limited to 20 requests/min and 50 requests/day (1000/day once you have

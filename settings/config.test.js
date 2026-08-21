@@ -121,6 +121,15 @@ test("the schema covers every parameter the proxy and launcher read", () => {
   }
 });
 
+test("the provider enum is proxy|anthropic with a default-upstream selector", () => {
+  const prov = SCHEMA.find((s) => s.key === "PROVIDER");
+  assert.deepEqual(prov.options, ["proxy", "anthropic"], "the five non-anthropic modes merged into proxy");
+  const dp = SCHEMA.find((s) => s.key === "DEFAULT_PROVIDER");
+  assert.ok(dp, "DEFAULT_PROVIDER must be exposed");
+  assert.equal(dp.file, ".provider");
+  assert.deepEqual(dp.options, ["openai", "local", "openrouter", "cohere", "gemini"]);
+});
+
 test("every schema entry is well formed", () => {
   for (const s of SCHEMA) {
     assert.ok(s.file && s.key && s.type && s.label, `incomplete entry: ${s.key}`);

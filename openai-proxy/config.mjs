@@ -264,6 +264,12 @@ export const PROVIDERS = {
   gemini:     { id: "gemini",     label: "Gemini",     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", api: "chat",      keyNames: ["googleApiKey", "geminiApiKey", "apiKey"], isOpenAI: false, match: /generativelanguage\.googleapis\.com/i },
   cohere:     { id: "cohere",     label: "Cohere",     baseURL: "https://api.cohere.ai/compatibility/v1",                  api: "chat",      keyNames: ["cohereApiKey", "apiKey"],                isOpenAI: false, match: /api\.cohere\.(ai|com)/i },
   openrouter: { id: "openrouter", label: "OpenRouter", baseURL: "https://openrouter.ai/api/v1",                            api: "chat",      keyNames: ["openrouterApiKey", "apiKey"],            isOpenAI: false, match: /openrouter\.ai/i },
+  // On-device Ollama (or any loopback OpenAI-compatible server). KEYLESS — its keyNames are empty,
+  // so it never appears in activeProviders and is never advertised by /v1/models; a `local:<model>`
+  // pick is special-cased in proxy.mjs (resolvePickedProvider) to route here with no key. baseURL is
+  // the reachable Ollama /v1, which run.sh discovers and exports as LLMD_LOCAL_BASE. Listed LAST so
+  // the specific remote hosts above win providerForBase() before this broad loopback match.
+  local:      { id: "local",      label: "Local",      baseURL: (process.env.LLMD_LOCAL_BASE || "http://127.0.0.1:11434/v1"),           api: "chat",      keyNames: [],                                        isOpenAI: false, match: /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i },
 };
 // The registry entry whose host matches this base URL, or null (loopback / unknown host).
 export function providerForBase(url) {
@@ -389,7 +395,7 @@ export function codeVersion() {
 }
 
 export function provider(file = PROVIDER_FILE) {
-  return loadKV(file).PROVIDER || "openai";
+  return loadKV(file).PROVIDER || "proxy";
 }
 
 // A secret-redacted description of what this process will do. Safe to log, to serve from

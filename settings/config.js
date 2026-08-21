@@ -15,9 +15,13 @@ const filePath = (f) => path.join(ROOT, f);
 // Every parameter the launcher or the proxy actually reads. `file` is where it is persisted.
 const SCHEMA = [
   { group: "Provider", file: ".provider", key: "PROVIDER", type: "enum",
-    options: ["openai", "local", "openrouter", "cohere", "gemini", "anthropic"], default: "openai",
+    options: ["proxy", "anthropic"], default: "proxy",
     label: "Model backing the agent",
-    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). openai = via the translation proxy to api.openai.com. local = the same proxy pointed at an on-device server (Ollama) so the agent runs on this machine's GPU; configure it in .local-model. openrouter = the same proxy pointed at OpenRouter (any model it serves, incl. free ones); configure it in .openrouter-model and put an sk-or- key in .openai-key. cohere = the same proxy pointed at Cohere's OpenAI-compatible endpoint; configure it in .cohere-model and put your Cohere key in .openai-key. gemini = the same proxy pointed at Google Gemini's OpenAI-compatible endpoint; configure it in .gemini-model and put your Gemini key in .openai-key. Only the agent is affected; the chat window is always remote claude.ai." },
+    help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). proxy = route the agent through the local translation proxy (Anthropic Messages in, OpenAI out) to whichever upstream you choose below — OpenAI, an on-device Ollama, OpenRouter, Cohere or Gemini. A single turn can also run on any provider you hold a key for by picking a <provider>:<model> from the Code-tab model dropdown. Only the agent is affected; the chat window is always remote claude.ai." },
+  { group: "Provider", file: ".provider", key: "DEFAULT_PROVIDER", type: "enum",
+    options: ["openai", "local", "openrouter", "cohere", "gemini"], default: "openai",
+    label: "Default upstream (proxy mode)",
+    help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, local -> Local model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
 
   // The local (on-device) model, its own file. .local-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)

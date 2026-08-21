@@ -1,5 +1,5 @@
 # Privacy / telemetry settings for this build. Read by run.sh, so it applies to both
-# ./run.sh and ./run-openai.sh. Telemetry is OFF BY DEFAULT: it stays disabled even if this
+# ./run.sh and ./run-proxy.sh. Telemetry is OFF BY DEFAULT: it stays disabled even if this
 # file is missing or blank. Set DISABLE_TELEMETRY=0 to explicitly opt back IN to the app's
 # stock telemetry behavior. See ANTHROPIC_ENDPOINTS.md for the full traffic list.
 #

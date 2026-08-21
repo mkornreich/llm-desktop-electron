@@ -80,7 +80,7 @@ path computed per platform:
    symlink and the `Helpers/disclaimer` shim.
 
 ### Phase 2 — make the launcher portable (half a day)
-`run.sh` and `run-openai.sh` are the only genuinely macOS-specific code *we* wrote. Add a
+`run.sh` and `run-proxy.sh` are the only genuinely macOS-specific code *we* wrote. Add a
 `case "$(uname -s)"` block resolving these:
 
 | Concern | macOS | Linux |

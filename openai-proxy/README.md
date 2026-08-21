@@ -637,7 +637,7 @@ node config.mjs --validate   # range and cross-field checks; non-zero on error
   contains `codex` auto-routes there; override with `OPENAI_API=responses|chat`
   (env or `.openai-model`).
 - **Model picker → OpenAI models:** with `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`
-  (set in `.openai-model`, forwarded by `run-openai.sh`), the app discovers models
+  (set in `.openai-model`, forwarded by `run-proxy.sh`), the app discovers models
   from the proxy's `GET /v1/models` and lists them in the picker. The served list is
   `OPENAI_PICKER_MODELS` (default: `gpt-5.3-codex`, `gpt-5.4`, `gpt-4.1`,
   `gpt-4.1-mini`, `gpt-4o`). Selecting one makes the agent request that id, which the
@@ -693,10 +693,10 @@ node config.mjs --validate   # range and cross-field checks; non-zero on error
 ## Run the app on OpenAI
 
 ```bash
-./run-openai.sh          # from the repo root
+./run-proxy.sh          # from the repo root
 ```
 
-`run-openai.sh` starts the proxy and launches the app with
+`run-proxy.sh` starts the proxy and launches the app with
 `PROXY_ANTHROPIC_BASE_URL` set. Then open Claude Code
 in the app and use it — its traffic flows to the proxy. (Quit the real
 `~/Applications/Claude.app` first so you don't confuse its identical window with
@@ -714,7 +714,7 @@ with `PROXY_ANTHROPIC_BASE_URL` unset the app behaves normally):
    `PROXY_ANTHROPIC_BASE_URL || provider.apiHostOverride()`. This was the one
    that made the difference.
 
-Plus two non-code fixes handled by `run.sh` / `run-openai.sh`:
+Plus two non-code fixes handled by `run.sh` / `run-proxy.sh`:
 
 - **`disclaimer` helper** — the app spawns every subprocess through
   `Contents/Helpers/disclaimer` (a macOS TCC wrapper absent from stock Electron).

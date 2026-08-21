@@ -1,4 +1,4 @@
-# Session sharing settings for this build (read by run.sh, so it covers run-openai.sh too).
+# Session sharing settings for this build (read by run.sh, so it covers run-proxy.sh too).
 #
 # SYNC_CLAUDE_SESSIONS=1 -> the session store is SHARED with Claude Desktop, as a symlink:
 #

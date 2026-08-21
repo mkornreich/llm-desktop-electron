@@ -1,5 +1,5 @@
 # Cohere model config for `cohere` provider mode.
-# Used by run.sh when PROVIDER=cohere (./run-cohere.sh, or `PROVIDER=cohere ./run.sh`).
+# Used by run.sh when DEFAULT_PROVIDER=cohere (proxy mode: ./run-proxy.sh, or `PROVIDER=cohere ./run.sh`).
 #
 # `cohere` routes the agent's Claude Code sub-layer through the openai-proxy pointed at Cohere's
 # OpenAI-compatible endpoint (https://api.cohere.ai/compatibility/v1). The chat window is still

@@ -289,20 +289,29 @@ app.
 
 ### Choosing the provider
 
+Two modes: **`anthropic`** (Claude, direct) or **`proxy`** (via the local translation proxy). In
+proxy mode a single **`DEFAULT_PROVIDER`** (in [`.provider`](.provider)) picks the upstream that
+backs the default turns, the background classifier and compaction — one of `openai`, `local`
+(on-device Ollama), `openrouter`, `cohere`, `gemini` — and any *individual* turn can run on a
+different provider by picking a `<provider>:<model>` from the Code-tab model dropdown (the proxy
+routes that turn to the named provider's key in `.openai-key`).
+
 ```bash
-./run-openai.sh       # OpenAI (api.openai.com), via the local translation proxy
-./run-local.sh        # an on-device model on this machine's GPU (Ollama), same proxy, no API key
+./run-proxy.sh        # via the local translation proxy — upstream = DEFAULT_PROVIDER in .provider
 ./run-anthropic.sh    # Claude, calling Anthropic directly (stock behaviour)
-./run.sh              # whichever .provider says (default: openai)
+./run.sh              # whichever .provider says (default: proxy, upstream openai)
 ```
 
-| | `anthropic` | `openai` | `local` |
-|---|---|---|---|
-| agent's `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `http://127.0.0.1:8123` | `http://127.0.0.1:8123` |
-| translation proxy | not started | started, health-checked | started, health-checked |
-| backend the proxy calls | — | api.openai.com | on-device Ollama (GPU) |
-| API key | your Anthropic login | `OPENAI_API_KEY` / `.openai-key` | none (loopback is keyless) |
-| model | Claude, as shipped | `gpt-5.6-sol` | `qwen2.5:7b-instruct` |
+An old `PROVIDER=openai|local|openrouter|cohere|gemini` (in `.provider` or on the command line)
+still works — it selects proxy mode with that provider as the default upstream.
+
+| | `anthropic` | `proxy` |
+|---|---|---|
+| agent's `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `http://127.0.0.1:8123` |
+| translation proxy | not started | started, health-checked |
+| backend the proxy calls | — | the `DEFAULT_PROVIDER` upstream (OpenAI / on-device Ollama / OpenRouter / Cohere / Gemini), plus any provider picked per-turn |
+| API key | your Anthropic login | per upstream — `.openai-key` (remote) or none (loopback Ollama) |
+| model | Claude, as shipped | the upstream's model, or a `<provider>:<model>` chosen in the dropdown |
 
 Switching needs **no un-patching**: every edit to the bundle is env-gated
 (`PROXY_ANTHROPIC_BASE_URL || <original host>`), so with the variable unset the app uses its own
@@ -311,9 +320,11 @@ talking to Anthropic in every mode.
 
 #### On-device model (`local`)
 
-`PROVIDER=local` (or `./run-local.sh`) is `openai` mode pointed at a local OpenAI-compatible
-server instead of api.openai.com, so the agent runs on **this machine's GPU** with no API key. It
-uses [Ollama](https://ollama.com), configured in [`.local-model`](.local-model).
+`DEFAULT_PROVIDER=local` points the proxy at a local OpenAI-compatible server instead of
+api.openai.com, so the agent runs on **this machine's GPU** with no API key. It uses
+[Ollama](https://ollama.com), configured in [`.local-model`](.local-model). The Code-tab dropdown
+also lists your installed Ollama *thinking* models as `local:<model>` (discovered at launch), so
+you can run a single turn on-device from any mode.
 
 **It manages Ollama for you.** The agent's prompt (system + up to 128 tools) is large, and a
 system Ollama is usually pinned to a small context by its service unit — which would silently

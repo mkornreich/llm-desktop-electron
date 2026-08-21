@@ -182,7 +182,8 @@ test("providerForBase recognizes each provider's host", () => {
   assert.equal(providerForBase("https://api.cohere.com/compatibility/v1")?.id, "cohere");
   assert.equal(providerForBase("https://openrouter.ai/api/v1")?.id, "openrouter");
   assert.equal(providerForBase("https://api.openai.com/v1")?.id, "openai");
-  assert.equal(providerForBase("http://127.0.0.1:11435/v1"), null);   // loopback -> not in the registry
+  assert.equal(providerForBase("http://127.0.0.1:11435/v1")?.id, "local");   // loopback -> the keyless local provider
+  assert.equal(providerForBase("http://localhost:11434/v1")?.id, "local");
 });
 
 test("activeProviders returns the registry entries whose named key is present", () => {
@@ -367,7 +368,7 @@ test("every setting the proxy reads is declared here", () => {
   const declared = new Set(SETTINGS.map((s) => s.env).filter(Boolean));
   // Runtime plumbing, not configuration: these select a test mode or are read for their own
   // sake and deliberately stay out of the identity of the process.
-  const exempt = new Set(["PROXY_NO_LISTEN", "PROXY_FORCE_IPV4"]);
+  const exempt = new Set(["PROXY_NO_LISTEN", "PROXY_FORCE_IPV4", "LLMD_LOCAL_BASE"]);
   const found = new Set();
   for (const m of src.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)) found.add(m[1]);
   const undeclared = [...found].filter((k) => !declared.has(k) && !exempt.has(k));

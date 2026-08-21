@@ -143,7 +143,7 @@ function refreshDirty() {
   setMsg(d.length ? `${d.length} unsaved change${d.length > 1 ? "s" : ""}` : "", d.length ? "warn" : "");
 }
 
-// Everything persisted in .openai-model is read only in OpenAI mode: run.sh exports those
+// Everything persisted in .openai-model is read only in proxy mode: run.sh exports those
 // CLAUDE_CODE_* keys only for the proxy path, and several hold OpenAI model ids that Anthropic
 // would reject outright. .provider, .privacy and .sync apply either way.
 const OPENAI_ONLY = (s) => s.file === ".openai-model";
@@ -151,20 +151,25 @@ const LOCAL_ONLY = (s) => s.file === ".local-model";
 const OPENROUTER_ONLY = (s) => s.file === ".openrouter-model";
 const COHERE_ONLY = (s) => s.file === ".cohere-model";
 const GEMINI_ONLY = (s) => s.file === ".gemini-model";
-// .openai-model applies in openai (and local) mode; .local-model only in local mode;
-// .openrouter-model only in openrouter mode; .cohere-model only in cohere mode; .gemini-model only in
-// gemini mode. Inert rows are dimmed and marked, never hidden or cleared — the value applies on switch back.
-const isInert = (s) => (DRAFT.PROVIDER === "anthropic" && OPENAI_ONLY(s))
-  || (DRAFT.PROVIDER !== "local" && LOCAL_ONLY(s))
-  || (DRAFT.PROVIDER !== "openrouter" && OPENROUTER_ONLY(s))
-  || (DRAFT.PROVIDER !== "cohere" && COHERE_ONLY(s))
-  || (DRAFT.PROVIDER !== "gemini" && GEMINI_ONLY(s));
+// In anthropic mode nothing proxy-side is in effect (run.sh exports none of it). In proxy mode
+// .openai-model always applies (it holds the shared proxy/agent settings and is the default upstream's
+// model), while each secondary provider's model file (.local/.openrouter/.cohere/.gemini) applies only
+// when it is the selected DEFAULT_PROVIDER. Inert rows are dimmed and marked, never hidden or cleared —
+// the value applies again as soon as the provider/default matches.
+const isInert = (s) => {
+  if (DRAFT.PROVIDER === "anthropic") return OPENAI_ONLY(s) || LOCAL_ONLY(s) || OPENROUTER_ONLY(s) || COHERE_ONLY(s) || GEMINI_ONLY(s);
+  if (LOCAL_ONLY(s))      return DRAFT.DEFAULT_PROVIDER !== "local";
+  if (OPENROUTER_ONLY(s)) return DRAFT.DEFAULT_PROVIDER !== "openrouter";
+  if (COHERE_ONLY(s))     return DRAFT.DEFAULT_PROVIDER !== "cohere";
+  if (GEMINI_ONLY(s))     return DRAFT.DEFAULT_PROVIDER !== "gemini";
+  return false;
+};
 
 function control(s) {
   const v = DRAFT[s.key];
-  if (s.type === "enum" && s.key === "PROVIDER") {
-    // Switching the provider changes which OTHER controls are in effect, so this one re-renders
-    // rather than only recording the draft value.
+  if (s.type === "enum" && (s.key === "PROVIDER" || s.key === "DEFAULT_PROVIDER")) {
+    // Switching the provider (or the default upstream) changes which OTHER controls are in effect,
+    // so these re-render the whole form rather than only recording the draft value.
     const sel = document.createElement("select");
     for (const o of s.options) {
       const op = document.createElement("option");
@@ -290,15 +295,18 @@ function render() {
       if (isInert(s)) {
         row.classList.add("inert");
         const n = document.createElement("div"); n.className = "help inert-note";
-        n.textContent = LOCAL_ONLY(s)
-          ? "Not in effect: the agent is not set to local. Saved, and applied when you switch the provider to local."
+        n.textContent =
+            DRAFT.PROVIDER === "anthropic"
+          ? "Not in effect: the agent is set to Anthropic. Saved, and applied when you switch the provider to proxy."
+          : LOCAL_ONLY(s)
+          ? "Not in effect: the default upstream is not local. Saved, and applied when you set the default provider to local."
           : OPENROUTER_ONLY(s)
-          ? "Not in effect: the agent is not set to openrouter. Saved, and applied when you switch the provider to openrouter."
+          ? "Not in effect: the default upstream is not openrouter. Saved, and applied when you set the default provider to openrouter."
           : COHERE_ONLY(s)
-          ? "Not in effect: the agent is not set to cohere. Saved, and applied when you switch the provider to cohere."
+          ? "Not in effect: the default upstream is not cohere. Saved, and applied when you set the default provider to cohere."
           : GEMINI_ONLY(s)
-          ? "Not in effect: the agent is not set to gemini. Saved, and applied when you switch the provider to gemini."
-          : "Not in effect: the agent is set to Anthropic. Saved, and applied again when you switch back to OpenAI.";
+          ? "Not in effect: the default upstream is not gemini. Saved, and applied when you set the default provider to gemini."
+          : "Not in effect. Saved, and applied when the provider is set to proxy.";
         left.append(n);
       }
       // The saved model is still shown even when it is filtered out of the picker (a non-thinking

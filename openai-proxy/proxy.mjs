@@ -160,6 +160,12 @@ function resolvePickedProvider(reqModel) {
   if (i <= 0) return null;
   const reg = PROVIDERS[s.slice(0, i)];
   if (!reg) return null;
+  // Keyless on-device provider (Ollama): route to the local Ollama /v1 with a placeholder auth and
+  // the bare model id — no key required. LLMD_LOCAL_BASE is the reachable Ollama run.sh discovered.
+  if (reg.id === "local") {
+    const baseURL = process.env.LLMD_LOCAL_BASE || reg.baseURL;
+    return { provider: { id: "local", baseURL, auth: "local", api: reg.api, isOpenAI: false, extraHeaders: {} }, model: s.slice(i + 1) };
+  }
   const auth = providerAuth(reg);
   if (!auth) return null;
   return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {} }, model: s.slice(i + 1) };

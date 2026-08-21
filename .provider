@@ -1,26 +1,31 @@
 # Which model provider backs the app's Claude Code / agent sub-layer.
 # Read by run.sh; override for one launch with  PROVIDER=anthropic ./run.sh
 #
-#   openai     -> route the agent through openai-proxy/proxy.mjs (Anthropic Messages API
-#                 in, OpenAI out). Model and behaviour come from .openai-model.
-#   local      -> same proxy, but pointed at an on-device OpenAI-compatible server (Ollama by
-#                 default) so the agent runs on this machine's GPU. No API key. Endpoint and
-#                 model come from .local-model. See that file for the context caveats.
-#   openrouter -> same proxy, pointed at OpenRouter's OpenAI-compatible gateway. Model from
+#   proxy      -> route the agent through openai-proxy/proxy.mjs (Anthropic Messages API in,
+#                 OpenAI out). Which upstream backs the DEFAULT (un-picked) turns, the classifier
+#                 and compaction is DEFAULT_PROVIDER below. A single turn can still run on ANY
+#                 provider you hold a key for by picking a "<provider>:<model>" from the Code-tab
+#                 model dropdown — the proxy routes that turn to the named provider's key.
+#   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude, exactly as the
+#                 shipped app does. The proxy is not started, and the OpenAI-only CLAUDE_CODE_*
+#                 settings are NOT applied (sending an OpenAI model id to Anthropic just errors).
+#
+# DEFAULT_PROVIDER (proxy mode only) — the default upstream:
+#   openai     -> api.openai.com. Model in .openai-model, key in .openai-key.
+#   local      -> an on-device OpenAI-compatible server (Ollama by default) on this machine's GPU,
+#                 no API key. Endpoint/model in .local-model. See that file for the context caveats.
+#   openrouter -> OpenRouter's OpenAI-compatible gateway, any model it serves. Model in
 #                 .openrouter-model; sk-or- key in .openai-key.
-#   cohere     -> same proxy, pointed at Cohere's OpenAI-compatible endpoint. Model from
-#                 .cohere-model; Cohere key in .openai-key.
-#   gemini     -> same proxy, pointed at Google Gemini's OpenAI-compatible endpoint. Model from
-#                 .gemini-model; Gemini key in .openai-key.
-#   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude, exactly
-#                 as the shipped app does. The proxy is not started, and the OpenAI-only
-#                 CLAUDE_CODE_* settings from .openai-model are NOT applied — sending an
-#                 OpenAI model id (e.g. gpt-4.1-mini) to Anthropic just errors.
+#   cohere     -> Cohere's OpenAI-compatible endpoint. Model in .cohere-model; Cohere key in .openai-key.
+#   gemini     -> Google Gemini's OpenAI-compatible endpoint. Model in .gemini-model; Gemini key in .openai-key.
 #
-# Either way the main chat window is the remote claude.ai web app talking to Anthropic;
-# this setting only affects the agent. The bundle patches are env-gated, so in anthropic
-# mode they are inert and no files need reverting.
+# Either way the main chat window is the remote claude.ai web app talking to Anthropic; this
+# setting only affects the agent. The bundle patches are env-gated, so in anthropic mode they are
+# inert and no files need reverting.
 #
-# Convenience wrappers: ./run-openai.sh, ./run-local.sh, ./run-openrouter.sh, ./run-cohere.sh,
-# ./run-gemini.sh and ./run-anthropic.sh force one mode.
-PROVIDER=gemini
+# Back-compat: an old PROVIDER value (openai|local|openrouter|cohere|gemini) still works — it selects
+# proxy mode with that provider as the default upstream.
+#
+# Convenience wrappers: ./run-proxy.sh (proxy mode) and ./run-anthropic.sh (anthropic mode).
+PROVIDER=proxy
+DEFAULT_PROVIDER=gemini

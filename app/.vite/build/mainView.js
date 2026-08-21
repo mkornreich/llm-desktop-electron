@@ -94,6 +94,11 @@ try {
       "; webFrame=" + (typeof (__llmdEl && __llmdEl.webFrame)) + "; logfile=" + __llmdLogFile);
     try {
       __llmdEl.contextBridge.exposeInMainWorld("__llmdUnlockLog", function (m) { __llmdWrite("[page] " + m); });
+      // Hand the launch-time local thinking-model list (run.sh -> LLMD_LOCAL_MODELS) to the page, which
+      // cannot read process.env or fetch localhost itself. The page injects these as local:<model>.
+      __llmdEl.contextBridge.exposeInMainWorld("__llmdLocalModels", function () {
+        try { return JSON.parse(process.env.LLMD_LOCAL_MODELS || "[]"); } catch (e) { return []; }
+      });
       __llmdWrite("bridge exposed");
     } catch (e) { __llmdWrite("bridge expose FAILED: " + e); }
     try {
@@ -205,6 +210,13 @@ try {
                   { id: "gemini:gemini-flash-latest",    name: "Gemini: Flash (latest)", short: "Flash" },
                   { id: "gemini:gemini-3.1-pro-preview", name: "Gemini: 3.1 Pro",        short: "3.1 Pro" }
                 ];
+                // On-device Ollama thinking models, discovered at launch by run.sh and handed over via
+                // the preload bridge (the page can't read env or reach localhost). Routed as local:<model>.
+                try {
+                  var LOCAL = (window.__llmdLocalModels && window.__llmdLocalModels()) || [];
+                  LOCAL.forEach(function (nm) { MY.push({ id: "local:" + nm, name: "Local: " + nm, short: nm }); });
+                  if (LOCAL.length) log("added " + LOCAL.length + " local thinking model(s) to the picker");
+                } catch (e) { log("local models bridge error " + e); }
                 var am = data.claude_ai_available_models;
                 if (am && Array.isArray(am.models)) {
                   MY.forEach(function (m) {

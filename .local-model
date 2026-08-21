@@ -1,5 +1,5 @@
 # On-device model config for `local` provider mode.
-# Used by run.sh when PROVIDER=local (./run-local.sh, or `PROVIDER=local ./run.sh`).
+# Used by run.sh when DEFAULT_PROVIDER=local (proxy mode: ./run-proxy.sh, or `PROVIDER=local ./run.sh`).
 #
 # `local` routes the agent's Claude Code sub-layer through the openai-proxy pointed at a local
 # OpenAI-compatible server on THIS machine's GPU. The chat window is still remote claude.ai.
@@ -11,11 +11,11 @@
 #   qwen2.5:7b-instruct  (32K)    qwen3:8b (40K, adds a 'thinking' mode)    granite4.1:8b (128K)
 # Avoid qwen2.5-coder:7b — it dumps tool calls as text. Pick one that fits VRAM (~5 GB for a
 # 7-8B q4 model). granite4.1:8b's large native window suits the agent's big tool-heavy prompt.
-OPENAI_MODEL=qwen2.5:7b-instruct
+OPENAI_MODEL=gemma4:latest
 
 # OpenAI surface. chat = /v1/chat/completions (universal; caps tools at 128, which helps a small
 # model). responses = /v1/responses (recent Ollama serves it; sends every tool).
-OPENAI_API=chat
+OPENAI_API=responses
 
 # ---- managed on-device Ollama ----
 # When 1 (default), run.sh runs its OWN Ollama on OLLAMA_MANAGED_PORT with the context + tuning
@@ -64,3 +64,6 @@ OPENAI_CLAUDE_CODE_MODEL=claude-opus-4-8[1m]
 # To pin it, either set a per-model override here (COMPACT_<model>, exact model name):
 #   COMPACT_gemma3:27b=6000
 # or force one value for every model with an explicit CLAUDE_CODE_AUTO_COMPACT_WINDOW=<n>.
+
+# Added by the settings window.
+CONTEXT_gemma4:latest=131072

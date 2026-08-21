@@ -1,5 +1,5 @@
 # Gemini model config for `gemini` provider mode.
-# Used by run.sh when PROVIDER=gemini (./run-gemini.sh, or `PROVIDER=gemini ./run.sh`).
+# Used by run.sh when DEFAULT_PROVIDER=gemini (proxy mode: ./run-proxy.sh, or `PROVIDER=gemini ./run.sh`).
 #
 # `gemini` routes the agent's Claude Code sub-layer through the openai-proxy pointed at Google
 # Gemini's OpenAI-compatible endpoint (https://generativelanguage.googleapis.com/v1beta/openai). The
