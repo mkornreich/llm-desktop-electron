@@ -272,6 +272,27 @@ function control(s) {
     }
     return wrap;
   }
+  if (s.type === "modelpicker") {
+    // Single-model <select>: the setting's own suggestions + the live aggregated provider catalog
+    // (/api/composite-choices) + the current value (so a set-but-unlisted id is never dropped). Falls
+    // back to a text input when no catalog is available (offline). Stores the plain id string.
+    const cur = DRAFT[s.key] || "";
+    const labelOf = Object.fromEntries(COMPOSITE_CHOICES.map((c) => [c.id, c.label]));
+    const ids = [...new Set([...(cur ? [cur] : []), ...(s.suggestions || []), ...COMPOSITE_CHOICES.map((c) => c.id)])];
+    if (!ids.length) {
+      const i = document.createElement("input"); i.type = "text"; i.value = cur;
+      if (s.placeholder) i.placeholder = s.placeholder;
+      i.onchange = () => { DRAFT[s.key] = i.value.trim(); refreshDirty(); };
+      return i;
+    }
+    const sel = document.createElement("select");
+    for (const o of ids) {
+      const op = document.createElement("option"); op.value = o; op.textContent = labelOf[o] || o;
+      if (o === cur) op.selected = true; sel.append(op);
+    }
+    sel.onchange = () => { DRAFT[s.key] = sel.value; refreshDirty(); };
+    return sel;
+  }
   if (s.type === "bool") {
     const w = document.createElement("label"); w.className = "sw";
     const i = document.createElement("input"); i.type = "checkbox"; i.checked = isBoolOn(v);
