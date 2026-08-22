@@ -1348,9 +1348,29 @@ function buildPersistenceHint() {
   ].join("\n");
 }
 
+// Operator-unwanted boilerplate stripped from EVERY forwarded system prompt (before any hint is
+// appended, and regardless of route). The billing header is matched by line so any cc_version goes;
+// the prose/bullet blocks are matched verbatim — version-sensitive, so update them if the upstream
+// CLI rewords. Removal collapses the blank lines it leaves behind so the prompt stays well-formed.
+const BILLING_HEADER_RE = /^x-anthropic-billing-header:[^\n]*\n?/m;
+const SYSTEM_STRIP_BLOCKS = [
+  "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.",
+  "When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.",
+  "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
+  "\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.",
+];
+function stripSystemBoilerplate(sys) {
+  if (!sys || typeof sys !== "string") return sys;
+  let out = sys.replace(BILLING_HEADER_RE, "");
+  for (const block of SYSTEM_STRIP_BLOCKS) out = out.split(block).join("");
+  return out.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
+}
+
 // enable=false for the safety-classifier call: it is a separate LLM with its own
-// expected output shape, and appending these rules to its prompt is off-task.
+// expected output shape, and appending these rules to its prompt is off-task. The
+// boilerplate strip runs first, so it applies even when the hints are skipped.
 const withFormatHint = (sys, enable = true, tools = null) => {
+  sys = stripSystemBoilerplate(sys);
   if (!enable) return sys;
   const parts = [];
   if (OUTPUT_FIXUPS) parts.push(buildFormatHint(tools));
@@ -3530,6 +3550,7 @@ const server = http.createServer(async (req, res) => {
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
          inTokensField, cacheWarning, recordUsage, usageSummary,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
+         stripSystemBoilerplate,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
          shouldAutoContinue, continueReason, workDoneThisTurn, backgroundToolUsedThisTurn,
          pruneToolArgs, emptyTurnNotice, toolArgs, pruneByName,

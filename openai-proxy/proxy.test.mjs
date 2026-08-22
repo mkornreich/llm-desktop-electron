@@ -17,7 +17,7 @@ process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_BASE_URL = "https://api.openai.com/v1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
-        buildPersistenceHint, withFormatHint, shouldAutoContinue, continueReason,
+        buildPersistenceHint, withFormatHint, stripSystemBoilerplate, shouldAutoContinue, continueReason,
         workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
@@ -317,6 +317,78 @@ test("persistence and output fixups are independent sections", () => {
 
 test("the classifier call gets neither section", () => {
   assert.equal(withFormatHint("BASE", false, [{ name: "Write" }]), "BASE");
+});
+
+// ---------- operator boilerplate stripping ----------
+
+// A synthetic system prompt with the same structure as the real Code-tab one, carrying each of
+// the five blocks the operator wants removed (billing header, security paragraph, pronoun
+// paragraph, model-catalog bullet, fast-mode bullet) amid text that must survive.
+const SYS_WITH_BOILERPLATE = [
+  "x-anthropic-billing-header: cc_version=9.9.9.abc; cc_entrypoint=claude-desktop;",
+  "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+  "",
+  "You are an interactive agent that helps users with software engineering tasks.",
+  "",
+  "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.",
+  "",
+  "# Harness",
+  " - Text you output outside of tool use is displayed to the user.",
+  "",
+  "Write code that reads like the surrounding code: match its comment density, naming, and idiom.",
+  "",
+  "When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.",
+  "",
+  "For actions that are hard to reverse, confirm first.",
+  "",
+  "# Environment",
+  "You have been invoked in the following environment: ",
+  " - Primary working directory: /tmp/x",
+  " - You are powered by the model gemini:gemini-3-flash-preview.",
+  " - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
+  " - Claude Code is available as a CLI in the terminal.",
+  " - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.",
+  "",
+  "# Context management",
+].join("\n");
+
+test("stripSystemBoilerplate removes exactly the five operator-unwanted blocks", () => {
+  const out = stripSystemBoilerplate(SYS_WITH_BOILERPLATE);
+  // gone
+  assert.doesNotMatch(out, /x-anthropic-billing-header/);
+  assert.doesNotMatch(out, /Assist with authorized security testing/);
+  assert.doesNotMatch(out, /When you use a pronoun for someone/);
+  assert.doesNotMatch(out, /The most recent Claude models are the Claude 5 family/);
+  assert.doesNotMatch(out, /Fast mode for Claude Code uses Claude Opus/);
+  // kept — the surrounding prompt must be intact
+  assert.match(out, /^You are Claude Code, Anthropic's official CLI/); // starts clean, no billing header
+  assert.match(out, /# Harness/);
+  assert.match(out, /Write code that reads like the surrounding code/);
+  assert.match(out, /# Environment/);
+  assert.match(out, /You are powered by the model gemini:gemini-3-flash-preview\./);
+  assert.match(out, /Claude Code is available as a CLI in the terminal\./);
+  assert.match(out, /# Context management/);
+  // no formatting scars: no 3+ newlines, and no blank line left inside the bullet list
+  assert.doesNotMatch(out, /\n{3,}/);
+  assert.doesNotMatch(out, /\n\n - /);
+});
+
+test("the boilerplate strip runs on every route, including the hint-less classifier path", () => {
+  // enable=false is the classifier path (no hints). The strip must still apply.
+  const stripped = stripSystemBoilerplate(SYS_WITH_BOILERPLATE);
+  assert.equal(withFormatHint(SYS_WITH_BOILERPLATE, false), stripped);
+  // enable=true (agent path): the stripped prompt is the prefix, hints appended after.
+  const agent = withFormatHint(SYS_WITH_BOILERPLATE, true, [{ name: "Write" }]);
+  assert.ok(agent.startsWith(stripped), "stripped prompt is the prefix of the agent-path system");
+  assert.doesNotMatch(agent, /Assist with authorized security testing/);
+  assert.match(agent, /## Output formatting for this client/);
+});
+
+test("stripSystemBoilerplate is a no-op on a prompt without the blocks, and tolerates non-strings", () => {
+  assert.equal(stripSystemBoilerplate("You are a helpful assistant.\n\n# Harness\n - do things"),
+               "You are a helpful assistant.\n\n# Harness\n - do things");
+  assert.equal(stripSystemBoilerplate(""), "");
+  assert.equal(stripSystemBoilerplate(undefined), undefined);
 });
 
 // ---------- auto-continue trigger ----------
