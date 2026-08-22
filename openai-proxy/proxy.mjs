@@ -1359,10 +1359,21 @@ const SYSTEM_STRIP_BLOCKS = [
   "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
   "\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.",
 ];
-function stripSystemBoilerplate(sys) {
+// Conditional strips: guidance for a tool group the model isn't actually given this turn is a dead
+// instruction, so it is dropped when that group is absent from the exposed tools. The proxy already
+// declines to forward these groups, so today they always strip; re-enable forwarding and the guidance
+// returns automatically. Structural regexes (not verbatim) so wording changes inside the block survive.
+const IOS_SIM_BLOCK_RE = /<simulator_tools>[\s\S]*?<\/simulator_tools>/g;
+const CHROME_LINE_RE = /\n- Claude in Chrome \(mcp__claude-in-chrome__\*\):[^\n]*/g;
+const toolNamePresent = (tools, prefix) =>
+  Array.isArray(tools) && tools.some((t) => String(t?.name || t?.function?.name || "").startsWith(prefix));
+
+function stripSystemBoilerplate(sys, tools = null) {
   if (!sys || typeof sys !== "string") return sys;
   let out = sys.replace(BILLING_HEADER_RE, "");
   for (const block of SYSTEM_STRIP_BLOCKS) out = out.split(block).join("");
+  if (!toolNamePresent(tools, "mcp__Claude_Code_iOS_Simulator__")) out = out.replace(IOS_SIM_BLOCK_RE, "");
+  if (!toolNamePresent(tools, "mcp__claude-in-chrome__")) out = out.replace(CHROME_LINE_RE, "");
   return out.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }
 
@@ -1370,7 +1381,7 @@ function stripSystemBoilerplate(sys) {
 // expected output shape, and appending these rules to its prompt is off-task. The
 // boilerplate strip runs first, so it applies even when the hints are skipped.
 const withFormatHint = (sys, enable = true, tools = null) => {
-  sys = stripSystemBoilerplate(sys);
+  sys = stripSystemBoilerplate(sys, tools);
   if (!enable) return sys;
   const parts = [];
   if (OUTPUT_FIXUPS) parts.push(buildFormatHint(tools));
