@@ -30,6 +30,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
+        recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
         approxTokens, kilo } =
   await import("./proxy.mjs");
 
@@ -490,6 +491,41 @@ test("a # userEmail block injected into the system is also stripped", () => {
   assert.doesNotMatch(out, /priv@example\.com/);
   assert.doesNotMatch(out, /# userEmail/);
   assert.match(out, /# Harness/);
+});
+
+// ---------- tool denylist (config.jsonc tools.dropGroups) ----------
+
+test("dropDisabledMcpTools removes the config-denied groups and the duplicate widget server, keeping the rest", () => {
+  assert.ok(DISABLED_TOOL_PREFIXES.includes("mcp__mcp-registry__"), "mcp-registry denylisted from config.jsonc");
+  assert.ok(DISABLED_TOOL_PREFIXES.includes("NotebookEdit"), "NotebookEdit denylisted from config.jsonc");
+  assert.ok(DISABLED_TOOL_PREFIXES.some((p) => p.startsWith("mcp__6f616b42")), "the duplicate widget server is denylisted");
+  const body = { tools: [
+    { name: "Read" },
+    { name: "NotebookEdit" },
+    { name: "mcp__6f616b42-0ed8-571e-823f-ee4aca6b7ce9__show_widget" },  // duplicate
+    { name: "mcp__visualize__show_widget" },                              // the kept copy
+    { name: "mcp__mcp-registry__search_mcp_registry" },
+  ] };
+  dropDisabledMcpTools(body);
+  assert.deepEqual(body.tools.map((t) => t.name), ["Read", "mcp__visualize__show_widget"],
+    "only the non-denylisted tools survive; the visualize copy is kept, its 6f616b42 duplicate dropped");
+});
+
+// ---------- tool-use metrics ----------
+
+test("recordToolUse tallies invocations; toolUsageSummary ranks by count and ignores junk", () => {
+  const totalBefore = toolUsageSummary().total;
+  const countOf = (name) => (toolUsageSummary().tools.find((t) => t.name === name)?.count || 0);
+  const bashBefore = countOf("ZzTestBash"), readBefore = countOf("ZzTestRead");
+  recordToolUse("ZzTestBash"); recordToolUse("ZzTestBash"); recordToolUse("ZzTestRead");
+  assert.equal(toolUsageSummary().total, totalBefore + 3, "total counts every call");
+  assert.equal(countOf("ZzTestBash"), bashBefore + 2);
+  assert.equal(countOf("ZzTestRead"), readBefore + 1);
+  const ranked = toolUsageSummary().tools;
+  for (let i = 1; i < ranked.length; i++) assert.ok(ranked[i - 1].count >= ranked[i].count, "sorted by count desc");
+  const t = toolUsageSummary().total;
+  recordToolUse(null); recordToolUse(""); recordToolUse(42);
+  assert.equal(toolUsageSummary().total, t, "null/empty/non-string names are not counted");
 });
 
 // ---------- auto-continue trigger ----------

@@ -62,6 +62,9 @@ import { formatMicros, unpricedAmong, RATE_TABLE_VERSION, RATES_SOURCE } from ".
 // names and their comments — the comments ARE the documentation for why each exists — and take
 // their values from that one resolver instead of each re-deriving its own precedence.
 const { values: CFG, sources: CFG_SOURCES } = resolveConfig();
+// The raw config.jsonc object, for STRUCTURED sections the flat KV resolver doesn't carry:
+// `systemPrompt` (prompt shaping) and `tools.dropGroups` (the tool denylist).
+const RAW_CONFIG = loadConfig();
 const OPENAI_API_KEY = CFG.OPENAI_API_KEY;
 
 // ---------- identity of this process ----------
@@ -272,6 +275,8 @@ const MAX_TOOLS_RESPONSES = CFG.OPENAI_MAX_TOOLS_RESPONSES;
 const DISABLED_TOOL_PREFIXES = [
   ...(CFG.PROXY_SEND_CHROME_TOOLS ? [] : ["mcp__claude-in-chrome"]),
   ...(CFG.PROXY_SEND_IOS_TOOLS ? [] : ["mcp__Claude_Code_iOS"]),
+  // config.jsonc tools.dropGroups: arbitrary name-prefixes (MCP groups or native tools) to never send.
+  ...((RAW_CONFIG?.tools?.dropGroups) || []).filter((p) => typeof p === "string" && p),
 ];
 // Execute Claude Code's server-side WebSearch locally (proxy runs the search) — see websearch.mjs.
 const WEB_SEARCH_ENABLED = CFG.PROXY_WEB_SEARCH;
@@ -692,6 +697,42 @@ function persistLedger() {
     usageDirty = false;
     try { saveLedger(ledger); } catch { /* non-fatal: accounting must never fail a turn */ }
   }, 3000);
+}
+
+// ---------- tool-use metrics ----------
+// A running tally of which tools the model actually CALLED, so "which tools have I used" is
+// answerable later. Counted where each tool call is emitted to the client (all four response
+// paths), debounce-persisted to tool-usage.json. GET /tools returns the ranked tally.
+const toolUsageFile = fileURLToPath(new URL(
+  process.env.PROXY_NO_LISTEN === "1" ? "./tool-usage.test-scratch.json" : "./tool-usage.json", import.meta.url));
+function loadToolUsage() {
+  try { const j = JSON.parse(fs.readFileSync(toolUsageFile, "utf8")); return { since: j.since || null, lastAt: j.lastAt || null, total: j.total || 0, byName: j.byName || {} }; }
+  catch { return { since: new Date().toISOString(), lastAt: null, total: 0, byName: {} }; }
+}
+let toolUsage = loadToolUsage();
+let toolUsageDirty = false, toolUsageTimer = null;
+function persistToolUsage() {
+  toolUsageDirty = true;
+  if (!toolUsageTimer) {
+    toolUsageTimer = setTimeout(() => {
+      toolUsageTimer = null;
+      if (!toolUsageDirty) return;
+      toolUsageDirty = false;
+      try { fs.writeFileSync(toolUsageFile, JSON.stringify(toolUsage, null, 2) + "\n"); } catch { /* metrics must never fail a turn */ }
+    }, 3000);
+    toolUsageTimer.unref?.();   // never hold the process (or the test runner) open just to flush metrics
+  }
+}
+function recordToolUse(name) {
+  if (!name || typeof name !== "string") return;
+  toolUsage.byName[name] = (toolUsage.byName[name] || 0) + 1;
+  toolUsage.total += 1;
+  toolUsage.lastAt = new Date().toISOString();
+  persistToolUsage();
+}
+function toolUsageSummary() {
+  const tools = Object.entries(toolUsage.byName).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+  return { since: toolUsage.since, lastAt: toolUsage.lastAt, total: toolUsage.total, distinct: tools.length, tools };
 }
 
 // Record one upstream request. THE unit of accounting — every call to the API goes through here,
@@ -1371,7 +1412,7 @@ export function buildPromptShaping(cfg) {
     rewrite: (sp.rewrite || []).map((x) => ({ from: compileMatcher(x.from), to: String(x.to ?? "") })),
   };
 }
-const PROMPT_SHAPING = buildPromptShaping(loadConfig());
+const PROMPT_SHAPING = buildPromptShaping(RAW_CONFIG);
 
 function stripSystemBoilerplate(sys, tools = null, shaping = PROMPT_SHAPING) {
   if (!sys || typeof sys !== "string") return sys;
@@ -1899,6 +1940,7 @@ function toAnthropic(oai, reqModel, registry) {
     // than handing the agent a call it cannot trust.
     content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: nm,
                    input: toolArgs(registry, nm, tc.function?.arguments) });
+    recordToolUse(nm);
   }
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel,
@@ -2089,6 +2131,7 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
         content_block: { type: "tool_use", id: tb.callId || rid("toolu_"), name: tb.toolName, input: {} } });
     sse(res, "content_block_delta", { type: "content_block_delta", index: aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: aIndex });
+    recordToolUse(tb.toolName);
     emittedTools++;
   }
   recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
@@ -2574,6 +2617,7 @@ function fromResponses(resp, reqModel, registry) {
         const nm = registry.originalName(item.name);
         content.push({ type: "tool_use", id: item.call_id || item.id, name: nm,
                        input: toolArgs(registry, nm, item.arguments) });
+        recordToolUse(nm);
       }
     } // reasoning items are dropped
   }
@@ -2719,6 +2763,7 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
               }
               // Usable: open the block now, fill it, and only now does the turn have a tool.
               open(j.item.id, { type: "tool_use", id: it.callId, name: it.toolName, input: {} });
+              recordToolUse(it.toolName);
               sse(res, "content_block_delta", { type: "content_block_delta", index: it.aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
               // Record the task change while the arguments are in hand (issue #7).
               if (taskState && applyTaskCall(taskState, it.toolName, pruned)) taskChanged = true;
@@ -3374,6 +3419,7 @@ const server = http.createServer(async (req, res) => {
     });
 
   if (req.method === "GET" && url === "/usage") return sendJSON(res, 200, usageSummary());
+  if (req.method === "GET" && url === "/tools") return sendJSON(res, 200, toolUsageSummary());
 
   if (req.method === "POST" && url === "/v1/messages/count_tokens") {
     // A malformed body used to parse to `{}` and be answered with input_tokens: 2 — a confident
@@ -3565,7 +3611,7 @@ const server = http.createServer(async (req, res) => {
 // Exported for the unit tests in proxy.test.mjs; set PROXY_NO_LISTEN=1 to import
 // this module without binding the port.
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
-         inTokensField, cacheWarning, recordUsage, usageSummary,
+         inTokensField, cacheWarning, recordUsage, usageSummary, recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          stripSystemBoilerplate,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,

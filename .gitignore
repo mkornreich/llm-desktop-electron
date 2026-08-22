@@ -21,6 +21,8 @@ user-data/
 openai-proxy/tools-dump.txt
 openai-proxy/usage.json
 openai-proxy/usage.test-scratch.json
+openai-proxy/tool-usage.json
+openai-proxy/tool-usage.test-scratch.json
 settings/server.log
 
 # Which proxy process is running right now: pid, instance nonce, config hash. Per-machine

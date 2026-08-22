@@ -206,6 +206,14 @@
   "tools": {
     "sendChromeTools": false,
     "sendIosTools": false,
+    // Extra tool-name PREFIXES never forwarded to the model (dropped before translation, so they cost
+    // no tokens and can't be miscalled). Works for whole MCP groups ("mcp__foo__") and native tools
+    // (exact name, e.g. "NotebookEdit"). Trims the tool-schema payload — big token + accuracy win.
+    "dropGroups": [
+      "mcp__6f616b42-0ed8-571e-823f-ee4aca6b7ce9__",  // duplicate of mcp__visualize__ (same read_me/show_widget)
+      "mcp__mcp-registry__",                           // MCP connector discovery — unused for coding
+      "NotebookEdit"                                   // Jupyter cell editing — unused
+    ],
     "webSearch": true,
     "webSearchProxy": ""
   },
