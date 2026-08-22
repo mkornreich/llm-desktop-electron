@@ -295,6 +295,25 @@ function control(s) {
     sel.onchange = () => { DRAFT[s.key] = sel.value; refreshDirty(); };
     return sel;
   }
+  if (s.type === "classifiermodel") {
+    // Dropdown for a classifier model. The proxy resolves a "<provider>:<model>" pick for classifier routes
+    // too (not only MAIN turns), so ANY available model works here: "" (= use the main model), the setting's
+    // suggestions, the full aggregated provider catalog, and EVERY installed local Ollama model as
+    // local:<name> (the catalog itself only lists thinking-capable locals). Current value is kept so a
+    // set-but-unlisted id is never dropped.
+    const cur = DRAFT[s.key] || "";
+    const labelOf = Object.fromEntries(COMPOSITE_CHOICES.map((c) => [c.id, c.label]));
+    const ids = [...new Set(["", ...(cur ? [cur] : []), ...(s.suggestions || []),
+                             ...COMPOSITE_CHOICES.map((c) => c.id), ...OLLAMA_MODELS.map((m) => "local:" + m)])];
+    const sel = document.createElement("select");
+    for (const o of ids) {
+      const op = document.createElement("option"); op.value = o;
+      op.textContent = o === "" ? "(use the main model)" : (labelOf[o] || o);
+      if (o === cur) op.selected = true; sel.append(op);
+    }
+    sel.onchange = () => { DRAFT[s.key] = sel.value; refreshDirty(); };
+    return sel;
+  }
   if (s.type === "bool") {
     const w = document.createElement("label"); w.className = "sw";
     const i = document.createElement("input"); i.type = "checkbox"; i.checked = isBoolOn(v);

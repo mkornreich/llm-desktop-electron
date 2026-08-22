@@ -407,6 +407,17 @@ test("resolvePickedProvider routes a keyless local:<model> pick to the on-device
   assert.equal(resolvePickedProvider("local:hf.co/org/model:Q4").model, "hf.co/org/model:Q4");
 });
 
+test("classifier/compaction routing: an Ollama model:tag stays on the default, a provider prefix routes", () => {
+  // The dispatch resolves a "<provider>:<model>" for classifier and un-chained-compaction routes too (not
+  // only MAIN). Safety property: an Ollama "model:tag" whose prefix is NOT a known provider must resolve to
+  // null, so the dispatch keeps it as a bare model on the DEFAULT provider instead of mis-routing it. A real
+  // provider prefix routes to that provider.
+  for (const tag of ["qwen3:1.7b", "gpt-oss:120b", "gemma4:latest"])
+    assert.equal(resolvePickedProvider(tag), null, `${tag} is an Ollama tag -> default provider, not mis-routed`);
+  const l = resolvePickedProvider("local:qwen3:0.6b");
+  assert.ok(l && l.provider.id === "local" && l.model === "qwen3:0.6b", "local: prefix routes to on-device Ollama");
+});
+
 // ---------- composite (fallback) model ----------
 
 test("parseCompositeMembers trims, drops empties, keeps order", () => {

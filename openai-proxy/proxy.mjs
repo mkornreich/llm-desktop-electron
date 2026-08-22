@@ -3394,7 +3394,22 @@ const server = http.createServer(async (req, res) => {
     const members = route === ROUTE.MAIN ? resolveComposite(reqModel)
       : (route === ROUTE.COMPACTION && OPENAI_COMPACT_MODELS) ? resolveCompactChain()
       : null;
-    const picked = members ? null : (route === ROUTE.MAIN ? resolvePickedProvider(reqModel) : null);
+    // Single-member provider + model. A MAIN turn resolves the REQUEST's "<provider>:<model>". A classifier
+    // (prefix/safety) or un-chained compaction turn resolves the CONFIGURED model's prefix the SAME way, so a
+    // verdict/summary can be pointed at ANY provider you hold a key for (e.g. a fast cloud model) instead of
+    // only the default upstream. A bare id — including an Ollama "model:tag", whose prefix is not a known
+    // provider — falls through to the default provider unchanged, so every existing setup keeps its behaviour.
+    let picked = null, singleModel = null;
+    if (!members) {
+      if (route === ROUTE.MAIN) {
+        picked = resolvePickedProvider(reqModel);
+        singleModel = picked ? picked.model : pickModel(body, route);
+      } else {
+        singleModel = pickModel(body, route);
+        const p = typeof singleModel === "string" && singleModel.includes(":") ? resolvePickedProvider(singleModel) : null;
+        if (p) { picked = p; singleModel = p.model; }
+      }
+    }
     const bootProvider = picked ? picked.provider : DEFAULT_PROVIDER;
     providerALS.enterWith(bootProvider);
     if (picked) log(`  routed to provider ${bootProvider.id} (${bootProvider.baseURL})`);
@@ -3414,7 +3429,7 @@ const server = http.createServer(async (req, res) => {
     // Obtain a working upstream — a single member for every non-composite turn (byte-for-byte today's
     // behaviour), or the ordered composite chain, trying members until one answers. Each encoder builds
     // the tool registry per member; a name collision throws there and becomes a clean error response.
-    const attempts = members || [{ provider: bootProvider, model: picked ? picked.model : pickModel(body, route) }];
+    const attempts = members || [{ provider: bootProvider, model: singleModel }];
     const got = await obtainUpstream(res, req, { body, reqModel, route, policy, isCls, sessionId, composite: !!members, attempts });
     if (!got) return;                                    // obtainUpstream already wrote a terminal error
     // Pin the WINNER for the whole stream (mirrors the old single enterWith; a no-op for the single
