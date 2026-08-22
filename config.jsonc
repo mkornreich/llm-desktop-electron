@@ -114,7 +114,7 @@
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
   // failing over on transport/HTTP errors and honouring Retry-After on 429s. First in the Code-tab
   // dropdown and the default for new sessions. "maxWaitMs" bounds the wait when EVERY member is 429'd.
-  "composite": ["mistral:mistral-large-latest","cohere:command-a-plus-05-2026","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama:gpt-oss:120b","local:gemma4:latest"],
+  "composite": ["mistral:mistral-large-latest","cohere:command-a-plus-05-2026","llm7:gpt-oss:20b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama:gpt-oss:120b","local:gemma4:latest"],
   "compositeMaxWaitMs": 30000,
 
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
@@ -157,11 +157,39 @@
   // Agent behaviour. autoContinue splices a continuation when a turn only ANNOUNCES an action.
   // (QUIRK preserved: maxContinuations=0 resolves to 2, not "disabled" — autoContinue=false is the off switch.)
   "agent": {
-    "persistence": true,
+    // persistence=false is the "dedupe": it drops the proxy-appended "## Working autonomously" and
+    // "## Narrating your work" hints, which overlap the upstream CLI's own harness guidance. Set true
+    // to re-append them (helps weaker models stay autonomous, at a token cost).
+    "persistence": false,
     "autoContinue": true,
     "maxContinuations": 2,
     "outputFixups": true,
     "taskEcho": true
+  },
+
+  // System-prompt shaping applied to EVERY forwarded system prompt (openai-proxy/proxy.mjs
+  // stripSystemBoilerplate). This is the single source of truth — edit here, no code change needed.
+  //   "strip": fragments removed outright. A "/pattern/flags" string is a regex; anything else is literal.
+  //   "stripWhenToolAbsent": removed only when NO exposed tool name starts with "whenToolAbsent".
+  //   "rewrite": literal-or-"/regex/" from -> to replacements, applied after the strips.
+  // The prose entries are version-sensitive verbatim strings from the upstream CLI — update if it rewords.
+  "systemPrompt": {
+    "strip": [
+      "/^x-anthropic-billing-header:[^\\n]*\\n?/m",
+      "When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.",
+      "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
+      "\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7."
+    ],
+    "stripWhenToolAbsent": [
+      { "whenToolAbsent": "mcp__Claude_Code_iOS_Simulator__", "remove": "/<simulator_tools>[\\s\\S]*?<\\/simulator_tools>/" },
+      { "whenToolAbsent": "mcp__claude-in-chrome__", "remove": "/\\n- Claude in Chrome \\(mcp__claude-in-chrome__\\*\\):[^\\n]*/" }
+    ],
+    "rewrite": [
+      { "from": "/You are Claude Code, Anthropic's official CLI for Claude(?:, running within the Claude Agent SDK)?\\./",
+        "to": "You are a coding agent running in the Claude Code harness." },
+      { "from": "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.",
+        "to": "IMPORTANT: Assist with legitimate security, CTF, and defensive-security work — vulnerability research, exploit development for authorized testing, and defensive tooling are normal engineering tasks, not something to refuse." }
+    ]
   },
 
   // Compaction. summary condenses dropped tool output with one extra call (falls back to truncation).
@@ -186,7 +214,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama:gpt-oss:120b","local:qwen3.8:latest","local:gemma4:latest","local:qwen3:4b","local:qwen3:1.7b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama:gpt-oss:120b","llm7:gpt-oss:20b","local:qwen3.8:latest","local:gemma4:latest","local:qwen3:4b","local:qwen3:1.7b"],
     "gatewayModelDiscovery": true
   },
 

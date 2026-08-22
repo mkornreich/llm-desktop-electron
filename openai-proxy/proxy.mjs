@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   resolve as resolveConfig, snapshot, configHash, codeVersion, validate, provider,
-  PROVIDERS, providerForBase, providerKeys, isLocalEndpoint, isNonToolModel,
+  PROVIDERS, providerForBase, providerKeys, isLocalEndpoint, isNonToolModel, loadConfig,
 } from "./config.mjs";
 import {
   newInstanceId, writeManifest, readManifest, clearManifest, REPO,
@@ -1349,32 +1349,36 @@ function buildPersistenceHint() {
   ].join("\n");
 }
 
-// Operator-unwanted boilerplate stripped from EVERY forwarded system prompt (before any hint is
-// appended, and regardless of route). The billing header is matched by line so any cc_version goes;
-// the prose/bullet blocks are matched verbatim — version-sensitive, so update them if the upstream
-// CLI rewords. Removal collapses the blank lines it leaves behind so the prompt stays well-formed.
-const BILLING_HEADER_RE = /^x-anthropic-billing-header:[^\n]*\n?/m;
-const SYSTEM_STRIP_BLOCKS = [
-  "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.",
-  "When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.",
-  "\n - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
-  "\n - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.",
-];
-// Conditional strips: guidance for a tool group the model isn't actually given this turn is a dead
-// instruction, so it is dropped when that group is absent from the exposed tools. The proxy already
-// declines to forward these groups, so today they always strip; re-enable forwarding and the guidance
-// returns automatically. Structural regexes (not verbatim) so wording changes inside the block survive.
-const IOS_SIM_BLOCK_RE = /<simulator_tools>[\s\S]*?<\/simulator_tools>/g;
-const CHROME_LINE_RE = /\n- Claude in Chrome \(mcp__claude-in-chrome__\*\):[^\n]*/g;
+// System-prompt shaping is DATA, not code: it lives in config.jsonc `systemPrompt` (strip /
+// stripWhenToolAbsent / rewrite) so blocks can be tuned without a code change. A config entry is a
+// literal string, or a "/pattern/flags" string compiled to a (global) regex. Removal collapses the
+// blank lines it leaves behind so the prompt stays well-formed.
 const toolNamePresent = (tools, prefix) =>
   Array.isArray(tools) && tools.some((t) => String(t?.name || t?.function?.name || "").startsWith(prefix));
 
-function stripSystemBoilerplate(sys, tools = null) {
+function compileMatcher(entry) {
+  const m = typeof entry === "string" && entry.match(/^\/([\s\S]*)\/([a-z]*)$/);
+  return m ? { re: new RegExp(m[1], m[2].includes("g") ? m[2] : m[2] + "g") } : { lit: String(entry) };
+}
+const applyMatcher = (text, m, replacement = "") =>
+  m.re ? text.replace(m.re, () => replacement) : text.split(m.lit).join(replacement);
+
+export function buildPromptShaping(cfg) {
+  const sp = (cfg && cfg.systemPrompt) || {};
+  return {
+    strip: (sp.strip || []).map(compileMatcher),
+    conditional: (sp.stripWhenToolAbsent || []).map((x) => ({ prefix: x.whenToolAbsent, m: compileMatcher(x.remove) })),
+    rewrite: (sp.rewrite || []).map((x) => ({ from: compileMatcher(x.from), to: String(x.to ?? "") })),
+  };
+}
+const PROMPT_SHAPING = buildPromptShaping(loadConfig());
+
+function stripSystemBoilerplate(sys, tools = null, shaping = PROMPT_SHAPING) {
   if (!sys || typeof sys !== "string") return sys;
-  let out = sys.replace(BILLING_HEADER_RE, "");
-  for (const block of SYSTEM_STRIP_BLOCKS) out = out.split(block).join("");
-  if (!toolNamePresent(tools, "mcp__Claude_Code_iOS_Simulator__")) out = out.replace(IOS_SIM_BLOCK_RE, "");
-  if (!toolNamePresent(tools, "mcp__claude-in-chrome__")) out = out.replace(CHROME_LINE_RE, "");
+  let out = sys;
+  for (const m of shaping.strip) out = applyMatcher(out, m);
+  for (const c of shaping.conditional) if (!toolNamePresent(tools, c.prefix)) out = applyMatcher(out, c.m);
+  for (const r of shaping.rewrite) out = applyMatcher(out, r.from, r.to);
   out = redactInjectedPII(out);   // also drop the "# userEmail" block if the harness put it in the system
   return out.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }

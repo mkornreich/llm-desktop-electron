@@ -17,7 +17,7 @@ process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_BASE_URL = "https://api.openai.com/v1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
-        buildPersistenceHint, withFormatHint, stripSystemBoilerplate, shouldAutoContinue, continueReason,
+        buildPersistenceHint, withFormatHint, stripSystemBoilerplate, buildPromptShaping, shouldAutoContinue, continueReason,
         workDoneThisTurn, backgroundToolUsedThisTurn, pruneToolArgs,
         emptyTurnNotice, compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE,
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
@@ -306,13 +306,14 @@ test("persistence hint keeps the carve-out for actions that need a human", () =>
   assert.match(h, /genuinely ambiguous/i);
 });
 
-test("persistence and output fixups are independent sections", () => {
-  // Both default on, so a request's system prompt carries both, and neither depends on
-  // the other being enabled.
+test("output-fixups is appended; the persistence hint is gated off (dedupe, agent.persistence=false)", () => {
+  // The builders remain independent (tested directly elsewhere), but config.jsonc ships
+  // agent.persistence=false, so withFormatHint appends the format hint and NOT the persistence one.
   const sys = withFormatHint("BASE", true, [{ name: "Write" }, { name: "TaskOutput" }]);
   assert.match(sys, /^BASE/);
   assert.match(sys, /## Output formatting for this client/);
-  assert.match(sys, /## Working autonomously/);
+  assert.doesNotMatch(sys, /## Working autonomously/, "persistence hint is deduped away");
+  assert.doesNotMatch(sys, /## Narrating your work/);
 });
 
 test("the classifier call gets neither section", () => {
@@ -352,23 +353,26 @@ const SYS_WITH_BOILERPLATE = [
   "# Context management",
 ].join("\n");
 
-test("stripSystemBoilerplate removes exactly the five operator-unwanted blocks", () => {
+test("the config-driven shaping strips four blocks, rewrites the opener, and rewrites the security line", () => {
   const out = stripSystemBoilerplate(SYS_WITH_BOILERPLATE);
-  // gone
+  // stripped
   assert.doesNotMatch(out, /x-anthropic-billing-header/);
-  assert.doesNotMatch(out, /Assist with authorized security testing/);
   assert.doesNotMatch(out, /When you use a pronoun for someone/);
   assert.doesNotMatch(out, /The most recent Claude models are the Claude 5 family/);
   assert.doesNotMatch(out, /Fast mode for Claude Code uses Claude Opus/);
-  // kept — the surrounding prompt must be intact
-  assert.match(out, /^You are Claude Code, Anthropic's official CLI/); // starts clean, no billing header
+  // rewritten (not removed): opener softened, security line kept but de-fanged
+  assert.match(out, /^You are a coding agent running in the Claude Code harness\./);
+  assert.doesNotMatch(out, /Anthropic's official CLI/);
+  assert.doesNotMatch(out, /Assist with authorized security testing/);        // old refusal-heavy wording gone
+  assert.match(out, /Assist with legitimate security, CTF, and defensive-security work/); // assist line re-added
+  // surrounding prompt intact
   assert.match(out, /# Harness/);
   assert.match(out, /Write code that reads like the surrounding code/);
   assert.match(out, /# Environment/);
   assert.match(out, /You are powered by the model gemini:gemini-3-flash-preview\./);
   assert.match(out, /Claude Code is available as a CLI in the terminal\./);
   assert.match(out, /# Context management/);
-  // no formatting scars: no 3+ newlines, and no blank line left inside the bullet list
+  // no formatting scars
   assert.doesNotMatch(out, /\n{3,}/);
   assert.doesNotMatch(out, /\n\n - /);
 });
@@ -382,6 +386,27 @@ test("the boilerplate strip runs on every route, including the hint-less classif
   assert.ok(agent.startsWith(stripped), "stripped prompt is the prefix of the agent-path system");
   assert.doesNotMatch(agent, /Assist with authorized security testing/);
   assert.match(agent, /## Output formatting for this client/);
+});
+
+test("buildPromptShaping compiles literal and /regex/ entries and drives strip/rewrite/conditional", () => {
+  const shaping = buildPromptShaping({ systemPrompt: {
+    strip: ["/^HDR:[^\\n]*\\n?/m", "REMOVE_ME"],
+    stripWhenToolAbsent: [{ whenToolAbsent: "mcp__x__", remove: "/<x>[\\s\\S]*?<\\/x>/" }],
+    rewrite: [{ from: "/OLD(?:er)?/", to: "NEW" }, { from: "lit-from", to: "lit-to" }],
+  }});
+  assert.equal(shaping.strip.length, 2);
+  assert.ok(shaping.strip[0].re instanceof RegExp, "a /.../ entry becomes a regex");
+  assert.equal(shaping.strip[1].lit, "REMOVE_ME", "a plain entry stays literal");
+  const src = "HDR: junk\nkeep REMOVE_ME here OLDer and lit-from and <x>zap</x> end";
+  // no mcp__x__ tool exposed -> the <x> block is stripped
+  const out = stripSystemBoilerplate(src, [], shaping);
+  assert.doesNotMatch(out, /HDR:/);
+  assert.doesNotMatch(out, /REMOVE_ME/);
+  assert.doesNotMatch(out, /<x>/);
+  assert.match(out, /NEW and lit-to/);        // both rewrites applied
+  // when the tool IS exposed, the conditional block survives
+  const kept = stripSystemBoilerplate(src, [{ name: "mcp__x__go" }], shaping);
+  assert.match(kept, /<x>zap<\/x>/);
 });
 
 test("stripSystemBoilerplate is a no-op on a prompt without the blocks, and tolerates non-strings", () => {
