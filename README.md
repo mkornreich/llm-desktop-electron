@@ -245,7 +245,7 @@ ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/ \
 `run.sh` is cross-platform (`uname -s`): it resolves the Electron resources dir (`dist/resources`
 on Linux, `Electron.app/Contents/Resources` on macOS), the Claude Desktop profile
 (`~/.config/Claude` vs `~/Library/Application Support/Claude`), and the `disclaimer` helper path
-per platform. See [LINUX.md](LINUX.md) for the port's design and the folded-conditional gotchas.
+per platform. See [LINUX.md](docs/LINUX.md) for the port's design and the folded-conditional gotchas.
 
 On modern Ubuntu (`kernel.apparmor_restrict_unprivileged_userns=1`) Electron's namespace sandbox is
 blocked, so it needs a **setuid-root `chrome-sandbox`** — which the downloaded Electron isn't. `run.sh`
@@ -413,11 +413,11 @@ Delete `user-data/`.
 | Document | What's in it |
 |---|---|
 | [openai-proxy/README.md](openai-proxy/README.md) | The proxy in depth: every knob, every behaviour fix and the bug that motivated it, the classifier measurements, the compaction ladder |
-| [SESSIONS.md](SESSIONS.md) | How the desktop build relates to your real Claude install: shared memory, session sync, and why grouping behaves as it does |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | How the desktop app is built: which UI is local vs. remote, the IPC bridge the remote page uses, which layers can be modified |
-| [ANTHROPIC_ENDPOINTS.md](ANTHROPIC_ENDPOINTS.md) | Every Anthropic endpoint the app calls, with payloads and what each is for |
-| [FINDINGS.md](FINDINGS.md) | Notable things in the bundle — permission modes, the extension registry, companion-hardware pairing, the auto-approved tool list |
-| [LINUX.md](LINUX.md) | The Linux port: native-module harvest, folded-conditional blockers, and what degrades off macOS |
+| [SESSIONS.md](docs/SESSIONS.md) | How the desktop build relates to your real Claude install: shared memory, session sync, and why grouping behaves as it does |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the desktop app is built: which UI is local vs. remote, the IPC bridge the remote page uses, which layers can be modified |
+| [ANTHROPIC_ENDPOINTS.md](docs/ANTHROPIC_ENDPOINTS.md) | Every Anthropic endpoint the app calls, with payloads and what each is for |
+| [FINDINGS.md](docs/FINDINGS.md) | Notable things in the bundle — permission modes, the extension registry, companion-hardware pairing, the auto-approved tool list |
+| [LINUX.md](docs/LINUX.md) | The Linux port: native-module harvest, folded-conditional blockers, and what degrades off macOS |
 
 ## Contributing back
 

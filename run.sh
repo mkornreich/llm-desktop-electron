@@ -556,7 +556,7 @@ fi
 
 # Privacy toggle — read from the .privacy dot file so it applies to BOTH launchers
 # (./run.sh and ./run-openai.sh, which execs this). See .privacy for what each lever
-# does and ANTHROPIC_ENDPOINTS.md for the traffic it suppresses.
+# does and docs/ANTHROPIC_ENDPOINTS.md for the traffic it suppresses.
 EXTRA=()
 # Telemetry gate: the config emitter (openai-proxy/config.mjs --env) sets DISABLE_TELEMETRY=1 iff
 # privacy.disableTelemetry is on in config.jsonc — which is the default. Run the suppression block on that.
