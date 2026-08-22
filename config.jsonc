@@ -12,7 +12,13 @@
 
   // Which provider backs un-picked (main) turns, the classifier, and compaction. A Code-tab pick of
   // "<provider>:<model>" still routes that turn elsewhere.
-  "defaultProvider": "ollama",
+  "defaultProvider": "freetoken",
+
+  // Which on-device engine is active. The 8GB GPU holds only ONE at a time, so this is a toggle
+  // (Settings > On-device engine): "freetoken" or "ollama". The selected engine is the one the launcher
+  // autostarts, the one an on-device defaultProvider/classifier resolves to, and the only one whose
+  // models appear in the Code-tab dropdown — the other's are hidden.
+  "onDeviceEngine": "freetoken",
 
   // Per-provider endpoint + model. "endpoint" moved here from the hardcoded registry; blank falls back
   // to the built-in default. "ollama" is the keyless on-device Ollama (its endpoint is rediscovered at
@@ -50,11 +56,13 @@
     "freetoken": {
       "endpoint": "http://127.0.0.1:1919/v1",
       "api": "chat",
-      "model": "gpt-oss-20b",
+      "model": "qwen3:1.7b",
       "claudeCodeModel": "claude-opus-4-8[1m]",
       // FreeToken on-device engine (OpenAI-compatible, loopback). engine="freetoken" -> the generic
-      // managed bring-up. modelPath is the weights dir; the served model name defaults to its basename.
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/gpt-oss-20b", "servedModelName": "gpt-oss-20b", "toolCallParser": "gpt_oss", "reasoningParser": "gpt_oss", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      // managed bring-up. modelPath is the weights dir; served model name defaults to its basename.
+      // Serves the small qwen3:1.7b so it fits the GPU alongside nothing else (the 8GB card can't hold
+      // both FreeToken and a managed Ollama — see onDeviceEngine below, which runs exactly one).
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3:1.7b", "toolCallParser": "qwen3", "reasoningParser": "qwen3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
@@ -145,9 +153,9 @@
   // safety="" means "use the main model" (measured: 57% unparseable verdicts -> avoid). prefix is the
   // low-stakes Bash-prefix detector. background is the CLI's own hint (may not reach the in-app agent).
   "classifier": {
-    "prefix": "ollama:qwen3:1.7b",
-    "safety": "ollama:qwen3:1.7b",
-    "background": "ollama:qwen3:1.7b",
+    "prefix": "freetoken:qwen3:1.7b",
+    "safety": "freetoken:qwen3:1.7b",
+    "background": "freetoken:qwen3:1.7b",
     "maxTools": 4,
     "slowMs": 20000
   },
@@ -247,7 +255,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:gpt-oss-20b","ollama:qwen3.8:latest","ollama:gemma4:latest","ollama:qwen3:4b","ollama:qwen3:1.7b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b","ollama:qwen3.8:latest","ollama:gemma4:latest","ollama:qwen3:4b","ollama:qwen3:1.7b"],
     "gatewayModelDiscovery": true
   },
 

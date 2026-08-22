@@ -22,7 +22,11 @@ const SCHEMA = [
   { group: "Provider", file: ".provider", key: "DEFAULT_PROVIDER", type: "enum",
     options: [], default: "openai",   // filled from config.jsonc providers at load (see buildProviderSchema block)
     label: "Default upstream (proxy mode)",
-    help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, local -> Local model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
+    help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, ollama -> Ollama model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
+  { group: "Provider", file: ".provider", key: "ON_DEVICE_ENGINE", type: "enum",
+    options: ["freetoken", "ollama"], default: "freetoken",
+    label: "On-device engine",
+    help: "Which local inference engine runs on the GPU — only ONE fits an 8GB card. 'freetoken' = the FreeToken engine on :1919; 'ollama' = the managed Ollama on :11435. The selected engine is the one the launcher autostarts, the one an on-device default/classifier resolves to, and the ONLY one whose models appear in the Code-tab dropdown — the other engine's models are hidden. Restart (or relaunch) to apply." },
 
   // The local (on-device) model, its own file. .ollama-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)
@@ -248,7 +252,7 @@ function readFile(f) {
 // VALUES all live in the one config.jsonc now. LOCAL_CONTEXT is special — a per-model CONTEXT_<model> the
 // picker generates from the selected model — and is handled in writeValues.
 const PATHS = {
-  PROVIDER: "mode", DEFAULT_PROVIDER: "defaultProvider",
+  PROVIDER: "mode", DEFAULT_PROVIDER: "defaultProvider", ON_DEVICE_ENGINE: "onDeviceEngine",
   LOCAL_MODEL: "providers.ollama.model", LOCAL_API: "providers.ollama.api",
   OLLAMA_AUTOSTART: "providers.ollama.managed.autostart", OLLAMA_KEEP_ALIVE: "providers.ollama.managed.keepAlive",
   OLLAMA_MANAGED_PORT: "providers.ollama.managed.managedPort",

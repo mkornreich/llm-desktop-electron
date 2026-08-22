@@ -416,7 +416,10 @@ export function resolve({ env = process.env, config, project, home, keyfile } = 
   const H = home ?? loadKV(HOME_FILE);
   const K = keyfile ?? loadKV(KEY_FILE);
   // Which provider backs the active/main turns — its sub-block feeds OPENAI_MODEL/API/BASE_URL/…
-  const dp = env.DEFAULT_PROVIDER || C.defaultProvider || "openai";
+  let dp = env.DEFAULT_PROVIDER || C.defaultProvider || "openai";
+  // On-device engine toggle: when the default is a managed on-device engine, the ACTIVE one is whichever
+  // onDeviceEngine selects, so the toggle switches the default's model/base/api. Env override still wins.
+  if (!env.DEFAULT_PROVIDER && C.onDeviceEngine && C.providers?.[dp]?.managed && C.providers?.[C.onDeviceEngine]?.managed) dp = C.onDeviceEngine;
   const values = {};
   const sources = {};
 
@@ -685,6 +688,15 @@ export function emitEnv({ env = process.env } = {}) {
   // Back-compat: a legacy provider-name mode (e.g. PROVIDER=cohere) selects proxy mode with that upstream.
   // Derived from the registry, so a new provider needs no edit here.
   if (PROVIDERS[mode]) { dp = mode; mode = "proxy"; }
+  // On-device engine toggle (mirrors resolve()): the selected managed engine drives the default
+  // provider, the classifier's provider, which engine autostarts, and which engine's models the
+  // Code-tab dropdown shows. swapEngine() re-points an on-device "<engine>:<model>" at the active one.
+  const onDev = C.onDeviceEngine;
+  if (!env.DEFAULT_PROVIDER && onDev && C.providers?.[dp]?.managed && C.providers?.[onDev]?.managed) dp = onDev;
+  const swapEngine = (val) => {
+    const i = String(val || "").indexOf(":"); const prov = i > 0 ? String(val).slice(0, i) : "";
+    return (onDev && prov !== onDev && C.providers?.[prov]?.managed && C.providers?.[onDev]?.managed) ? `${onDev}${String(val).slice(i)}` : val;
+  };
   const out = [];
   const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
   const put = (k, val) => out.push(`export ${k}=${q(val)}`);
@@ -703,8 +715,15 @@ export function emitEnv({ env = process.env } = {}) {
   putIf("DESKTOP_LOG_LEVEL", getPath(C, "diagnostics.logLevel"));
   if (getPath(C, "diagnostics.dumpTools")) put("PROXY_DUMP_TOOLS", "1");
   if (getPath(C, "diagnostics.ultracode")) put("LLMD_ULTRACODE", "1");
-  const dd = getPath(C, "picker.dropdownModels");
-  if (Array.isArray(dd) && dd.length) put("LLMD_DROPDOWN_MODELS", JSON.stringify(dd));
+  let dd = getPath(C, "picker.dropdownModels");
+  if (Array.isArray(dd) && dd.length) {
+    // Hide the DISABLED on-device engine's models — the GPU runs only the one onDeviceEngine selects.
+    if (onDev && C.providers?.[onDev]?.managed) {
+      const hidden = Object.keys(C.providers).filter((id) => C.providers[id].managed && id !== onDev);
+      dd = dd.filter((m) => !hidden.some((h) => String(m).startsWith(h + ":")));
+    }
+    put("LLMD_DROPDOWN_MODELS", JSON.stringify(dd));
+  }
   if (getPath(C, "privacy.disableTelemetry"))
     for (const k of ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "PRIVACY_DISABLE_TELEMETRY"]) put(k, "1");
   // Session sync gates (run.sh reads these). Always emit 0/1 so run.sh's ${SYNC_*:-…} never falls through
@@ -720,7 +739,11 @@ export function emitEnv({ env = process.env } = {}) {
   put("OPENAI_BASE_URL", v.OPENAI_BASE_URL);   // local: run.sh's ensure_ollama overrides with the managed port
   putIf("OPENAI_EXTRA_HEADERS", v.OPENAI_EXTRA_HEADERS);
   putIf("LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL", v.OPENAI_CLAUDE_CODE_MODEL);
-  putIf("CLAUDE_CODE_BG_CLASSIFIER_MODEL", getPath(C, "classifier.background"));
+  putIf("CLAUDE_CODE_BG_CLASSIFIER_MODEL", swapEngine(getPath(C, "classifier.background")));
+  // Classifier models as env overrides so the proxy routes prefix/safety verdicts to the ACTIVE
+  // on-device engine (config.jsonc holds the default engine's ids; the toggle swaps the provider).
+  putIf("OPENAI_CLASSIFIER_MODEL", swapEngine(getPath(C, "classifier.prefix")));
+  putIf("OPENAI_CLASSIFIER_SAFETY_MODEL", swapEngine(getPath(C, "classifier.safety")));
   put("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", getPath(C, "picker.gatewayModelDiscovery") === false ? "0" : "1");
   put("PROXY_ANTHROPIC_BASE_URL", `http://127.0.0.1:${v.PORT}`);
   const comp = getPath(C, "composite");
@@ -756,10 +779,11 @@ export function emitEnv({ env = process.env } = {}) {
   // Managed FreeToken engine: run.sh brings it up INDEPENDENTLY of the default provider (so a picked
   // freetoken:<model> works even when the default is ollama). Emitted for whichever provider declares a
   // freetoken-engine managed block.
-  for (const [, prov] of Object.entries(C.providers || {})) {
+  for (const [id, prov] of Object.entries(C.providers || {})) {
     const mg = prov && prov.managed;
     if (mg && mg.engine === "freetoken") {
-      put("FREETOKEN_AUTOSTART", mg.autostart === false ? "0" : "1");
+      // Autostart only when this is the on-device engine the toggle selected (the GPU runs just one).
+      put("FREETOKEN_AUTOSTART", ((!onDev || id === onDev) && mg.autostart !== false) ? "1" : "0");
       put("FREETOKEN_PORT", mg.port || 1919);
       putIf("FREETOKEN_MODEL_PATH", mg.modelPath);
       putIf("FREETOKEN_SERVED_MODEL", mg.servedModelName);
