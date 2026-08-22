@@ -1,0 +1,174 @@
+{
+  // ============================================================================================
+  //  llm_desktop — one config file for every mode, provider, endpoint, model, and tuning knob.
+  //  JSONC: // and /* */ comments and trailing commas are allowed. Edit by hand or via Settings
+  //  (the window preserves these comments). SECRETS ARE NOT HERE: API keys stay in .openai-key
+  //  (gitignored). Any matching environment variable still overrides the value below.
+  // ============================================================================================
+
+  // Top-level mode. "proxy" translates Anthropic <-> a non-Anthropic backend; "anthropic" is a
+  // pass-through to Anthropic's own API (every "providers"/tuning field below is then ignored).
+  "mode": "proxy",
+
+  // Which provider backs un-picked (main) turns, the classifier, and compaction. A Code-tab pick of
+  // "<provider>:<model>" still routes that turn elsewhere.
+  "defaultProvider": "local",
+
+  // Per-provider endpoint + model. "endpoint" moved here from the hardcoded registry; blank falls back
+  // to the built-in default. "local" is the keyless on-device Ollama (its endpoint is rediscovered at
+  // launch when Ollama is managed). "ollama" is the remote Ollama Cloud.
+  "providers": {
+    "openai": {
+      "endpoint": "https://api.openai.com/v1",
+      "api": "responses",
+      "model": "gpt-5.6-sol",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    },
+    "local": {
+      "endpoint": "http://127.0.0.1:11434/v1",
+      "api": "responses",
+      "model": "gemma4:latest",
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "ollama": { "autostart": true, "managedPort": 11435, "keepAlive": "30m", "flashAttention": true, "kvCacheType": "q8_0", "numParallel": 1, "contextLength": 32768 },
+      "context": { "qwen2.5:7b-instruct": 32768, "qwen3:8b": 40960, "granite4.1:8b": 65536, "gemma3:27b": 8192, "gemma4:latest": 131072 }
+    },
+    "gemini": {
+      "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api": "chat",
+      "model": "gemini-3-flash-preview",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    },
+    "cohere": {
+      "endpoint": "https://api.cohere.ai/compatibility/v1",
+      "api": "chat",
+      "model": "command-a-03-2025",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    },
+    "mistral": {
+      "endpoint": "https://api.mistral.ai/v1",
+      "api": "chat",
+      "model": "mistral-large-latest",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    },
+    "groq": {
+      "endpoint": "https://api.groq.com/openai/v1",
+      "api": "responses",
+      "model": "openai/gpt-oss-120b",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    },
+    "ollama": {
+      "endpoint": "https://ollama.com/v1",
+      "api": "responses",
+      "model": "gpt-oss:120b",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    },
+    "openrouter": {
+      "endpoint": "https://openrouter.ai/api/v1",
+      "api": "responses",
+      "model": "google/gemma-4-31b-it:free",
+      "claudeCodeModel": "claude-opus-4-8[1m]"
+    }
+  },
+
+  // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
+  // failing over on transport/HTTP errors and honouring Retry-After on 429s. First in the Code-tab
+  // dropdown and the default for new sessions. "maxWaitMs" bounds the wait when EVERY member is 429'd.
+  "composite": ["mistral:mistral-large-latest", "cohere:command-a-plus-05-2026", "gemini:gemini-3-flash-preview", "groq:openai/gpt-oss-120b", "ollama:gpt-oss:120b", "local:gemma4:latest"],
+  "compositeMaxWaitMs": 30000,
+
+  // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
+  "compact": ["groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "groq:qwen/qwen3.6-27b", "ollama:deepseek-v4-pro:preview", "ollama:gpt-oss:120b", "ollama:gpt-oss:20b", "local:gemma4:latest"],
+
+  // Classifier models. These run on the DEFAULT provider unless the value is a routable "<provider>:<model>".
+  // safety="" means "use the main model" (measured: 57% unparseable verdicts -> avoid). prefix is the
+  // low-stakes Bash-prefix detector. background is the CLI's own hint (may not reach the in-app agent).
+  "classifier": {
+    "prefix": "local:qwen3:1.7b",
+    "safety": "local:qwen3:1.7b",
+    "background": "local:qwen3:1.7b",
+    "maxTools": 4,
+    "slowMs": 20000
+  },
+
+  // Reasoning. effort is the API-wide max the proxy steps DOWN from per model. minBudget: thinking is
+  // only requested when max_output_tokens is at least this (QUIRK preserved in the resolver: an explicit
+  // 0 resolves to 2000, not the 4000 default). verbosity is OpenAI's text.verbosity (blank = omit).
+  "reasoning": {
+    "effort": "max",
+    "showThinking": true,
+    "minBudget": 4000,
+    "verbosity": "high"
+  },
+
+  // Output-token handling. defaultMaxTokens applies only when the client omits max_tokens.
+  // maxTurnOutputTokens caps the total spliced into one message (stay under the client's own 64000
+  // ceiling). continueOnTruncation resumes a turn the cap cut off. emptyRetry re-asks a blank turn.
+  "output": {
+    "defaultMaxTokens": 8192,
+    "maxOutputTokens": 32768,
+    "maxTurnOutputTokens": 56000,
+    "continueOnTruncation": true,
+    "maxTransportRetries": 2,
+    "emptyRetry": true,
+    "maxEmptyRetries": 2
+  },
+
+  // Agent behaviour. autoContinue splices a continuation when a turn only ANNOUNCES an action.
+  // (QUIRK preserved: maxContinuations=0 resolves to 2, not "disabled" — autoContinue=false is the off switch.)
+  "agent": {
+    "persistence": true,
+    "autoContinue": true,
+    "maxContinuations": 2,
+    "outputFixups": true,
+    "taskEcho": true
+  },
+
+  // Compaction. summary condenses dropped tool output with one extra call (falls back to truncation).
+  // model is the single summariser when "compact" is empty (blank -> classifier.prefix -> gpt-4.1-mini).
+  // autoCompactWindow is the client's context accounting bound (issues #14/#17).
+  "compaction": {
+    "summary": true,
+    "model": "gpt-4.1-mini",
+    "maxTextChars": 400000,
+    "autoCompactWindow": 900000
+  },
+
+  // Tool exposure to the model.
+  "tools": {
+    "sendChromeTools": false,
+    "sendIosTools": false,
+    "webSearch": true,
+    "webSearchProxy": ""
+  },
+
+  // Model picker / Code-tab dropdown. models is the id:Label list served on /v1/models; dropdownModels
+  // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
+  "picker": {
+    "models": "",
+    "dropdownModels": ["gemini:gemini-3-flash-preview", "mistral:mistral-large-latest", "ollama:gpt-oss:120b", "local:qwen3.8:latest", "local:gemma4:latest", "local:qwen3:4b", "local:qwen3:1.7b"],
+    "gatewayModelDiscovery": true
+  },
+
+  // Wire-level knobs (were environment-only before; consolidated here). Any of these still accept an env override.
+  "advanced": {
+    "port": 8123,
+    "maxTools": 128,
+    "maxToolsResponses": 0
+  },
+
+  "diagnostics": {
+    "logLevel": "warn",
+    "dumpTools": false,
+    "ultracode": true
+  },
+
+  "privacy": { "disableTelemetry": true },
+
+  "sync": {
+    "sessions": false,
+    "grouping": false
+  },
+
+  // Claude Code CLI knobs. maxOutputTokens is the per-turn output ceiling (hits "response exceeded 64000").
+  "claudeCode": { "maxOutputTokens": 64000 }
+}

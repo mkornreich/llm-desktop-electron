@@ -232,6 +232,9 @@ test("fingerprint ignores the timestamp, or every turn would look like a change"
 
 process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_API_KEY = "test-key-not-real";
+// Pin the active model so the test does not inherit the dev's config.jsonc provider selection (which
+// resolves OPENAI_MODEL from providers.<defaultProvider>.model when env leaves it unset).
+process.env.OPENAI_MODEL = "gpt-5.6-sol";
 process.env.OPENAI_API = "responses";
 // Pin the safety model via ENV so it stays distinct from the main model. The upstream below is a loopback
 // (non-OpenAI) base, and config.mjs rewrites an unset classifier/safety model to the model-in-use there

@@ -15,9 +15,10 @@ import {
   PROVIDERS, providerForBase, activeProviders, isNonToolModel,
 } from "./config.mjs";
 
-// Resolve against explicit sources so the developer's own dotfiles cannot change a result.
-const R = (env = {}, project = {}, home = {}, keyfile = {}) => resolve({ env, project, home, keyfile }).values;
-const S = (env = {}, project = {}, home = {}, keyfile = {}) => resolve({ env, project, home, keyfile }).sources;
+// Resolve against explicit sources so the developer's own dotfiles / config.jsonc cannot change a result.
+// config:{} = an empty consolidated config, so a setting falls to its `project` override or its default.
+const R = (env = {}, project = {}, home = {}, keyfile = {}) => resolve({ config: {}, env, project, home, keyfile }).values;
+const S = (env = {}, project = {}, home = {}, keyfile = {}) => resolve({ config: {}, env, project, home, keyfile }).sources;
 
 test("with nothing configured, every setting resolves to its documented default", () => {
   const v = R();
@@ -103,7 +104,7 @@ test("a setting that opts into blankOk keeps an explicitly empty value", () => {
 test("a blank safety model is legal, and warned about", () => {
   // It is the configuration measured to miss the CLI's deadline, so it must be a visible choice
   // rather than an accident: median 12.2s, p90 54s, 2 of 27 past the 60s fail-closed cliff.
-  const r = validate({ resolved: resolve({
+  const r = validate({ resolved: resolve({ config: {},
     env: { OPENAI_API_KEY: "k", OPENAI_API: "responses" },
     project: { OPENAI_CLASSIFIER_SAFETY_MODEL: "" }, home: {} }) });
   assert.deepEqual(r.errors, [], "blank is legal");
@@ -202,13 +203,13 @@ test("a named key resolves the default provider's OPENAI_API_KEY (googleApiKey f
   // one whose host matches OPENAI_BASE_URL, and its key comes from that provider's keyName.
   const env = { OPENAI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai", OPENAI_MODEL: "gemini-3-flash-preview" };
   const keyfile = { googleApiKey: "AIzaTESTKEY", cohereApiKey: "cohereTESTKEY" };
-  const { values: v, sources: s } = resolve({ env, project: {}, home: {}, keyfile });
+  const { values: v, sources: s } = resolve({ config: {}, env, project: {}, home: {}, keyfile });
   assert.equal(v.OPENAI_API_KEY, "AIzaTESTKEY");
   assert.equal(s.OPENAI_API_KEY, "keyfile:googleApiKey");
 });
 
 test("local mode does not warn about a blank safety model (main-model verdicts are the intent there)", () => {
-  const r = validate({ resolved: resolve({ env: {
+  const r = validate({ resolved: resolve({ config: {}, env: {
     OPENAI_BASE_URL: "http://127.0.0.1:11435/v1", OPENAI_MODEL: "gemma4:latest",
     OPENAI_CLASSIFIER_SAFETY_MODEL: "",
   } }) });
@@ -224,7 +225,7 @@ test("isNonToolModel flags the groq compound family (bare and prefixed), nothing
 });
 
 test("validate warns that a non-tool-calling chain member will be skipped, on both chains", () => {
-  const r = validate({ resolved: resolve({ env: {
+  const r = validate({ resolved: resolve({ config: {}, env: {
     OPENAI_API_KEY: "k",
     OPENAI_COMPOSITE_MODELS: "groq:openai/gpt-oss-120b,groq:groq/compound",
     OPENAI_COMPACT_MODELS: "groq:openai/gpt-oss-120b,groq:groq/compound-mini",
@@ -300,7 +301,7 @@ test("sources say where each value came from, so a launch override is distinguis
 
 test("the API key never appears in a snapshot, and its fingerprint is not the key", () => {
   const key = "sk-test-not-a-real-key-0123456789";
-  const snap = snapshot({ resolved: resolve({ env: { OPENAI_API_KEY: key }, project: {}, home: {} }) });
+  const snap = snapshot({ resolved: resolve({ config: {}, env: { OPENAI_API_KEY: key }, project: {}, home: {} }) });
   const text = JSON.stringify(snap);
   assert.ok(!text.includes(key), "the key must not be in the snapshot");
   assert.ok(!text.includes("sk-test"), "not even a prefix of it");
@@ -312,7 +313,7 @@ test("the API key never appears in a snapshot, and its fingerprint is not the ke
 });
 
 test("the config hash reveals nothing about the key but still changes with it", () => {
-  const base = { env: {}, project: {}, home: {} };
+  const base = { config: {}, env: {}, project: {}, home: {} };
   const a = configHash({ resolved: resolve({ ...base, env: { OPENAI_API_KEY: "key-aaa" } }) });
   const b = configHash({ resolved: resolve({ ...base, env: { OPENAI_API_KEY: "key-bbb" } }) });
   assert.notEqual(a, b, "a rotated key must invalidate the hash — otherwise the launcher " +
@@ -324,8 +325,8 @@ test("the config hash reveals nothing about the key but still changes with it", 
 // ---------- the hash ----------
 
 test("the same configuration always hashes the same, whatever order it arrived in", () => {
-  const one = resolve({ env: { OPENAI_MODEL: "m", OPENAI_VERBOSITY: "low" }, project: {}, home: {} });
-  const two = resolve({ env: { OPENAI_VERBOSITY: "low", OPENAI_MODEL: "m" }, project: {}, home: {} });
+  const one = resolve({ config: {}, env: { OPENAI_MODEL: "m", OPENAI_VERBOSITY: "low" }, project: {}, home: {} });
+  const two = resolve({ config: {}, env: { OPENAI_VERBOSITY: "low", OPENAI_MODEL: "m" }, project: {}, home: {} });
   assert.equal(configHash({ resolved: one }), configHash({ resolved: two }));
 });
 
@@ -333,8 +334,8 @@ test("a value reached from a different source hashes the same — identity, not 
   // Moving a setting from the file to the environment does not change what the proxy does, so
   // it must not trigger a restart. The hash answers "is this the same behaviour", and `source`
   // answers "where did it come from"; conflating them makes every launch look stale.
-  const viaEnv = resolve({ env: { OPENAI_MODEL: "same" }, project: {}, home: {} });
-  const viaFile = resolve({ env: {}, project: { OPENAI_MODEL: "same" }, home: {} });
+  const viaEnv = resolve({ config: {}, env: { OPENAI_MODEL: "same" }, project: {}, home: {} });
+  const viaFile = resolve({ config: {}, env: {}, project: { OPENAI_MODEL: "same" }, home: {} });
   assert.equal(configHash({ resolved: viaEnv }), configHash({ resolved: viaFile }));
 });
 
@@ -360,14 +361,14 @@ test("every behaviour-affecting setting is part of the hash", () => {
     OPENAI_COMPOSITE_MODELS: "openai:gpt-5.6-sol,local:qwen3:8b", OPENAI_COMPOSITE_MAX_WAIT_MS: "9999",
     OPENAI_COMPACT_MODELS: "groq:openai/gpt-oss-20b,local:qwen3:8b",
   };
-  const baseline = configHash({ resolved: resolve({ env: {}, project: {}, home: {} }) });
+  const baseline = configHash({ resolved: resolve({ config: {}, env: {}, project: {}, home: {} }) });
   const missing = [];
   for (const s of SETTINGS) {
-    const h = configHash({ resolved: resolve({ env: { [s.env]: alt[s.name] }, project: {}, home: {} }) });
+    const h = configHash({ resolved: resolve({ config: {}, env: { [s.env]: alt[s.name] }, project: {}, home: {} }) });
     if (h === baseline) missing.push(s.name);
   }
   // DEFAULT_TEMP has no env var, so it is checked through its own source.
-  const temp = configHash({ resolved: resolve({ env: {}, project: {}, home: { temperature: "0.9" } }) });
+  const temp = configHash({ resolved: resolve({ config: {}, env: {}, project: {}, home: { temperature: "0.9" } }) });
   if (temp === baseline) missing.push("DEFAULT_TEMP");
   assert.deepEqual(missing, [], `settings absent from the hash: ${missing.join(", ")}`);
 });
@@ -418,12 +419,12 @@ test("validation accepts the configuration this repository actually ships", () =
   const project = loadKV(fileURLToPath(new URL("../.openai-model", import.meta.url)));
   // A key is supplied so the check under test is the shipped settings, not the developer's
   // keyring. Everything else comes from the file as committed.
-  const { errors } = validate({ resolved: resolve({ env: { OPENAI_API_KEY: "k" }, project, home: {} }) });
+  const { errors } = validate({ resolved: resolve({ config: {}, env: { OPENAI_API_KEY: "k" }, project, home: {} }) });
   assert.deepEqual(errors, [], `shipped .openai-model fails validation: ${errors.join("; ")}`);
 });
 
 test("validation rejects values that parse but cannot work", () => {
-  const bad = (env) => validate({ resolved: resolve({ env: { OPENAI_API_KEY: "k", ...env }, project: {}, home: {} }) }).errors;
+  const bad = (env) => validate({ resolved: resolve({ config: {}, env: { OPENAI_API_KEY: "k", ...env }, project: {}, home: {} }) }).errors;
   assert.match(bad({ PORT: "abc" }).join(), /PORT/);
   assert.match(bad({ PORT: "70000" }).join(), /PORT/);
   assert.match(bad({ PORT: "0" }).join(), /PORT/);
@@ -432,7 +433,7 @@ test("validation rejects values that parse but cannot work", () => {
   assert.match(bad({ OPENAI_VERBOSITY: "shouty" }).join(), /VERBOSITY/);
   assert.match(bad({ OPENAI_BASE_URL: "not a url" }).join(), /BASE_URL/);
   // A missing key is an error, and it names every place it looked rather than just failing.
-  const noKey = validate({ resolved: resolve({ env: {}, project: {}, home: {}, keyfile: {} }) }).errors.join();
+  const noKey = validate({ resolved: resolve({ config: {}, env: {}, project: {}, home: {}, keyfile: {} }) }).errors.join();
   assert.match(noKey, /API key/);
   assert.match(noKey, /\.openai-model/);
   assert.match(noKey, /\.openai-key/);
@@ -442,23 +443,23 @@ test("a loopback OPENAI_BASE_URL makes the API key optional (on-device server)",
   // `local` provider points the proxy at Ollama/llama.cpp on localhost, which serve the OpenAI
   // API without a key — so a missing key must NOT be an error there.
   for (const base of ["http://127.0.0.1:11434/v1", "http://localhost:8080/v1", "http://[::1]:1234/v1"]) {
-    const errs = validate({ resolved: resolve({ env: { OPENAI_BASE_URL: base }, project: {}, home: {}, keyfile: {} }) }).errors.join();
+    const errs = validate({ resolved: resolve({ config: {}, env: { OPENAI_BASE_URL: base }, project: {}, home: {}, keyfile: {} }) }).errors.join();
     assert.doesNotMatch(errs, /API key/, `loopback ${base} must not require a key`);
   }
   // But a remote endpoint with no key is still an error.
-  const remote = validate({ resolved: resolve({ env: { OPENAI_BASE_URL: "https://api.openai.com/v1" }, project: {}, home: {}, keyfile: {} }) }).errors.join();
+  const remote = validate({ resolved: resolve({ config: {}, env: { OPENAI_BASE_URL: "https://api.openai.com/v1" }, project: {}, home: {}, keyfile: {} }) }).errors.join();
   assert.match(remote, /API key/);
 });
 
 test("validation warns about the tool-dropping configuration, without blocking it", () => {
-  const r = validate({ resolved: resolve({
+  const r = validate({ resolved: resolve({ config: {},
     env: { OPENAI_API_KEY: "k", OPENAI_MODEL: "gpt-5.6-sol", OPENAI_API: "chat" }, project: {}, home: {} }) });
   assert.deepEqual(r.errors, [], "it is legal, just usually wrong");
   assert.match(r.warnings.join(), /responses/);
 });
 
 test("validation catches the cross-field mistakes that are hard to attribute later", () => {
-  const warn = (env) => validate({ resolved: resolve({
+  const warn = (env) => validate({ resolved: resolve({ config: {},
     env: { OPENAI_API_KEY: "k", OPENAI_API: "responses", ...env }, project: {}, home: {} }) }).warnings.join(" | ");
   assert.match(warn({ OPENAI_MAX_TURN_OUTPUT_TOKENS: "1000" }), /below the single-call cap/);
   assert.match(warn({ OPENAI_DEFAULT_MAX_TOKENS: "999999" }), /clamped/);

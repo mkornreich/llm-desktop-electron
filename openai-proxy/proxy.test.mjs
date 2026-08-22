@@ -8,9 +8,13 @@ import fs from "node:fs";
 // depend on the machine. `resolve({env:{},project:{},home:{}})` is the shipped default.
 import { resolve as resolveConfig } from "./config.mjs";
 import { ROUTE, modelForRoute, policyFor, routeFor } from "./routes.mjs";
-const DEFAULTS = resolveConfig({ env: {}, project: {}, home: {}, keyfile: {} }).values;
+const DEFAULTS = resolveConfig({ config: {}, env: {}, project: {}, home: {}, keyfile: {} }).values;
 
 process.env.PROXY_NO_LISTEN = "1";
+// Pin the OpenAI default base before proxy.mjs resolves config at import: otherwise the dev's config.jsonc
+// (defaultProvider=local) would make the module's default provider non-OpenAI, flipping isOpenAI-gated
+// behaviour (prompt_cache_key, verbosity). This is exactly the pre-config.jsonc default.
+process.env.OPENAI_BASE_URL = "https://api.openai.com/v1";
 const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, findWriteTool,
         findSendFileTool, findRenderTool, findBgTools, toolResultText,
         buildPersistenceHint, withFormatHint, shouldAutoContinue, continueReason,
@@ -1179,7 +1183,7 @@ test("an explicitly blank safety model means the main model, and absent means th
     "MAIN", "blank means the main model");
   assert.equal(modelForRoute(ROUTE.SAFETY_BLOCK, { ...cfg, safetyModel: "SAFE" }), "SAFE");
   // Resolution-level: absent takes the pinned default, blank survives as blank.
-  const R = (project) => resolveConfig({ env: {}, project, home: {}, keyfile: {} }).values.OPENAI_CLASSIFIER_SAFETY_MODEL;
+  const R = (project) => resolveConfig({ config: {}, env: {}, project, home: {}, keyfile: {} }).values.OPENAI_CLASSIFIER_SAFETY_MODEL;
   assert.equal(R({}), "gpt-5.4-2026-03-05");
   assert.equal(R({ OPENAI_CLASSIFIER_SAFETY_MODEL: "" }), "");
 });

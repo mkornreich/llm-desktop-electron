@@ -29,6 +29,11 @@ import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+// The comment-preserving JSONC reader/editor is CommonJS so settings/config.js (CJS) can share it too;
+// an ESM module reaches a .cjs through createRequire.
+const require = createRequire(import.meta.url);
+const { readConfig, CONFIG_FILE } = require("./jsonc.cjs");
 
 // ---------- sources ----------
 
@@ -55,6 +60,16 @@ export const PROVIDER_FILE = fileURLToPath(new URL("../.provider", import.meta.u
 // (`apiKey=…`, gitignored). Kept out of the committed `.openai-model` and out of DBeaver's
 // `~/.dbeaver-ai-complete`, so the key has a single, private, app-local home on every platform.
 export const KEY_FILE = fileURLToPath(new URL("../.openai-key", import.meta.url));
+
+// The consolidated config lives in one JSONC file (config.jsonc). This is the single source for every
+// non-secret setting; the four KV files above are legacy (the migration removes all but .openai-key).
+// Tolerant of a missing/broken file — returns {} so a fresh checkout degrades to env-vars + defaults
+// rather than crashing the proxy (mirrors loadKV's forgiveness).
+export function loadConfig(file = CONFIG_FILE) {
+  try { return readConfig(file); } catch { return {}; }
+}
+export { CONFIG_FILE };
+const getPath = (obj, dot) => String(dot).split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
 
 // ---------- types ----------
 //
@@ -301,6 +316,19 @@ export const PROVIDERS = {
   // the specific remote hosts above win providerForBase() before this broad loopback match.
   local:      { id: "local",      label: "Local",      baseURL: (process.env.LLMD_LOCAL_BASE || "http://127.0.0.1:11434/v1"),           api: "chat",      keyNames: [],                                        isOpenAI: false, match: /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i },
 };
+// Overlay per-provider endpoints from config.jsonc onto the registry defaults, once at module load, so a
+// picked "<provider>:<model>" turn (proxy.mjs resolvePickedProvider reads PROVIDERS[id].baseURL) hits the
+// configured endpoint. `local` keeps its env-first base (LLMD_LOCAL_BASE — the launch-discovered on-device
+// Ollama), then the config endpoint, then the loopback default.
+(() => {
+  const C = loadConfig();
+  for (const [id, reg] of Object.entries(PROVIDERS)) {
+    const ep = C.providers?.[id]?.endpoint;
+    if (id === "local") reg.baseURL = process.env.LLMD_LOCAL_BASE || ep || "http://127.0.0.1:11434/v1";
+    else if (ep) reg.baseURL = ep;
+  }
+})();
+
 // Providers that serve the OpenAI Responses API (/responses). The compaction summariser calls /responses,
 // so a compaction chain member must be one of these; gemini/cohere/mistral are chat-only (their /responses
 // 404s). local = on-device Ollama, which serves /responses on recent versions. (openrouter is per-model, so
@@ -332,6 +360,48 @@ export function activeProviders(keyfile) {
   return Object.values(PROVIDERS).filter((p) => p.keyNames.some((n) => K[n]));
 }
 
+// ---------- config.jsonc path map ----------
+//
+// Where each SETTING lives in config.jsonc. A string is a dot-path; `{ field }` reads the ACTIVE
+// provider's sub-field (providers.<defaultProvider>.<field>) so OPENAI_MODEL/API/BASE_URL/… follow the
+// selected provider. OPENAI_API_KEY has no entry — it is the one secret, read only from .openai-key.
+// This map + `toRaw` are the whole bridge from the JSONC's native types to the string-based resolver;
+// everything downstream (TYPES coercion, precedence, configHash) is byte-identical to the KV-file era.
+const PATHS = {
+  OPENAI_MODEL: { field: "model" }, OPENAI_API: { field: "api" }, OPENAI_BASE_URL: { field: "endpoint" },
+  OPENAI_CLAUDE_CODE_MODEL: { field: "claudeCodeModel" }, OPENAI_EXTRA_HEADERS: { field: "extraHeaders" },
+  OPENAI_CLASSIFIER_MODEL: "classifier.prefix", OPENAI_CLASSIFIER_SAFETY_MODEL: "classifier.safety",
+  OPENAI_CLASSIFIER_MAX_TOOLS: "classifier.maxTools", OPENAI_CLASSIFIER_SLOW_MS: "classifier.slowMs",
+  OPENAI_PICKER_MODELS: "picker.models",
+  OPENAI_COMPOSITE_MODELS: "composite", OPENAI_COMPOSITE_MAX_WAIT_MS: "compositeMaxWaitMs",
+  OPENAI_COMPACT_MODELS: "compact", OPENAI_COMPACT_MODEL: "compaction.model",
+  OPENAI_COMPACT_SUMMARY: "compaction.summary", OPENAI_MAX_TEXT_CHARS: "compaction.maxTextChars",
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW: "compaction.autoCompactWindow",
+  OPENAI_DEFAULT_MAX_TOKENS: "output.defaultMaxTokens", OPENAI_MAX_OUTPUT_TOKENS: "output.maxOutputTokens",
+  OPENAI_MAX_TURN_OUTPUT_TOKENS: "output.maxTurnOutputTokens", OPENAI_CONTINUE_ON_TRUNCATION: "output.continueOnTruncation",
+  OPENAI_MAX_TRANSPORT_RETRIES: "output.maxTransportRetries", OPENAI_EMPTY_RETRY: "output.emptyRetry",
+  OPENAI_MAX_EMPTY_RETRIES: "output.maxEmptyRetries",
+  OPENAI_PERSISTENCE: "agent.persistence", OPENAI_AUTO_CONTINUE: "agent.autoContinue",
+  OPENAI_MAX_CONTINUATIONS: "agent.maxContinuations", OPENAI_OUTPUT_FIXUPS: "agent.outputFixups",
+  OPENAI_TASK_ECHO: "agent.taskEcho",
+  OPENAI_SHOW_THINKING: "reasoning.showThinking", OPENAI_REASONING_EFFORT: "reasoning.effort",
+  OPENAI_THINKING_MIN_BUDGET: "reasoning.minBudget", OPENAI_VERBOSITY: "reasoning.verbosity",
+  PROXY_SEND_CHROME_TOOLS: "tools.sendChromeTools", PROXY_SEND_IOS_TOOLS: "tools.sendIosTools",
+  PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
+  PORT: "advanced.port", OPENAI_MAX_TOOLS: "advanced.maxTools", OPENAI_MAX_TOOLS_RESPONSES: "advanced.maxToolsResponses",
+  PROXY_DUMP_TOOLS: "diagnostics.dumpTools",
+};
+
+// A config.jsonc value (native JSON type) rendered back into the KV-string form the TYPES coercions
+// expect: boolean -> "1"/"0", array -> comma-joined, number -> its digits. `undefined`/`null` mean
+// "not set" so precedence falls through, exactly like an absent KV line.
+function toRaw(v) {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "boolean") return v ? "1" : "0";
+  if (Array.isArray(v)) return v.join(",");
+  return String(v);
+}
+
 // ---------- resolution ----------
 
 // Returns { values, sources } where sources[name] is
@@ -339,22 +409,32 @@ export function activeProviders(keyfile) {
 // from. That distinction is the whole point of item 6 of the phase: a one-launch
 // `OPENAI_MODEL=x ./run.sh` override and a persisted setting look identical in the resolved
 // value and could not be told apart before.
-export function resolve({ env = process.env, project, home, keyfile } = {}) {
-  const P = project ?? loadKV(PROJECT_FILE);
+export function resolve({ env = process.env, config, project, home, keyfile } = {}) {
+  const C = config ?? loadConfig();
+  const P = project ?? {};   // explicit flat override by file-key (tests, and any precise caller); NOT a file
   const H = home ?? loadKV(HOME_FILE);
   const K = keyfile ?? loadKV(KEY_FILE);
+  // Which provider backs the active/main turns — its sub-block feeds OPENAI_MODEL/API/BASE_URL/…
+  const dp = env.DEFAULT_PROVIDER || C.defaultProvider || "openai";
   const values = {};
   const sources = {};
 
-  // First non-empty wins. Empty string counts as absent, matching `||` — EXCEPT where the
-  // setting opts into `blankOk`, for which a defined-but-empty value is a real choice and must
-  // not be confused with having said nothing.
+  // The config.jsonc value for this setting, rendered to KV-string form (or undefined when unset).
+  const cfgRaw = (s) => {
+    const p = PATHS[s.name];
+    if (!p) return undefined;
+    return toRaw(typeof p === "object" ? getPath(C, `providers.${dp}.${p.field}`) : getPath(C, p));
+  };
+
+  // First non-empty wins: env > config.jsonc > keyfile (secret only) > home > default. Empty string
+  // counts as absent, matching `||` — EXCEPT where the setting opts into `blankOk`, for which a
+  // defined-but-empty value is a real choice and must not be confused with having said nothing.
   const pick = (s) => {
     const usable = (v) => v !== undefined && (s.blankOk || v !== "");
     if (s.env && usable(env[s.env])) return [env[s.env], "env"];
-    for (const k of s.project || []) {
-      if (usable(P[k])) return [P[k], "project"];
-    }
+    for (const k of s.project || []) { if (usable(P[k])) return [P[k], "project"]; }
+    const c = cfgRaw(s);
+    if (usable(c)) return [c, "config"];
     if (s.keyfile && usable(K[s.keyfile])) return [K[s.keyfile], "keyfile"];
     if (s.home && usable(H[s.home])) return [H[s.home], "home"];
     return [undefined, "default"];
@@ -445,8 +525,9 @@ export function codeVersion() {
   return (codeVersionMemo = h.digest("hex").slice(0, 12));
 }
 
-export function provider(file = PROVIDER_FILE) {
-  return loadKV(file).PROVIDER || "proxy";
+export function provider(cfg) {
+  const C = cfg ?? loadConfig();
+  return process.env.PROVIDER || C.mode || "proxy";
 }
 
 // A secret-redacted description of what this process will do. Safe to log, to serve from
