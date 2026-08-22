@@ -86,12 +86,15 @@ test("the target effort and the model's ceiling stay separate facts", () => {
   assert.equal(effortForRoute(ROUTE.MAIN, "max"), "max");
 });
 
-test("output ceilings are the smaller of what was asked and the hard cap", () => {
-  // Already aligned before this phase: both surfaces send min(client max_tokens, OPENAI_MAX_OUTPUT_TOKENS),
-  // and validate() warns when the cumulative turn ceiling sits below the single-call cap. Nothing
-  // advertises 128K, so there is no oversized reservation to shrink — recorded rather than changed.
+test("output ceilings: agent turns take min(asked, cap); classifier routes get a thinking-safe floor", () => {
+  // Agent/compaction turns send min(client max_tokens, OPENAI_MAX_OUTPUT_TOKENS).
   assert.equal(outputCeilingForRoute(ROUTE.MAIN, 64000, 32768), 32768);
   assert.equal(outputCeilingForRoute(ROUTE.MAIN, 64, 32768), 64);
-  assert.equal(outputCeilingForRoute(ROUTE.SAFETY_BLOCK, 32, 32768), 32,
-    "a verdict's small client budget is respected, not overridden by a policy this proxy does not own");
+  // A classifier route is FLOORED: a thinking model (on-device qwen3) spends the client's tiny budget on
+  // hidden reasoning and never emits its <block> verdict — an empty, unparseable verdict. The floor gives
+  // it room to reason + answer; the model still stops early, so this is a ceiling not a target.
+  assert.equal(outputCeilingForRoute(ROUTE.SAFETY_BLOCK, 32, 32768), 1024, "floored up to the classifier minimum");
+  assert.equal(outputCeilingForRoute(ROUTE.PREFIX, 64, 32768), 1024);
+  assert.equal(outputCeilingForRoute(ROUTE.SAFETY_BLOCK, 32, 512), 512, "but never above the hard cap");
+  assert.equal(outputCeilingForRoute(ROUTE.SAFETY_BLOCK, 4096, 32768), 4096, "a larger client ask is kept");
 });

@@ -1916,7 +1916,9 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
       }
     }
   }
-  const outTokens = Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS);
+  // outputCeilingForRoute floors classifier routes so a THINKING model has room to reason AND emit its
+  // verdict (a tiny client max_tokens otherwise truncates it to an empty, unparseable verdict).
+  const outTokens = outputCeilingForRoute(route, body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS);
   // gpt-5.x and o-series require `max_completion_tokens` instead of `max_tokens`;
   // send the right one up front so every call doesn't 400-then-retry.
   const usesCompletionTokens = /^(gpt-5|o[1-9])/.test(model);
@@ -2261,7 +2263,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
       }
     }
   }
-  const out = { model, input, stream: !!body.stream, max_output_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
+  const out = { model, input, stream: !!body.stream, max_output_tokens: outputCeilingForRoute(route, body.max_tokens ?? DEFAULT_MAX_TOKENS, MAX_OUTPUT_TOKENS) };
   // Route this conversation to its own cache node rather than the bucket every session
   // shares by default. Stable for the session's life; see cacheKeyFor.
   const cacheKey = cacheKeyFor(body);

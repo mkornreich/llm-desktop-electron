@@ -241,10 +241,15 @@ export function effortForRoute(route, globalEffort) {
   return t === "global" ? globalEffort : t;
 }
 
-// A verdict is about eleven output tokens. It has never been given a smaller ceiling than an agent
-// turn, and it does not need one — the client already asks for a small max_tokens on those calls, and
-// imposing a tighter cap here could truncate a contract this proxy does not own. So: no route-specific
-// output ceiling today, and the reason recorded rather than the knob added.
+// A verdict is about eleven output tokens — but a THINKING model (e.g. an on-device qwen3 used as the
+// safety/prefix classifier) spends its budget on hidden reasoning FIRST, so the client's small
+// max_tokens (often ~64) is exhausted before the `<block>` verdict is ever emitted: an empty,
+// unparseable verdict that the CLI retries and then fails closed ("<model> is temporarily unavailable").
+// Give a classifier route a FLOOR big enough for the reasoning plus the verdict. The model still stops
+// as soon as it finishes (the floor is a ceiling, not a target), so a non-thinking classifier is
+// unaffected and latency stays at the model's own think time.
+const CLASSIFIER_MIN_OUTPUT = 1024;
 export function outputCeilingForRoute(route, requested, hardCap) {
+  if (isClassifier(route)) return Math.min(Math.max(requested || 0, CLASSIFIER_MIN_OUTPUT), hardCap);
   return Math.min(requested, hardCap);
 }
