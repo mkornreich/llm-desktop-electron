@@ -44,13 +44,14 @@ test("the memo is per model as well as per surface", () => {
 });
 
 test("a field path is remembered whole, not by its last segment", () => {
-  // A nested rejection must not suppress a top-level field that shares a name.
+  // A nested rejection drops the WHOLE dotted path (dropPath walks it — needed since groq rejects
+  // nested fields like "reasoning.summary") and must NOT touch a top-level field that shares its
+  // last segment.
   rememberUnsupported("model-path-memo", "text.verbosity", "responses");
   const out = stripUnsupported({ model: "model-path-memo", text: { verbosity: "high" }, verbosity: "x" },
                                "responses");
-  assert.equal(out.verbosity, "x", "the top-level field survives");
-  assert.deepEqual(out.text, { verbosity: "high" },
-    "and a dotted path is not applied as a top-level delete — it is recorded for a caller that can walk it");
+  assert.equal(out.verbosity, "x", "the top-level field with the same last segment survives");
+  assert.deepEqual(out.text, {}, "the whole dotted path text.verbosity is dropped, not matched by last segment");
 });
 
 // ---------- route targets, deliberately unchanged ----------

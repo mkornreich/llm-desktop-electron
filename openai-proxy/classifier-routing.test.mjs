@@ -203,6 +203,13 @@ test("startup and /health name BOTH classifier models", () => {
 process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_API_KEY = "test-key-not-real";
 process.env.OPENAI_API = "responses";
+// Pin the classifier models. A dev config.jsonc that points classifier.prefix/safety at a
+// "<provider>:<model>" pick (e.g. local:qwen3:1.7b) resolves to THAT provider's own base, routing the
+// verdict away from this test's mock upstream — so the recorder saw zero requests and every assertion
+// on `bodies` failed. Blank means "use the main model", which lands on the default provider whose base
+// this test overrides to `upstream`. Same isolation proxy.test.mjs/config.test.mjs already have.
+process.env.OPENAI_CLASSIFIER_MODEL = "";
+process.env.OPENAI_CLASSIFIER_SAFETY_MODEL = "";
 
 let handler = () => {};
 const upstream = http.createServer((req, res) => handler(req, res));

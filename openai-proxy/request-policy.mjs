@@ -61,6 +61,12 @@ export function validateMessagesRequest(body) {
     if (m.role !== "user" && m.role !== "assistant")
       throw new RequestError(`messages[${i}].role must be "user" or "assistant", got ${JSON.stringify(m.role)}`);
   }
+  // Checked LAST so a bad sibling field (model/tools/…) still reports its own error, and a lone
+  // system message (rejected above by the role check when passed raw) only reaches here empty after
+  // hoistInlineSystemMessages lifted it out — an empty conversation has nothing to answer and must
+  // not be forwarded upstream.
+  if (body.messages.length === 0)
+    throw new RequestError("messages must not be empty");
   return body;
 }
 

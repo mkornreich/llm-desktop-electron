@@ -12,6 +12,14 @@ import http from "node:http";
 process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_API_KEY = "test-key-not-real";
 process.env.OPENAI_API = "responses";
+// Pin compaction + classifier models so a dev config.jsonc that points them at "<provider>:<model>"
+// chains/picks (compact -> groq/ollama, classifier -> local:qwen3) can't route a request to a real
+// provider — which hangs this suite on retries. Plain names stay on the default provider whose base
+// this test overrides to `upstream`.
+process.env.OPENAI_COMPACT_MODELS = "gpt-4.1-mini";
+process.env.OPENAI_COMPACT_MODEL = "gpt-4.1-mini";
+process.env.OPENAI_CLASSIFIER_MODEL = "gpt-4.1-mini";
+process.env.OPENAI_CLASSIFIER_SAFETY_MODEL = "";
 
 let handler = () => {};
 const upstream = http.createServer((req, res) => handler(req, res));
@@ -80,7 +88,9 @@ test("a malformed request body is answered with a 400, not treated as empty", as
 test("valid JSON of the wrong shape is also a 400", async () => {
   for (const [body, re] of [['["a"]', /must be a JSON object/], ["null", /must be a JSON object/],
                             ['{"messages":"hi"}', /messages must be an array/],
-                            ['{"messages":[{"role":"system","content":"x"}]}', /role must be/]]) {
+                            // a lone system message is hoisted to the system field, leaving an empty
+                            // conversation — which is rejected, not forwarded upstream.
+                            ['{"messages":[{"role":"system","content":"x"}]}', /messages must not be empty/]]) {
     const r = await post("/v1/messages", body, true);
     assert.equal(r.status, 400, `${body} must be rejected`);
     assert.match(r.json.error.message, re);

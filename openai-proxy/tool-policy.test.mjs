@@ -155,6 +155,15 @@ test("the exposure fingerprint is stable, order-sensitive and visibility-sensiti
 process.env.PROXY_NO_LISTEN = "1";
 process.env.OPENAI_API_KEY = "test-key-not-real";
 process.env.OPENAI_API = "responses";
+// Pin the compaction + classifier models. A dev config.jsonc points these at cross-provider
+// "<provider>:<model>" chains/picks (compact -> groq/ollama, classifier -> local:qwen3), which resolve
+// to THOSE providers' own bases and route the request away from this test's mock upstream. A plain,
+// un-prefixed name stays on the default provider whose base this test overrides to `upstream` (empty
+// does not override these — the resolver treats it as unset and the config chain wins).
+process.env.OPENAI_COMPACT_MODELS = "gpt-4.1-mini";
+process.env.OPENAI_COMPACT_MODEL = "gpt-4.1-mini";
+process.env.OPENAI_CLASSIFIER_MODEL = "gpt-4.1-mini";
+process.env.OPENAI_CLASSIFIER_SAFETY_MODEL = "";
 
 let seen = null;
 const upstream = http.createServer((req, res) => {
