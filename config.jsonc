@@ -255,7 +255,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b","ollama:qwen3.8:latest","ollama:gemma4:latest","ollama:qwen3:4b","ollama:qwen3:1.7b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b"],
     "gatewayModelDiscovery": true
   },
 

@@ -707,6 +707,10 @@ export function emitEnv({ env = process.env } = {}) {
   put("LLMD_MODE", mode);
   put("LLMD_DEFAULT_PROVIDER", dp);
   put("LLMD_PORT", v.PORT);
+  // Which managed on-device engine is active. run.sh gates the on-device Ollama model discovery on this:
+  // it auto-populates the Code-tab picker with `local:<model>` entries only in ollama mode, never in
+  // freetoken mode (there the picker shows the curated freetoken entry, not the whole Ollama library).
+  putIf("LLMD_ON_DEVICE_ENGINE", onDev);
 
   // Both modes.
   put("CLAUDE_CODE_MAX_OUTPUT_TOKENS", env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || getPath(C, "claudeCode.maxOutputTokens") || 64000);

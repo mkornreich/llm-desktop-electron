@@ -512,7 +512,10 @@ if [ "$PROVIDER" = "proxy" ]; then
   # LLMD_LOCAL_MODELS (a JSON list) and injects them, and the proxy routes a picked "local:<model>" to
   # LLMD_LOCAL_BASE (the reachable Ollama /v1). Best-effort — empty when no Ollama or no thinking model
   # is installed — and set BEFORE ensure-proxy so a freshly-started proxy inherits the base for routing.
-  if command -v node >/dev/null 2>&1; then
+  # Gated on the on-device engine: auto-populate the whole Ollama library only in ollama mode. In
+  # freetoken mode the GPU runs FreeToken (not Ollama), so skip discovery — the picker shows only the
+  # curated freetoken entry from the dropdown list. (Unset engine = legacy = auto-populate.)
+  if [ "${LLMD_ON_DEVICE_ENGINE:-}" != "freetoken" ] && command -v node >/dev/null 2>&1; then
     LOCAL_INFO="$(node scripts/local-thinking-models.mjs 2>/dev/null || true)"
     LLMD_LOCAL_BASE_VAL="$(printf '%s\n' "$LOCAL_INFO" | sed -n '1p')"
     LLMD_LOCAL_MODELS_VAL="$(printf '%s\n' "$LOCAL_INFO" | sed -n '2p')"
