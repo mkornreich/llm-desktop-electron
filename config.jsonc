@@ -164,7 +164,11 @@
     "autoContinue": true,
     "maxContinuations": 2,
     "outputFixups": true,
-    "taskEcho": true
+    "taskEcho": true,
+    // bareMode=true sends ONLY the conversation messages upstream on a main turn — no system prompt
+    // and no tools (nor tool_choice). For probing a model raw. Classifier/compaction turns are
+    // unaffected (they need their prompt). Off by default.
+    "bareMode": false
   },
 
   // System-prompt shaping applied to EVERY forwarded system prompt (openai-proxy/proxy.mjs

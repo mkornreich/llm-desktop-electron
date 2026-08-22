@@ -325,6 +325,10 @@ const OUTPUT_FIXUPS = CFG.OPENAI_OUTPUT_FIXUPS;
 // every step. This adds an explicit persistence directive. Set OPENAI_PERSISTENCE=0 to
 // disable it independently of the output fixups.
 const PERSISTENCE = CFG.OPENAI_PERSISTENCE;
+// Bare mode. When on, a MAIN turn is forwarded with ONLY its conversation messages — no system
+// prompt and no tools (nor tool_choice) — for probing a model raw. Classifier/compaction turns keep
+// their prompt (they are meaningless without it). Set OPENAI_BARE_MODE=1 (settings toggle).
+const BARE_MODE = CFG.OPENAI_BARE_MODE;
 // Auto-continue. Prompting alone does NOT fix the stall: measured over 4 trials per arm on
 // the prompt that stalled, the model called a tool 3/4 times with the persistence
 // directive and 3/4 without — a ~25% stall rate either way, unmoved by wording. When a
@@ -1839,12 +1843,13 @@ const IMAGE_REJECTED_RE = /image|vision|multimodal|input_image|image_url/i;
 // ---------- request translation: Anthropic -> OpenAI ----------
 function toOpenAI(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
+  const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no system, no tools
   // Exposure is decided FIRST, because the system message, the tools array and tool_choice all read
   // it. Declaring it lower down put it in a temporal dead zone for the hint call — the encoder threw
   // on every request until the tests said so.
   const registry = ToolRegistry.from(body.tools);
   const exposure = exposureFor(route);
-  const exposedTools = exposure.visibility === VISIBILITY.NONE || !body.tools?.length
+  const exposedTools = bare || exposure.visibility === VISIBILITY.NONE || !body.tools?.length
     ? []
     : (() => {
         const { tools, dropped } = selectTools(body.tools, MAX_TOOLS_CHAT);
@@ -1853,7 +1858,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
       })();
   const messages = [];
   let imagesSent = 0, filesSent = 0, notesEmitted = 0;
-  if (body.system) {
+  if (!bare && body.system) {
     const sys = Array.isArray(body.system)
       ? body.system.map((b) => b.text || "").join("\n")
       : body.system;
@@ -1933,7 +1938,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   }
   // Resolved against what is ACTUALLY being sent. A tool_choice naming a tool the cap dropped is a
   // 400 whose message points at the parameter rather than at the cause, so it is cleared instead.
-  {
+  if (!bare) {
     const exposedNames = exposedTools.map((t) => t.name);
     const { choice, cleared, reason } = resolveToolChoice(body.tool_choice, exposedNames, exposure);
     if (cleared && reason) log(`  ! ${reason}`);
@@ -2196,10 +2201,11 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
 // Anthropic Messages -> Responses request
 function toResponses(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
+  const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no instructions, no tools
   // Decided first, for the same reason as in toOpenAI: instructions, tools and tool_choice all read it.
   const registry = ToolRegistry.from(body.tools);
   const exposure = exposureFor(route);
-  const exposedTools = exposure.visibility === VISIBILITY.NONE || !body.tools?.length
+  const exposedTools = bare || exposure.visibility === VISIBILITY.NONE || !body.tools?.length
     ? []
     : (() => {
         // No cap on this surface (verified up to 512), so the agent keeps every tool.
@@ -2274,7 +2280,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   // an OpenAI-proprietary Responses field — other OpenAI-compatible /responses upstreams reject it (Groq
   // 400s: `unknown field verbosity`), so gate it on the same isOpenAI flag as prompt_cache_key.
   if (VERBOSITY && policy.verbosity && curProvider().isOpenAI) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
-  if (body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, exposedTools);
+  if (!bare && body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, exposedTools);
   // Responses tools are flat: {type,name,description,parameters}
   if (exposedTools.length) {
     out.tools = exposedTools.map((t) => ({
@@ -2282,7 +2288,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
       description: t.description, parameters: t.input_schema,
     }));
   }
-  {
+  if (!bare) {
     const exposedNames = exposedTools.map((t) => t.name);
     const { choice, cleared, reason } = resolveToolChoice(body.tool_choice, exposedNames, exposure);
     if (cleared && reason) log(`  ! ${reason}`);
