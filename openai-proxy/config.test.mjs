@@ -210,8 +210,8 @@ test("buildProviders builds the registry entirely from config.jsonc providers (d
 test("activeProviders returns the registry entries whose named key is present", () => {
   assert.deepEqual(activeProviders({ googleApiKey: "a", cohereApiKey: "b" }).map((p) => p.id).sort(),
     ["cohere", "gemini"]);
-  assert.deepEqual(activeProviders({ apiKey: "a" }).map((p) => p.id).sort(),
-    ["cohere", "gemini", "groq", "mistral", "nvidia", "ollama", "openai", "openrouter"]);   // generic apiKey satisfies every provider's fallback
+  assert.deepEqual(activeProviders({ apiKey: "a" }).map((p) => p.id).sort(),   // derived so a new provider never breaks it
+    Object.values(PROVIDERS).filter((p) => p.keyNames.includes("apiKey")).map((p) => p.id).sort());   // generic apiKey satisfies every provider's fallback
   assert.deepEqual(activeProviders({}).map((p) => p.id), []);
 });
 
