@@ -22,7 +22,7 @@ const calls = [];                                       // models the upstream w
 const upstream = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
-  req.on("end", () => { let m = ""; try { m = JSON.parse(raw).model; } catch {} calls.push(m); handler(m, req, res); });
+  req.on("end", () => { let m = ""; try { m = JSON.parse(raw).model; } catch {} calls.push(m); handler(m, req, res, raw); });
 });
 await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
 process.env.OPENAI_BASE_URL = `http://127.0.0.1:${upstream.address().port}`;
@@ -44,6 +44,8 @@ function sseOk(res, text) {
   res.end();
 }
 const err = (res, code, headers = {}) => { res.writeHead(code, { "Content-Type": "application/json", ...headers }); res.end(JSON.stringify({ error: { message: `synthetic ${code}` } })); };
+// groq's dialect for a rejected field: "Field 'x' is not supported", with NO machine-readable "param".
+const errField = (res, field) => { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: { message: `Field '${field}' is not supported`, type: "invalid_request_error" } })); };
 
 async function askComposite(model = "composite") {
   const r = await fetch(`${base}/v1/messages`, {
@@ -146,4 +148,30 @@ test("a composite member that streams NO answer falls over mid-stream to the nex
   assert.equal(status, 200);
   assert.deepEqual(calls.slice(0, 2), ["m-a", "m-b"], "m-a streamed no answer -> fell over to m-b");
   assert.match(body, /answered by m-b after fallover/, "the fallover member's answer reaches the client");
+});
+
+test("a groq-style 'Field ... is not supported' 400 self-heals: the nested field is stripped and retried", async () => {
+  // The exact failure that killed the user's fallover to groq: the proxy sets reasoning.summary
+  // unconditionally, groq's /responses rejects it with a phrasing OpenAI never uses ("Field '...' is not
+  // supported", no machine-readable "param"). The recovery must recognise that dialect, strip the NESTED
+  // field (keeping reasoning.effort), and retry — instead of surfacing the 400 and abandoning the member.
+  calls.length = 0;
+  let firstBodyHadSummary = null, retryBodyHadSummary = null;
+  handler = (m, req, res, raw) => {
+    const hasSummary = raw.includes('"summary"');
+    if (calls.length === 1) { firstBodyHadSummary = hasSummary; return errField(res, "reasoning.summary"); }
+    if (calls.length === 2) retryBodyHadSummary = hasSummary;
+    return sseOk(res, "answered after stripping reasoning.summary");
+  };
+  const r = await fetch(`${base}/v1/messages`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    // max_tokens >= THINKING_MIN_BUDGET (4000) so the MAIN turn actually carries reasoning.summary.
+    body: JSON.stringify({ model: "solo-default", max_tokens: 8000, stream: true, messages: [{ role: "user", content: "what is two plus two?" }] }),
+  });
+  const body = await r.text();
+  assert.equal(r.status, 200);
+  assert.equal(firstBodyHadSummary, true, "the first attempt really did send reasoning.summary");
+  assert.equal(retryBodyHadSummary, false, "the retry dropped ONLY reasoning.summary");
+  assert.deepEqual(calls, ["solo-default", "solo-default"], "one 400, then a self-healed retry — no member abandoned");
+  assert.match(body, /answered after stripping reasoning\.summary/, "the recovered answer reaches the client");
 });

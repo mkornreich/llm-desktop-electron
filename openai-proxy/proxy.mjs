@@ -375,11 +375,31 @@ function rememberUnsupported(model, param, surface = "?") {
     log(`  ! remembering that ${model} on ${surface} rejects '${param}' — it will not be sent again on that surface`);
   }
 }
+// Immutably delete a possibly-nested dot-path (`reasoning.summary`), cloning each object along the way
+// so the caller's payload is never mutated. A leaf whose parent is missing is a no-op. Nested support
+// matters because upstreams reject nested fields by path (groq: "Field 'reasoning.summary' ...").
+function dropPath(obj, path) {
+  const segs = String(path).split(".").filter(Boolean);
+  if (!segs.length || obj == null || typeof obj !== "object") return obj;
+  const [head, ...rest] = segs;
+  if (!rest.length) { const out = { ...obj }; delete out[head]; return out; }
+  if (obj[head] == null || typeof obj[head] !== "object") return obj;
+  return { ...obj, [head]: dropPath(obj[head], rest.join(".")) };
+}
+const hasPath = (obj, path) => {
+  let cur = obj;
+  for (const s of String(path).split(".").filter(Boolean)) {
+    if (cur == null || typeof cur !== "object" || !(s in cur)) return false;
+    cur = cur[s];
+  }
+  return true;
+};
+
 function stripUnsupported(payload, surface = "?") {
   const bad = unsupportedByModel.get(capKey(surface, payload?.model));
   if (!bad || bad.size === 0) return payload;
-  const out = { ...payload };
-  for (const p of bad) delete out[p];
+  let out = payload;
+  for (const p of bad) out = dropPath(out, p);
   return out;
 }
 
@@ -2166,10 +2186,11 @@ function toResponses(body, model, route = routeForRequest(body)) {
 async function callResponses(payload, isClassifier = false, sessionId = null) {
   const f = isClassifier ? classifierFetch : fetch;
   let accepted = payload;                        // updated by each fallback that gets used
-  const doFetch = (b) => { accepted = b; return f(`${curProvider().baseURL}/responses`, { method: "POST", headers: upstreamHeaders(), body: JSON.stringify(stripUnsupported(b)) }); };
+  const doFetch = (b) => { accepted = b; return f(`${curProvider().baseURL}/responses`, { method: "POST", headers: upstreamHeaders(), body: JSON.stringify(stripUnsupported(b, "responses")) }); };
   let res = await doFetch(payload);
   if (res.status === 400) {
     const txt = await res.clone().text();
+    let m;   // captures the rejected field name across the unsupported-parameter dialects below
     const cap = txt.match(/at most (\d+)/);
     if (cap && payload.max_output_tokens != null) res = await doFetch({ ...payload, max_output_tokens: Math.min(payload.max_output_tokens, parseInt(cap[1], 10)) });
     // A model without vision rejects the image parts; keep the question, lose the picture.
@@ -2177,18 +2198,24 @@ async function callResponses(payload, isClassifier = false, sessionId = null) {
       log(`  ! ${payload.model} rejected the image(s) — retrying with them removed`);
       res = await doFetch(stripImages(payload));
     }
-    // Same generic unsupported-parameter recovery as the chat surface above.
-    else if (/unsupported_parameter|Unsupported parameter/i.test(txt) && /"param":\s*"([^"]+)"/.test(txt)) {
-      const bad = txt.match(/"param":\s*"([^"]+)"/)[1];
+    // Drop a single rejected field, then retry. Two upstream dialects name the same thing:
+    //   OpenAI-compatible: "Unsupported parameter: 'x'"   with a machine-readable {"param":"x"}
+    //   groq:              "Field 'reasoning.summary' is not supported"   (no param key; path may be nested)
+    // A field that carries meaning (tools, instructions, a structured-output contract) is never dropped —
+    // continuing without it would change what was asked. Cosmetic/routing metadata (reasoning.summary,
+    // include, prompt_cache_key, …) is fair game. The retry sends the stripped body directly, and
+    // rememberUnsupported makes stripUnsupported drop it on every later call for this (surface, model).
+    else if ((m = (/unsupported_parameter|Unsupported parameter/i.test(txt) && txt.match(/"param":\s*"([^"]+)"/))
+                  || txt.match(/Field '([^']+)' is not supported/i))) {
+      const bad = m[1];
       // Same rule as the chat surface: a field that carries meaning is never dropped.
       if (!isDroppableParam(bad)) {
         log(`  !! ${payload.model} rejected '${bad}', which carries meaning — NOT dropping it. ` +
             `Continuing without it would change what was asked for. The upstream error stands.`);
-      } else if (payload[bad] !== undefined) {
+      } else if (hasPath(payload, bad)) {
         rememberUnsupported(payload.model, bad, "responses");
-        const { [bad]: _dropped, ...rest } = payload;
         log(`  ! ${payload.model} rejected '${bad}' — dropped it and retried`);
-        res = await doFetch(rest);
+        res = await doFetch(dropPath(payload, bad));
       }
     }
     // Context window exceeded -> compact the conversation and retry (issue #4).
