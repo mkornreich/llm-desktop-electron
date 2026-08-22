@@ -403,7 +403,7 @@ test("resolvePickedProvider routes a keyless local:<model> pick to the on-device
   assert.ok(l, "local: pick must resolve without a key");
   assert.equal(l.provider.id, "local");
   assert.equal(l.provider.auth, "local");
-  assert.equal(l.provider.api, "chat");
+  assert.ok(["chat", "responses"].includes(l.provider.api), "local surface is config-driven (providers.local.api)");
   assert.equal(l.provider.isOpenAI, false);
   assert.equal(l.model, "qwen3:8b");
   assert.match(l.provider.baseURL, /\/v1$/);   // an Ollama /v1 base (LLMD_LOCAL_BASE, or the loopback default)

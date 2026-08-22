@@ -338,10 +338,11 @@ async function handle(req, res) {
     if (url.pathname === "/api/composite-choices" && req.method === "GET") {
       const sug = (key) => (config.SCHEMA.find((s) => s.key === key) || {}).suggestions || [];
       const configured = (providerId) => { const v = config.providerModel(providerId); return v ? [v] : []; };
-      // ?responses=1 -> only providers that serve /responses (the compaction summariser calls it). Mirrors
-      // config.mjs RESPONSES_PROVIDER_IDS (kept in sync by hand — server.js is CommonJS, can't import the ESM).
+      // ?responses=1 -> only providers that serve /responses (the compaction summariser calls it). Derived
+      // from each provider's `responses` capability in config.jsonc (no hardcoded list).
       const respOnly = url.searchParams.get("responses") === "1";
-      const RESPONSES_PROVIDERS = new Set(["openai", "groq", "ollama", "local"]);
+      const providers = config.readConfig().providers || {};
+      const RESPONSES_PROVIDERS = new Set(Object.keys(providers).filter((id) => providers[id].responses));
       // Models that cannot do tool calling never appear as a selectable member. Mirrors config.mjs
       // NON_TOOL_MODEL_RES / isNonToolModel verbatim (server.js is CommonJS, can't import that ESM module).
       const NON_TOOL_MODEL_RES = [/(^|[:/])compound(-mini)?$/i];
@@ -354,13 +355,10 @@ async function handle(req, res) {
         if (seen.has(id)) return; seen.add(id);
         choices.push({ id, label: `${provider}: ${model}`, provider });
       };
-      for (const m of [...sug("OPENAI_MODEL"), ...configured("openai")]) add("openai", m);
-      for (const m of [...sug("GEMINI_MODEL"), ...configured("gemini")]) add("gemini", m);
-      for (const m of [...sug("COHERE_MODEL"), ...configured("cohere")]) add("cohere", m);
-      for (const m of [...sug("MISTRAL_MODEL"), ...configured("mistral")]) add("mistral", m);
-      for (const m of [...sug("GROQ_MODEL"), ...configured("groq")]) add("groq", m);
-      for (const m of [...sug("OLLAMA_MODEL"), ...configured("ollama")]) add("ollama", m);
-      for (const m of configured("openrouter")) add("openrouter", m);
+      // Every provider defined in config.jsonc: its schema suggestions + its configured model. No hardcoded list.
+      for (const id of Object.keys(providers)) {
+        for (const m of [...sug(`${id.toUpperCase()}_MODEL`), ...configured(id)]) add(id, m);
+      }
       // Local Ollama thinking models (live) — same discovery as /api/ollama-models.
       try {
         const localVals = config.localModelValues();

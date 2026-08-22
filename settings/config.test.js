@@ -106,13 +106,22 @@ test("every GUI setting maps to a live path in config.jsonc, and the key knobs a
     assert.ok(exposed.has(p), `${p} must be exposed in the GUI (PATHS)`);
 });
 
-test("the provider enum is proxy|anthropic with a default-upstream selector", () => {
+test("provider groups + DEFAULT_PROVIDER options are generated from config.jsonc (no hardcoding)", () => {
   const prov = SCHEMA.find((s) => s.key === "PROVIDER");
-  assert.deepEqual(prov.options, ["proxy", "anthropic"], "the five non-anthropic modes merged into proxy");
+  assert.deepEqual(prov.options, ["proxy", "anthropic"], "the mode is proxy|anthropic");
+  const ids = Object.keys(jsonc.readConfig().providers);
   const dp = SCHEMA.find((s) => s.key === "DEFAULT_PROVIDER");
-  assert.ok(dp, "DEFAULT_PROVIDER must be exposed");
-  assert.equal(dp.file, ".provider");
-  assert.deepEqual(dp.options, ["openai", "local", "openrouter", "cohere", "gemini", "mistral", "groq", "ollama"]);
+  assert.ok(dp && dp.file === ".provider");
+  assert.deepEqual(dp.options.slice().sort(), ids.slice().sort(), "DEFAULT_PROVIDER options ARE the config.jsonc providers");
+  // Every provider except the structurally-special openai/local has a generated "<Label> model" group.
+  for (const id of ids) {
+    if (id === "openai" || id === "local") continue;
+    const U = id.toUpperCase();
+    assert.ok(SCHEMA.find((s) => s.key === `${U}_MODEL` && s.path === `providers.${id}.model` && s.provider === id), `${id} MODEL entry generated`);
+    assert.ok(SCHEMA.find((s) => s.key === `${U}_API` && s.path === `providers.${id}.api`), `${id} API entry generated`);
+  }
+  // NVIDIA was added via config.jsonc ONLY (no per-provider code) — its presence proves the data-driven path.
+  assert.ok(ids.includes("nvidia") && SCHEMA.find((s) => s.key === "NVIDIA_MODEL"), "a config.jsonc-only provider surfaces in the GUI");
 });
 
 test("every schema entry is well formed", () => {

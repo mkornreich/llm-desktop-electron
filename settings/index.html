@@ -148,20 +148,14 @@ function refreshDirty() {
 // Everything persisted in .openai-model is read only in proxy mode: run.sh exports those
 // CLAUDE_CODE_* keys only for the proxy path, and several hold OpenAI model ids that Anthropic
 // would reject outright. .provider, .privacy and .sync apply either way.
-const OPENAI_ONLY = (s) => s.file === ".openai-model";
-const LOCAL_ONLY = (s) => s.file === ".local-model";
-const OPENROUTER_ONLY = (s) => s.file === ".openrouter-model";
-const COHERE_ONLY = (s) => s.file === ".cohere-model";
-const GEMINI_ONLY = (s) => s.file === ".gemini-model";
-const MISTRAL_ONLY = (s) => s.file === ".mistral-model";
-const GROQ_ONLY = (s) => s.file === ".groq-model";
-const OLLAMACLOUD_ONLY = (s) => s.file === ".ollama-model";
-// Only anthropic mode makes proxy-side settings inert — the agent then talks to Claude directly and none
-// of the proxy config is read. In proxy mode NOTHING is dimmed: every provider's model group is shown
-// active, because each provider is usable per-turn from the Code-tab dropdown regardless of which one is
-// the DEFAULT_PROVIDER (that field only picks a provider's model for when it IS the default upstream).
-const isInert = (s) => DRAFT.PROVIDER === "anthropic"
-  && (OPENAI_ONLY(s) || LOCAL_ONLY(s) || OPENROUTER_ONLY(s) || COHERE_ONLY(s) || GEMINI_ONLY(s) || MISTRAL_ONLY(s) || GROQ_ONLY(s) || OLLAMACLOUD_ONLY(s));
+// Settings that apply in BOTH provider modes: the mode selector, privacy, sync, and diagnostics. Everything
+// else feeds the proxy (every provider's model group + all the tuning/classifier/compaction settings).
+const ALWAYS_APPLIES = new Set([".provider", ".privacy", ".sync", ".diagnostics"]);
+// Only anthropic mode makes the proxy-side settings inert — the agent then talks to Claude directly and none
+// of the proxy config is read. Derived from the setting's file, so a NEW provider's group (".<id>-model")
+// dims automatically. In proxy mode NOTHING is dimmed: every provider's model group is shown active, because
+// each is usable per-turn from the Code-tab dropdown regardless of which is the DEFAULT_PROVIDER.
+const isInert = (s) => DRAFT.PROVIDER === "anthropic" && !!s.file && !ALWAYS_APPLIES.has(s.file);
 
 function control(s) {
   const v = DRAFT[s.key];

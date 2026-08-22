@@ -22,7 +22,11 @@
       "endpoint": "https://api.openai.com/v1",
       "api": "responses",
       "model": "gpt-5.6-sol",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "OpenAI",
+      "keyNames": ["openaiApiKey","apiKey"],
+      "isOpenAI": true,
+      "responses": true
     },
     "local": {
       "endpoint": "http://127.0.0.1:11434/v1",
@@ -30,44 +34,80 @@
       "model": "gemma4:latest",
       "claudeCodeModel": "claude-opus-4-8[1m]",
       "ollama": { "autostart": true, "managedPort": 11435, "keepAlive": "30m", "flashAttention": true, "kvCacheType": "q8_0", "numParallel": 1, "contextLength": 32768 },
-      "context": { "qwen2.5:7b-instruct": 32768, "qwen3:8b": 40960, "granite4.1:8b": 65536, "gemma3:27b": 8192, "gemma4:latest": 131072 }
+      "context": { "qwen2.5:7b-instruct": 32768, "qwen3:8b": 40960, "granite4.1:8b": 65536, "gemma3:27b": 8192, "gemma4:latest": 131072 },
+      "label": "Local",
+      "keyNames": [],
+      "isOpenAI": false,
+      "responses": true,
+      "loopback": true
     },
     "gemini": {
       "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
       "api": "chat",
       "model": "gemini-3-flash-preview",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "Gemini",
+      "keyNames": ["googleApiKey","geminiApiKey","apiKey"],
+      "isOpenAI": false,
+      "responses": false
     },
     "cohere": {
       "endpoint": "https://api.cohere.ai/compatibility/v1",
       "api": "chat",
       "model": "command-a-03-2025",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "Cohere",
+      "keyNames": ["cohereApiKey","apiKey"],
+      "isOpenAI": false,
+      "responses": false,
+      "match": "api\\.cohere\\.(ai|com)"
     },
     "mistral": {
       "endpoint": "https://api.mistral.ai/v1",
       "api": "chat",
       "model": "mistral-large-latest",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "Mistral",
+      "keyNames": ["mistralApiKey","apiKey"],
+      "isOpenAI": false,
+      "responses": false
     },
     "groq": {
       "endpoint": "https://api.groq.com/openai/v1",
       "api": "responses",
       "model": "openai/gpt-oss-120b",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "Groq",
+      "keyNames": ["groqApiKey","grokApiKey","apiKey"],
+      "isOpenAI": false,
+      "responses": true
     },
     "ollama": {
       "endpoint": "https://ollama.com/v1",
       "api": "responses",
       "model": "gpt-oss:120b",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "Ollama Cloud",
+      "keyNames": ["ollamaApiKey","apiKey"],
+      "isOpenAI": false,
+      "responses": true
     },
     "openrouter": {
       "endpoint": "https://openrouter.ai/api/v1",
       "api": "responses",
       "model": "google/gemma-4-31b-it:free",
-      "claudeCodeModel": "claude-opus-4-8[1m]"
-    }
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "OpenRouter",
+      "keyNames": ["openrouterApiKey","apiKey"],
+      "isOpenAI": false,
+      "responses": false
+    },
+    "nvidia": {"endpoint":"https://integrate.api.nvidia.com/v1","api":"chat","model":"nvidia/llama-3.3-nemotron-super-49b-v1.5","claudeCodeModel":"claude-opus-4-8[1m]",
+  "label": "NVIDIA",
+  "keyNames": ["nvidiaApiKey","apiKey"],
+  "isOpenAI": false,
+  "responses": false},
+    
   },
 
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,

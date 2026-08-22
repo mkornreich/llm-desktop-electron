@@ -154,9 +154,11 @@ case "$PROVIDER" in
   proxy|anthropic) ;;
   *) echo "[run] unknown PROVIDER='$PROVIDER' (expected proxy|anthropic)"; exit 1 ;;
 esac
-case "$DEFAULT_PROVIDER" in
-  openai|local|openrouter|cohere|gemini|mistral|groq|ollama) ;;
-  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected openai|local|openrouter|cohere|gemini|mistral|groq|ollama)"; exit 1 ;;
+# Valid upstreams come from the provider registry (config.mjs --providers), so a new provider needs no edit here.
+VALID_PROVIDERS="$(node openai-proxy/config.mjs --providers 2>/dev/null)"
+case " ${VALID_PROVIDERS} " in
+  *" ${DEFAULT_PROVIDER} "*) ;;
+  *) echo "[run] unknown DEFAULT_PROVIDER='$DEFAULT_PROVIDER' (expected one of: ${VALID_PROVIDERS})"; exit 1 ;;
 esac
 if [ "$PROVIDER" = "proxy" ]; then
   echo "[run] provider: proxy (default upstream: $DEFAULT_PROVIDER)"

@@ -287,53 +287,47 @@ export function servesOpenAiDefaults(url) {
   return /^https?:\/\/api\.openai\.com(:|\/|$)/i.test(url || "");
 }
 
-// ---------- provider registry ----------
+// ---------- provider registry (BUILT from config.jsonc) ----------
 //
-// The OpenAI-compatible upstreams the proxy can target. Historically the proxy is single-provider
-// (one OPENAI_BASE_URL/OPENAI_API_KEY per process); this table is what lets it ALSO recognize other
-// providers — to resolve the default provider's key from a provider-named line in .openai-key, and
-// (in proxy.mjs) to aggregate each active key's models and route a picked model to its own upstream.
-//   keyNames: field names looked up in .openai-key, in order (a provider is "active" when one exists)
-//   match:    recognizes an OPENAI_BASE_URL as belonging to this provider
-export const PROVIDERS = {
-  openai:     { id: "openai",     label: "OpenAI",     baseURL: "https://api.openai.com/v1",                               api: "responses", keyNames: ["openaiApiKey", "apiKey"],                isOpenAI: true,  match: /^https?:\/\/api\.openai\.com\b/i },
-  gemini:     { id: "gemini",     label: "Gemini",     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", api: "chat",      keyNames: ["googleApiKey", "geminiApiKey", "apiKey"], isOpenAI: false, match: /generativelanguage\.googleapis\.com/i },
-  cohere:     { id: "cohere",     label: "Cohere",     baseURL: "https://api.cohere.ai/compatibility/v1",                  api: "chat",      keyNames: ["cohereApiKey", "apiKey"],                isOpenAI: false, match: /api\.cohere\.(ai|com)/i },
-  openrouter: { id: "openrouter", label: "OpenRouter", baseURL: "https://openrouter.ai/api/v1",                            api: "chat",      keyNames: ["openrouterApiKey", "apiKey"],            isOpenAI: false, match: /openrouter\.ai/i },
-  mistral:    { id: "mistral",    label: "Mistral",    baseURL: "https://api.mistral.ai/v1",                                api: "chat",      keyNames: ["mistralApiKey", "apiKey"],               isOpenAI: false, match: /api\.mistral\.ai/i },
-  // Groq (fast LPU inference — NOT xAI's Grok). OpenAI-compatible; it serves BOTH /chat/completions and
-  // /responses, so default to responses (no 128-tool cap, reasoning). keyNames accept groqApiKey and the
-  // easy-to-mistype grokApiKey. isOpenAI:false so OpenAI-only fields (prompt_cache_key) are not sent.
-  groq:       { id: "groq",       label: "Groq",       baseURL: "https://api.groq.com/openai/v1",                          api: "responses", keyNames: ["groqApiKey", "grokApiKey", "apiKey"],    isOpenAI: false, match: /api\.groq\.com/i },
-  // Ollama Cloud (ollama.com) — REMOTE, keyed hosted models (gpt-oss, deepseek, qwen3.5, kimi, …). Distinct
-  // from the keyless on-device `local` provider below. Serves both /chat/completions and /responses, so
-  // defaults to responses. keyNames: ollamaApiKey. (`local` matches loopback; this matches ollama.com.)
-  ollama:     { id: "ollama",     label: "Ollama Cloud", baseURL: "https://ollama.com/v1",                                  api: "responses", keyNames: ["ollamaApiKey", "apiKey"],                 isOpenAI: false, match: /ollama\.com/i },
-  // On-device Ollama (or any loopback OpenAI-compatible server). KEYLESS — its keyNames are empty,
-  // so it never appears in activeProviders and is never advertised by /v1/models; a `local:<model>`
-  // pick is special-cased in proxy.mjs (resolvePickedProvider) to route here with no key. baseURL is
-  // the reachable Ollama /v1, which run.sh discovers and exports as LLMD_LOCAL_BASE. Listed LAST so
-  // the specific remote hosts above win providerForBase() before this broad loopback match.
-  local:      { id: "local",      label: "Local",      baseURL: (process.env.LLMD_LOCAL_BASE || "http://127.0.0.1:11434/v1"),           api: "chat",      keyNames: [],                                        isOpenAI: false, match: /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i },
-};
-// Overlay per-provider endpoints from config.jsonc onto the registry defaults, once at module load, so a
-// picked "<provider>:<model>" turn (proxy.mjs resolvePickedProvider reads PROVIDERS[id].baseURL) hits the
-// configured endpoint. `local` keeps its env-first base (LLMD_LOCAL_BASE — the launch-discovered on-device
-// Ollama), then the config endpoint, then the loopback default.
-(() => {
-  const C = loadConfig();
-  for (const [id, reg] of Object.entries(PROVIDERS)) {
-    const ep = C.providers?.[id]?.endpoint;
-    if (id === "local") reg.baseURL = process.env.LLMD_LOCAL_BASE || ep || "http://127.0.0.1:11434/v1";
-    else if (ep) reg.baseURL = ep;
+// The OpenAI-compatible upstreams the proxy can target — defined ENTIRELY in config.jsonc `providers`
+// (endpoint, api, keyNames, capabilities). Adding a provider = adding one `providers.<id>` block; nothing
+// here is hardcoded per-provider. Historically single-provider (one OPENAI_BASE_URL/OPENAI_API_KEY); this
+// registry is what also lets the proxy recognize other providers — resolve the default provider's key from a
+// provider-named line in .openai-key, and (in proxy.mjs) aggregate each active key's models and route a
+// picked "<provider>:<model>" to its own upstream. Fields per config.jsonc `providers.<id>`:
+//   label      display name          keyNames  .openai-key field names, in order ("active" when one is present)
+//   endpoint   OpenAI-compatible /v1  isOpenAI  send OpenAI-only fields (prompt_cache_key/verbosity)?
+//   api        default surface        responses serves /responses? (compaction members must; also true if api="responses")
+//   loopback   keyless on-device (local): matches any loopback host, base rediscovered at launch (LLMD_LOCAL_BASE)
+//   match      OPTIONAL regex string overriding the endpoint-host matcher (rarely needed)
+const LOOPBACK_RE = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i;
+function hostMatcher(endpoint) {
+  let host = "";
+  try { host = new URL(endpoint).host; } catch { /* unparseable -> never matches */ }
+  return host ? new RegExp(host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") : /(?!)/;
+}
+export function buildProviders(config = loadConfig()) {
+  const out = {};
+  for (const [id, p] of Object.entries(config.providers || {})) {
+    const baseURL = id === "local"
+      ? (process.env.LLMD_LOCAL_BASE || p.endpoint || "http://127.0.0.1:11434/v1")
+      : (p.endpoint || "");
+    out[id] = {
+      id, label: p.label || id, baseURL,
+      api: p.api || "chat",
+      keyNames: Array.isArray(p.keyNames) ? p.keyNames : [],
+      isOpenAI: !!p.isOpenAI,
+      responses: !!p.responses,   // /responses CAPABILITY (explicit) — distinct from the default `api` surface
+      match: p.match ? new RegExp(p.match, "i") : (p.loopback ? LOOPBACK_RE : hostMatcher(baseURL)),
+    };
   }
-})();
+  return out;
+}
+export const PROVIDERS = buildProviders();
 
-// Providers that serve the OpenAI Responses API (/responses). The compaction summariser calls /responses,
-// so a compaction chain member must be one of these; gemini/cohere/mistral are chat-only (their /responses
-// 404s). local = on-device Ollama, which serves /responses on recent versions. (openrouter is per-model, so
-// left out to be safe.) Used by validate() and mirrored by the settings picker's responses-only filter.
-export const RESPONSES_PROVIDER_IDS = new Set(["openai", "groq", "ollama", "local"]);
+// Providers that serve the OpenAI Responses API (/responses) — a compaction-chain member must be one, and
+// the settings picker's responses-only filter mirrors this. Derived from each provider's `responses` flag.
+export const RESPONSES_PROVIDER_IDS = new Set(Object.values(PROVIDERS).filter((p) => p.responses).map((p) => p.id));
 // Models that CANNOT do tool calling, so they must never serve an agent turn, sit in a fallback chain, or
 // be offered as a selectable model. groq's "compound" systems are agentic pipelines that reject a `tools`
 // array outright ("tool calling is not supported with this model"), and an agent turn always carries tools —
@@ -682,7 +676,8 @@ export function emitEnv({ env = process.env } = {}) {
   let mode = env.PROVIDER || C.mode || "proxy";
   let dp = env.DEFAULT_PROVIDER || C.defaultProvider || "openai";
   // Back-compat: a legacy provider-name mode (e.g. PROVIDER=cohere) selects proxy mode with that upstream.
-  if (["openai", "local", "openrouter", "cohere", "gemini", "mistral", "groq", "ollama"].includes(mode)) { dp = mode; mode = "proxy"; }
+  // Derived from the registry, so a new provider needs no edit here.
+  if (PROVIDERS[mode]) { dp = mode; mode = "proxy"; }
   const out = [];
   const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
   const put = (k, val) => out.push(`export ${k}=${q(val)}`);
@@ -761,6 +756,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
   else if (arg === "--code-version") process.stdout.write(codeVersion() + "\n");
   else if (arg === "--provider") process.stdout.write(provider() + "\n");
   else if (arg === "--env") process.stdout.write(emitEnv());
+  else if (arg === "--providers") process.stdout.write(Object.keys(PROVIDERS).join(" ") + "\n");
   else if (arg === "--validate") {
     const { errors, warnings } = validate();
     for (const w of warnings) process.stdout.write(`warning: ${w}\n`);

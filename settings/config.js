@@ -20,7 +20,7 @@ const SCHEMA = [
     label: "Model backing the agent",
     help: "anthropic = the agent calls Anthropic directly with Claude (stock behaviour). proxy = route the agent through the local translation proxy (Anthropic Messages in, OpenAI out) to whichever upstream you choose below — OpenAI, an on-device Ollama, OpenRouter, Cohere or Gemini. A single turn can also run on any provider you hold a key for by picking a <provider>:<model> from the Code-tab model dropdown. Only the agent is affected; the chat window is always remote claude.ai." },
   { group: "Provider", file: ".provider", key: "DEFAULT_PROVIDER", type: "enum",
-    options: ["openai", "local", "openrouter", "cohere", "gemini", "mistral", "groq", "ollama"], default: "openai",
+    options: [], default: "openai",   // filled from config.jsonc providers at load (see buildProviderSchema block)
     label: "Default upstream (proxy mode)",
     help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, local -> Local model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
 
@@ -49,84 +49,6 @@ const SCHEMA = [
   { group: "Local model", file: ".local-model", key: "OLLAMA_MANAGED_PORT", type: "int",
     default: "11435", label: "Managed Ollama port",
     help: "The side port run.sh runs its own Ollama on, kept off the system Ollama's 11434 so the two never fight over a bound port." },
-
-  // OpenRouter, its own file. Like .local-model it reuses OPENAI_MODEL/OPENAI_API, so these carry a
-  // distinct `key` plus a `fileKey` (the line written to .openrouter-model). The sk-or- key lives in
-  // .openai-key (gitignored), not here. OPENAI_EXTRA_HEADERS is a documented .openrouter-model line,
-  // not a GUI field.
-  { group: "OpenRouter model", file: ".openrouter-model", key: "OPENROUTER_MODEL", fileKey: "OPENAI_MODEL",
-    type: "openrouter", default: "poolside/laguna-s-2.1:free", placeholder: "vendor/model[:free]",
-    label: "OpenRouter model",
-    help: "Any OpenRouter model id that supports tool calling (the agent is tool calls end to end). The dropdown lists tool-capable models from openrouter.ai and flags the free (:free) ones. Free models are limited to 20 req/min and 50 req/day (1000/day with >= $10 credit) and need data-sharing enabled at openrouter.ai/settings/privacy. Put your sk-or- key in .openai-key." },
-  { group: "OpenRouter model", file: ".openrouter-model", key: "OPENROUTER_API", fileKey: "OPENAI_API",
-    type: "enum", options: ["chat", "responses"], default: "chat",
-    label: "API surface",
-    help: "chat = /chat/completions (broadest OpenRouter model support; caps tools at 128 — the app sends ~93, so it fits). responses = /responses (stateless; OpenRouter supports it per-model and it sends every tool, avoiding the 128 cap). Leave as chat unless your model needs responses." },
-
-  // Cohere, its own file. Same OPENAI_MODEL/OPENAI_API reuse as the OpenRouter group; the Cohere key
-  // lives in .openai-key (gitignored). Cohere's compatibility API is Chat Completions only, and its
-  // model list is not a public catalog, so the model is a text field (not a live picker).
-  { group: "Cohere model", file: ".cohere-model", key: "COHERE_MODEL", fileKey: "OPENAI_MODEL",
-    type: "text", default: "command-a-03-2025", placeholder: "command-a-03-2025",
-    suggestions: ["command-a-03-2025", "command-a-plus-05-2026", "command-r-plus-08-2024", "command-r7b-12-2024"],
-    label: "Cohere model",
-    help: "Any Cohere model id that supports tool calling (the agent is tool calls end to end) — e.g. command-a-03-2025 (default), command-a-plus-05-2026, command-r-plus-08-2024. Put your Cohere key in .openai-key. Trial keys are rate-limited (~20 req/min plus a monthly cap); a production key is recommended for agentic use." },
-  { group: "Cohere model", file: ".cohere-model", key: "COHERE_API", fileKey: "OPENAI_API",
-    type: "enum", options: ["chat"], default: "chat",
-    label: "API surface",
-    help: "Cohere's OpenAI-compatible endpoint speaks Chat Completions only (no /responses), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
-
-  // Gemini, its own file. Same OPENAI_MODEL/OPENAI_API reuse as the Cohere group; the Gemini key lives
-  // in .openai-key (gitignored). Gemini's compatibility API is Chat Completions only, and its model
-  // list is fetched per-key rather than a public catalog, so the model is a text field (no live picker).
-  { group: "Gemini model", file: ".gemini-model", key: "GEMINI_MODEL", fileKey: "OPENAI_MODEL",
-    type: "text", default: "gemini-3-flash-preview", placeholder: "gemini-3-flash-preview",
-    suggestions: ["gemini-3-flash-preview", "gemini-3.6-flash", "gemini-flash-latest", "gemini-3.1-pro-preview"],
-    label: "Gemini model",
-    help: "Any Gemini model id that supports tool calling (the agent is tool calls end to end) — e.g. gemini-3-flash-preview (default), gemini-3.6-flash, gemini-flash-latest. gemini-2.5-flash is retired for new keys. Put your Gemini (AI Studio) key in .openai-key. Free-tier keys are rate-limited and popular models can return transient 'high demand' errors." },
-  { group: "Gemini model", file: ".gemini-model", key: "GEMINI_API", fileKey: "OPENAI_API",
-    type: "enum", options: ["chat"], default: "chat",
-    label: "API surface",
-    help: "Gemini's OpenAI-compatible endpoint speaks Chat Completions only (/responses returns 404), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
-
-  // Mistral, its own file. Same OPENAI_MODEL/OPENAI_API reuse as the Cohere/Gemini groups; the Mistral key
-  // lives in .openai-key (mistralApiKey=). Mistral's OpenAI-compatible surface is Chat Completions only
-  // (/responses 404s), and its model list is fetched per-key, so the model is a text field with suggestions.
-  { group: "Mistral model", file: ".mistral-model", key: "MISTRAL_MODEL", fileKey: "OPENAI_MODEL",
-    type: "text", default: "mistral-large-latest", placeholder: "mistral-large-latest",
-    suggestions: ["mistral-large-latest", "mistral-medium-latest", "devstral-medium-latest", "codestral-latest", "magistral-medium-latest"],
-    label: "Mistral model",
-    help: "Any Mistral model id that supports tool calling (the agent is tool calls end to end) — e.g. mistral-large-latest (default), mistral-medium-latest, devstral-medium-latest (agentic coding), codestral-latest, magistral-medium-latest (reasoning). Put your Mistral key in .openai-key as mistralApiKey=." },
-  { group: "Mistral model", file: ".mistral-model", key: "MISTRAL_API", fileKey: "OPENAI_API",
-    type: "enum", options: ["chat"], default: "chat",
-    label: "API surface",
-    help: "Mistral's OpenAI-compatible endpoint speaks Chat Completions only (/responses 404s), so this is fixed at chat. Chat caps tools at 128 — the app sends ~93, so it fits." },
-
-  // Groq (fast LPU inference — NOT xAI's Grok). Same OPENAI_MODEL/OPENAI_API reuse; key lives in
-  // .openai-key (groqApiKey=). Groq serves BOTH /chat/completions and /responses, so the API surface is a
-  // real choice — default to responses (no 128-tool cap, reasoning). Model ids can contain a "/".
-  { group: "Groq model", file: ".groq-model", key: "GROQ_MODEL", fileKey: "OPENAI_MODEL",
-    type: "text", default: "openai/gpt-oss-120b", placeholder: "openai/gpt-oss-120b",
-    suggestions: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
-    label: "Groq model",
-    help: "Any Groq model id that supports tool calling (the agent is tool calls end to end) — e.g. openai/gpt-oss-120b (default), openai/gpt-oss-20b, qwen/qwen3.6-27b, groq/compound (agentic). Put your Groq key in .openai-key as groqApiKey=. Full list: GET https://api.groq.com/openai/v1/models. (This is Groq the inference cloud, not xAI's Grok.)" },
-  { group: "Groq model", file: ".groq-model", key: "GROQ_API", fileKey: "OPENAI_API",
-    type: "enum", options: ["responses", "chat"], default: "responses",
-    label: "API surface",
-    help: "Groq serves both. responses = /responses (no tool cap, reasoning) — recommended. chat = /chat/completions (caps tools at 128; the app sends ~93, so it fits). Leave as responses unless a model needs chat." },
-
-  // Ollama Cloud (ollama.com) — REMOTE hosted models, keyed; DISTINCT from the on-device "Local model"
-  // group above (which is keyless, 127.0.0.1). Key lives in .openai-key as ollamaApiKey=. Serves both
-  // surfaces, so the API surface is a choice — default responses.
-  { group: "Ollama Cloud model", file: ".ollama-model", key: "OLLAMA_MODEL", fileKey: "OPENAI_MODEL",
-    type: "text", default: "gpt-oss:120b", placeholder: "gpt-oss:120b",
-    suggestions: ["gpt-oss:120b", "gpt-oss:20b", "qwen3.5:397b", "deepseek-v4-pro:preview", "kimi-k3"],
-    label: "Ollama Cloud model",
-    help: "A model hosted on Ollama Cloud (ollama.com) — e.g. gpt-oss:120b (default), qwen3.5:397b, deepseek-v4-pro:preview, kimi-k3. Put your Ollama key in .openai-key as ollamaApiKey=. This is the REMOTE cloud service, not your on-device Ollama (that's the Local model group). Full list: GET https://ollama.com/v1/models with your key." },
-  { group: "Ollama Cloud model", file: ".ollama-model", key: "OLLAMA_API", fileKey: "OPENAI_API",
-    type: "enum", options: ["responses", "chat"], default: "responses",
-    label: "API surface",
-    help: "Ollama Cloud serves both. responses = /responses (no tool cap, reasoning) — recommended. chat = /chat/completions (128-tool cap). Leave as responses unless a model needs chat." },
 
   { group: "OpenAI model", file: ".openai-model", key: "OPENAI_MODEL", type: "text",
     default: "gpt-5.6-sol", placeholder: "gpt-5.6-sol",
@@ -327,13 +249,8 @@ const PATHS = {
   LOCAL_MODEL: "providers.local.model", LOCAL_API: "providers.local.api",
   OLLAMA_AUTOSTART: "providers.local.ollama.autostart", OLLAMA_KEEP_ALIVE: "providers.local.ollama.keepAlive",
   OLLAMA_MANAGED_PORT: "providers.local.ollama.managedPort",
-  OPENROUTER_MODEL: "providers.openrouter.model", OPENROUTER_API: "providers.openrouter.api",
-  COHERE_MODEL: "providers.cohere.model", COHERE_API: "providers.cohere.api",
-  GEMINI_MODEL: "providers.gemini.model", GEMINI_API: "providers.gemini.api",
-  MISTRAL_MODEL: "providers.mistral.model", MISTRAL_API: "providers.mistral.api",
-  GROQ_MODEL: "providers.groq.model", GROQ_API: "providers.groq.api",
-  OLLAMA_MODEL: "providers.ollama.model", OLLAMA_API: "providers.ollama.api",
   OPENAI_MODEL: "providers.openai.model", OPENAI_API: "providers.openai.api",
+  // Every other provider's <ID>_MODEL / <ID>_API path is generated from config.jsonc below (buildProviderSchema).
   OPENAI_CLAUDE_CODE_MODEL: "providers.openai.claudeCodeModel",
   OPENAI_CLASSIFIER_MODEL: "classifier.prefix", OPENAI_CLASSIFIER_SAFETY_MODEL: "classifier.safety",
   OPENAI_CLASSIFIER_MAX_TOOLS: "classifier.maxTools", OPENAI_CLASSIFIER_SLOW_MS: "classifier.slowMs",
@@ -358,6 +275,43 @@ const PATHS = {
 };
 const getPath = (o, dot) => String(dot).split(".").reduce((x, k) => (x == null ? undefined : x[k]), o);
 const isArrayType = (t) => t === "composite";   // composite/compact/dropdown are JSON arrays; every other type is a scalar
+
+// ---- provider model groups, GENERATED from config.jsonc (once, at load) ----
+// Every provider EXCEPT openai (its model/api live in the shared "OpenAI model" group) and local (extra
+// Ollama fields) gets a uniform "<label> model" group — a MODEL + an API-surface field — plus its PATHS
+// entries. So adding a `providers.<id>` block to config.jsonc surfaces the provider in the Settings window
+// with NO code change here. The `file` label (".<id>-model") drives the anthropic-mode dimming in index.html.
+function buildProviderSchema() {
+  const provs = jsonc.readConfig().providers || {};
+  const out = [];
+  for (const [id, p] of Object.entries(provs)) {
+    if (id === "openai" || id === "local") continue;              // structurally special, kept static above
+    const U = id.toUpperCase(), label = p.label || id, key0 = (p.keyNames || [])[0] || "apiKey";
+    out.push({
+      group: `${label} model`, file: `.${id}-model`, provider: id, key: `${U}_MODEL`, path: `providers.${id}.model`,
+      type: "text", default: p.model || "", placeholder: p.model || "", suggestions: Array.isArray(p.suggestions) ? p.suggestions : [],
+      label: `${label} model`,
+      help: `A tool-capable ${label} model id (agent turns are tool calls end to end). Put your key in .openai-key as ${key0}=. Full list: GET ${p.endpoint || ""}/models with your key.`,
+    });
+    out.push({
+      group: `${label} model`, file: `.${id}-model`, provider: id, key: `${U}_API`, path: `providers.${id}.api`,
+      type: "enum", options: p.responses ? ["responses", "chat"] : ["chat"], default: p.api || "chat",
+      label: "API surface",
+      help: p.responses ? `${label} serves both. responses = /responses (no tool cap, reasoning). chat = /chat/completions (128-tool cap).` : `${label} serves /chat/completions only.`,
+    });
+    PATHS[`${U}_MODEL`] = `providers.${id}.model`;
+    PATHS[`${U}_API`] = `providers.${id}.api`;
+  }
+  return out;
+}
+{
+  // Splice the generated groups in just before the "OpenAI model" group (their historical position), and
+  // make the DEFAULT_PROVIDER dropdown list exactly the configured providers.
+  const at = SCHEMA.findIndex((s) => s.group === "OpenAI model");
+  SCHEMA.splice(at < 0 ? SCHEMA.length : at, 0, ...buildProviderSchema());
+  const dp = SCHEMA.find((s) => s.key === "DEFAULT_PROVIDER");
+  if (dp) dp.options = Object.keys(jsonc.readConfig().providers || {});
+}
 
 // JSONC native value -> the string form the GUI widgets use (bool -> "1"/"0", array -> comma-joined).
 function toGui(v, type) {

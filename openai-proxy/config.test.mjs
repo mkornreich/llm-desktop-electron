@@ -12,7 +12,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   SETTINGS, resolve, snapshot, configHash, keyFingerprint, codeVersion, validate, loadKV,
-  PROVIDERS, providerForBase, activeProviders, isNonToolModel,
+  PROVIDERS, providerForBase, activeProviders, isNonToolModel, buildProviders,
 } from "./config.mjs";
 
 // Resolve against explicit sources so the developer's own dotfiles / config.jsonc cannot change a result.
@@ -190,11 +190,28 @@ test("providerForBase recognizes each provider's host", () => {
   assert.equal(providerForBase("http://localhost:11434/v1")?.id, "local");
 });
 
+test("buildProviders builds the registry entirely from config.jsonc providers (data-driven)", () => {
+  const P = buildProviders({ providers: {
+    acme: { endpoint: "https://api.acme.ai/v1", api: "chat", keyNames: ["acmeApiKey", "apiKey"], responses: false, label: "Acme" },
+    fast: { endpoint: "https://api.fast.io/v1", api: "responses", keyNames: ["fastKey"], responses: true },
+    box:  { endpoint: "http://127.0.0.1:9000/v1", api: "chat", keyNames: [], loopback: true },
+  } });
+  assert.equal(P.acme.label, "Acme");
+  assert.equal(P.acme.baseURL, "https://api.acme.ai/v1");
+  assert.deepEqual(P.acme.keyNames, ["acmeApiKey", "apiKey"]);
+  assert.equal(P.acme.responses, false);
+  assert.ok(P.acme.match.test("https://api.acme.ai/v1"), "match recognises its own endpoint host");
+  assert.ok(!P.acme.match.test("https://api.other.ai/v1"), "and only its host");
+  assert.equal(P.fast.responses, true);          // /responses CAPABILITY is the explicit flag
+  assert.equal(P.fast.label, "fast");            // label defaults to the id
+  assert.ok(P.box.match.test("http://127.0.0.1:9000/v1"), "loopback provider matches any loopback host");
+});
+
 test("activeProviders returns the registry entries whose named key is present", () => {
   assert.deepEqual(activeProviders({ googleApiKey: "a", cohereApiKey: "b" }).map((p) => p.id).sort(),
     ["cohere", "gemini"]);
   assert.deepEqual(activeProviders({ apiKey: "a" }).map((p) => p.id).sort(),
-    ["cohere", "gemini", "groq", "mistral", "ollama", "openai", "openrouter"]);   // generic apiKey satisfies every provider's fallback
+    ["cohere", "gemini", "groq", "mistral", "nvidia", "ollama", "openai", "openrouter"]);   // generic apiKey satisfies every provider's fallback
   assert.deepEqual(activeProviders({}).map((p) => p.id), []);
 });
 
