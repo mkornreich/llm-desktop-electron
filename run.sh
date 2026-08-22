@@ -142,16 +142,14 @@ fi
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
 # The bundle patches read PROXY_ANTHROPIC_BASE_URL, so leaving it unset restores the
 # app's own Anthropic host — nothing needs un-patching for anthropic mode.
-PROVIDER="${PROVIDER:-$(sed -n 's/^PROVIDER=//p' .provider 2>/dev/null | head -1)}"
-PROVIDER="${PROVIDER:-proxy}"
-DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-$(sed -n 's/^DEFAULT_PROVIDER=//p' .provider 2>/dev/null | head -1)}"
-# Back-compat: the five non-anthropic modes were merged into one `proxy` mode with a configurable
-# DEFAULT_PROVIDER. An old PROVIDER value (in .provider, or `PROVIDER=cohere ./run.sh`) still works —
-# it selects proxy mode with that provider as the default upstream.
-case "$PROVIDER" in
-  openai|local|openrouter|cohere|gemini|mistral|groq|ollama) DEFAULT_PROVIDER="$PROVIDER"; PROVIDER="proxy" ;;
-esac
-DEFAULT_PROVIDER="${DEFAULT_PROVIDER:-openai}"
+# Every non-secret setting now lives in one config.jsonc. The resolver's `--env` emits the shell exports
+# that used to be ~370 lines of per-provider sed/grep below — mode, default upstream, and every
+# OPENAI_*/OLLAMA_*/CLAUDE_CODE_*/LLMD_* var. Env overrides still win (PROVIDER=… / OPENAI_MODEL=… ./run.sh),
+# and it applies the same back-compat (a legacy PROVIDER=cohere selects proxy mode with that upstream). The
+# legacy dotfile reads that remain further down are harmless fallbacks that self-neutralise once the files go.
+eval "$(node openai-proxy/config.mjs --env)" || { echo "[run] config error — run: node openai-proxy/config.mjs --validate"; exit 1; }
+PROVIDER="$LLMD_MODE"
+DEFAULT_PROVIDER="$LLMD_DEFAULT_PROVIDER"
 case "$PROVIDER" in
   proxy|anthropic) ;;
   *) echo "[run] unknown PROVIDER='$PROVIDER' (expected proxy|anthropic)"; exit 1 ;;
@@ -299,7 +297,7 @@ unload_managed_ollama() {
 }
 
 if [ "$PROVIDER" = "proxy" ]; then
-  PORT="${PORT:-8123}"
+  PORT="${PORT:-${LLMD_PORT:-8123}}"
   PROXY_URL="http://127.0.0.1:${PORT}"
 
   # `local` provider: the SAME translation proxy, pointed at an on-device OpenAI-compatible
@@ -544,12 +542,14 @@ if [ "$PROVIDER" = "proxy" ]; then
   # claude-* identity Desktop selected and gives bundled/cache Claude Code this supported
   # [1m] identity instead. Claude Code then sends claude-opus-4-8 on the wire, which the
   # proxy continues to map to OPENAI_MODEL.
-  OPENAI_CLAUDE_CODE_MODEL=$(sed -n 's/^OPENAI_CLAUDE_CODE_MODEL=//p' "$CONF" 2>/dev/null | head -1)
-  if [ -z "${OPENAI_CLAUDE_CODE_MODEL:-}" ]; then
-    echo "[run] missing OPENAI_CLAUDE_CODE_MODEL in $CONF"
+  # The Claude Code internal identity is providers.<defaultProvider>.claudeCodeModel in config.jsonc, emitted
+  # above as LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL. Keep a legacy $CONF fallback for the transition.
+  LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL="${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL:-$(sed -n 's/^OPENAI_CLAUDE_CODE_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
+  if [ -z "${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL:-}" ]; then
+    echo "[run] missing claudeCodeModel for '$DEFAULT_PROVIDER' in config.jsonc (providers.$DEFAULT_PROVIDER.claudeCodeModel)"
     exit 1
   fi
-  export LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL="$OPENAI_CLAUDE_CODE_MODEL"
+  export LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL
   echo "[run] Claude Code internal model: ${LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL} (${DEFAULT_PROVIDER} upstream)"
   # Other proxy-mode agent settings (classifier model, gateway model discovery, context cap).
   while IFS='=' read -r k v; do

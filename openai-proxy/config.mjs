@@ -669,6 +669,83 @@ export function validate(opts = {}) {
   return { errors, warnings };
 }
 
+// ---------- env emitter (for run.sh) ----------
+//
+// The STATIC config->env mapping that used to be ~400 lines of bash provider branching. run.sh evals
+// this, then layers on ONLY the genuinely-dynamic bits it cannot precompute: managed-Ollama discovery
+// (which overrides OPENAI_BASE_URL / LLMD_LOCAL_BASE), the live local thinking-model list, and the app
+// launch. An env var already set still wins (the resolver honoured it), so `OPENAI_MODEL=x ./run.sh`
+// one-launch overrides keep working. Emits shell-safe single-quoted `export` lines.
+export function emitEnv({ env = process.env } = {}) {
+  const C = loadConfig();
+  const { values: v } = resolve({ env });
+  let mode = env.PROVIDER || C.mode || "proxy";
+  let dp = env.DEFAULT_PROVIDER || C.defaultProvider || "openai";
+  // Back-compat: a legacy provider-name mode (e.g. PROVIDER=cohere) selects proxy mode with that upstream.
+  if (["openai", "local", "openrouter", "cohere", "gemini", "mistral", "groq", "ollama"].includes(mode)) { dp = mode; mode = "proxy"; }
+  const out = [];
+  const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+  const put = (k, val) => out.push(`export ${k}=${q(val)}`);
+  const putIf = (k, val) => { if (val !== undefined && val !== null && val !== "") put(k, val); };
+  const has = (p) => { const x = getPath(C, p); return x !== undefined && x !== null && x !== ""; };
+
+  // Helper vars run.sh branches on (which provider, which mode, which port).
+  put("LLMD_MODE", mode);
+  put("LLMD_DEFAULT_PROVIDER", dp);
+  put("LLMD_PORT", v.PORT);
+
+  // Both modes.
+  put("CLAUDE_CODE_MAX_OUTPUT_TOKENS", env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || getPath(C, "claudeCode.maxOutputTokens") || 64000);
+  put("CLAUDE_CODE_EFFORT_LEVEL", env.CLAUDE_CODE_EFFORT_LEVEL || "max");
+  put("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT || "1");
+  putIf("DESKTOP_LOG_LEVEL", getPath(C, "diagnostics.logLevel"));
+  if (getPath(C, "diagnostics.dumpTools")) put("PROXY_DUMP_TOOLS", "1");
+  if (getPath(C, "diagnostics.ultracode")) put("LLMD_ULTRACODE", "1");
+  const dd = getPath(C, "picker.dropdownModels");
+  if (Array.isArray(dd) && dd.length) put("LLMD_DROPDOWN_MODELS", JSON.stringify(dd));
+  if (getPath(C, "privacy.disableTelemetry"))
+    for (const k of ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "PRIVACY_DISABLE_TELEMETRY"]) put(k, "1");
+
+  if (mode === "anthropic") return out.join("\n") + "\n";   // proxy-only vars omitted; run.sh unsets any inherited
+
+  // Proxy mode: the active provider's wire config + the Code-tab/CLI wiring.
+  put("OPENAI_MODEL", v.OPENAI_MODEL);
+  put("OPENAI_API", v.OPENAI_API);
+  put("OPENAI_BASE_URL", v.OPENAI_BASE_URL);   // local: run.sh's ensure_ollama overrides with the managed port
+  putIf("OPENAI_EXTRA_HEADERS", v.OPENAI_EXTRA_HEADERS);
+  putIf("LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL", v.OPENAI_CLAUDE_CODE_MODEL);
+  putIf("CLAUDE_CODE_BG_CLASSIFIER_MODEL", getPath(C, "classifier.background"));
+  put("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", getPath(C, "picker.gatewayModelDiscovery") === false ? "0" : "1");
+  put("PROXY_ANTHROPIC_BASE_URL", `http://127.0.0.1:${v.PORT}`);
+  const comp = getPath(C, "composite");
+  if (Array.isArray(comp) && comp.length) put("LLMD_COMPOSITE", JSON.stringify({ members: comp }));
+
+  // Compaction window: local derives it per-model (explicit compactWindow, else 3/4 of the model's context);
+  // every other provider uses the flat configured value.
+  let acw = v.CLAUDE_CODE_AUTO_COMPACT_WINDOW || undefined;
+  if (dp === "local") {
+    const m = v.OPENAI_MODEL;
+    const cw = getPath(C, `providers.local.compactWindow.${m}`);
+    const ctx = getPath(C, `providers.local.context.${m}`) || getPath(C, "providers.local.ollama.contextLength");
+    acw = Number(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || cw || (ctx ? Math.floor(ctx * 3 / 4) : acw);
+  }
+  putIf("CLAUDE_CODE_AUTO_COMPACT_WINDOW", acw);
+
+  // Local: the OLLAMA_* knobs run.sh's ensure_ollama reads to bring up the managed on-device server.
+  if (dp === "local") {
+    const ol = getPath(C, "providers.local.ollama") || {};
+    const m = v.OPENAI_MODEL;
+    putIf("OLLAMA_CONTEXT_LENGTH", getPath(C, `providers.local.context.${m}`) || ol.contextLength);
+    put("OLLAMA_KV_CACHE_TYPE", ol.kvCacheType || "q8_0");
+    put("OLLAMA_FLASH_ATTENTION", ol.flashAttention === false ? "0" : "1");
+    put("OLLAMA_NUM_PARALLEL", ol.numParallel || 1);
+    put("OLLAMA_KEEP_ALIVE", ol.keepAlive || "30m");
+    putIf("OLLAMA_MANAGED_PORT", ol.managedPort);
+    put("OLLAMA_AUTOSTART", ol.autostart === false ? "0" : "1");
+  }
+  return out.join("\n") + "\n";
+}
+
 // ---------- CLI ----------
 //
 // run.sh is bash and needs the hash to decide whether a running proxy is the one it wants.
@@ -679,6 +756,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
   if (arg === "--hash") process.stdout.write(configHash() + "\n");
   else if (arg === "--code-version") process.stdout.write(codeVersion() + "\n");
   else if (arg === "--provider") process.stdout.write(provider() + "\n");
+  else if (arg === "--env") process.stdout.write(emitEnv());
   else if (arg === "--validate") {
     const { errors, warnings } = validate();
     for (const w of warnings) process.stdout.write(`warning: ${w}\n`);
