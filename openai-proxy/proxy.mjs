@@ -45,6 +45,7 @@ import {
 } from "./tool-policy.mjs";
 import {
   decodeBlocks, decodeToolResult, partsToResponses, partsToChat, countImages, countFiles, countNotes,
+  redactInjectedPII,
 } from "./content.mjs";
 import { localizePdfsInBody, makePdfExtractor } from "./pdf.mjs";
 import { handleWebSearch } from "./websearch.mjs";
@@ -1374,6 +1375,7 @@ function stripSystemBoilerplate(sys, tools = null) {
   for (const block of SYSTEM_STRIP_BLOCKS) out = out.split(block).join("");
   if (!toolNamePresent(tools, "mcp__Claude_Code_iOS_Simulator__")) out = out.replace(IOS_SIM_BLOCK_RE, "");
   if (!toolNamePresent(tools, "mcp__claude-in-chrome__")) out = out.replace(CHROME_LINE_RE, "");
+  out = redactInjectedPII(out);   // also drop the "# userEmail" block if the harness put it in the system
   return out.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }
 
@@ -1797,7 +1799,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   }
   for (const m of body.messages || []) {
     const content = m.content;
-    if (typeof content === "string") { messages.push({ role: m.role, content }); continue; }
+    if (typeof content === "string") { messages.push({ role: m.role, content: redactInjectedPII(content) }); continue; }
     if (!Array.isArray(content)) continue;
     // Same ordered model as the Responses path — see content.mjs. The buckets this replaces lost the
     // interleaving of text and images and dropped anything they had no bucket for.
@@ -2122,7 +2124,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   for (const m of body.messages || []) {
     const content = m.content;
     if (typeof content === "string") {
-      input.push({ role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: content }] });
+      input.push({ role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: redactInjectedPII(content) }] });
       continue;
     }
     if (!Array.isArray(content)) continue;

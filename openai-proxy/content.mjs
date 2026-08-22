@@ -36,12 +36,22 @@
 //   { kind: "image", url, mediaType }            // data: URL or a remote URL, never fetched here
 //   { kind: "file",  filename, dataUrl, mediaType }
 //   { kind: "note",  text }                      // something that could not be represented
+// Strip the harness-injected "# userEmail" context block (the user's email address) from any text
+// block before it is forwarded upstream. Structural (no hardcoded address) so it redacts whatever
+// address the harness injects, and only that block — a user-typed email elsewhere is left untouched.
+// Applied in decodeBlocks, so it covers user messages and tool results on both the chat and
+// responses surfaces.
+const USER_EMAIL_BLOCK_RE = /# userEmail\n[^\n]*\n?/g;
+export function redactInjectedPII(text) {
+  return typeof text === "string" ? text.replace(USER_EMAIL_BLOCK_RE, "") : text;
+}
+
 export function decodeBlocks(blocks) {
   const parts = [];
   for (const blk of Array.isArray(blocks) ? blocks : []) {
     const t = blk?.type;
     if (t === "text") {
-      if (blk.text) parts.push({ kind: "text", text: String(blk.text) });
+      if (blk.text) parts.push({ kind: "text", text: redactInjectedPII(String(blk.text)) });
       continue;
     }
     if (t === "image") {

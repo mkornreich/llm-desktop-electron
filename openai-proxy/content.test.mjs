@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   decodeBlocks, decodeToolResult, partsToResponses, partsToChat,
-  countImages, countFiles, countNotes,
+  countImages, countFiles, countNotes, redactInjectedPII,
 } from "./content.mjs";
 
 const img = (data = "AAA", mediaType = "image/png") =>
@@ -149,4 +149,35 @@ test("an empty or absent content array yields nothing, without throwing", () => 
   assert.deepEqual(decodeBlocks(null), []);
   assert.deepEqual(decodeBlocks(undefined), []);
   assert.deepEqual(decodeBlocks("not an array"), []);
+});
+
+// The harness injects the user's email as a "# userEmail" context block in the user message; it is
+// redacted before anything is forwarded upstream.
+const INJECTED = "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n" +
+  "# userEmail\nThe user's email address is someone@example.com.\n# currentDate\nToday's date is 2026-08-22.\n</system-reminder>\n\n";
+
+test("redactInjectedPII drops the # userEmail block and only that block", () => {
+  const out = redactInjectedPII(INJECTED);
+  assert.doesNotMatch(out, /someone@example\.com/);
+  assert.doesNotMatch(out, /# userEmail/);
+  assert.doesNotMatch(out, /The user's email address is/);
+  assert.match(out, /# currentDate/);                       // sibling context kept
+  assert.match(out, /Today's date is 2026-08-22/);
+  assert.match(out, /^<system-reminder>/);                  // wrapper kept
+  // structural, not hardcoded: a different address is redacted too
+  assert.doesNotMatch(redactInjectedPII("# userEmail\nThe user's email address is a.b+c@d.co.uk.\n"), /a\.b\+c@d\.co\.uk/);
+  // a user-typed email OUTSIDE the block is left alone
+  assert.equal(redactInjectedPII("please email bob@corp.com about it"), "please email bob@corp.com about it");
+  assert.equal(redactInjectedPII(undefined), undefined);
+});
+
+test("decodeBlocks redacts the injected email from a text block on the way through", () => {
+  const parts = decodeBlocks([{ type: "text", text: INJECTED }, { type: "text", text: "hello" }]);
+  assert.equal(parts.length, 2);
+  assert.doesNotMatch(parts[0].text, /someone@example\.com/);
+  assert.doesNotMatch(parts[0].text, /# userEmail/);
+  assert.equal(parts[1].text, "hello");
+  // and it reaches neither wire shape
+  assert.doesNotMatch(JSON.stringify(partsToChat(parts)), /someone@example\.com/);
+  assert.doesNotMatch(JSON.stringify(partsToResponses(parts)), /someone@example\.com/);
 });

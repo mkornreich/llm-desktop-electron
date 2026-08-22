@@ -429,6 +429,44 @@ test("conditional strips drop the iOS-sim block and Chrome line only when those 
   assert.doesNotMatch(chrome, /<simulator_tools>/);
 });
 
+test("the injected user email never reaches the outgoing chat request", () => {
+  const body = {
+    system: "You are Claude Code.",
+    messages: [{ role: "user", content: [
+      { type: "text", text: "<system-reminder>\n# userEmail\nThe user's email address is priv@example.com.\n# currentDate\nToday's date is 2026-08-22.\n</system-reminder>" },
+      { type: "text", text: "hello" },
+    ] }],
+    max_tokens: 100,
+  };
+  const wire = JSON.stringify(toOpenAI(body, "gpt-4.1-mini"));
+  assert.doesNotMatch(wire, /priv@example\.com/, "email must not be forwarded");
+  assert.doesNotMatch(wire, /# userEmail/);
+  assert.match(wire, /hello/, "the actual message survives");
+  assert.match(wire, /Today's date is 2026-08-22/, "sibling context survives");
+});
+
+test("the injected user email never reaches the outgoing responses request", () => {
+  const body = {
+    system: "You are Claude Code.",
+    messages: [{ role: "user", content: [
+      { type: "text", text: "# userEmail\nThe user's email address is priv@example.com.\n" },
+      { type: "text", text: "hi" },
+    ] }],
+    max_tokens: 100,
+  };
+  const wire = JSON.stringify(toResponses(body, "gpt-4.1-mini"));
+  assert.doesNotMatch(wire, /priv@example\.com/);
+  assert.match(wire, /hi/);
+});
+
+test("a # userEmail block injected into the system is also stripped", () => {
+  const sys = "You are Claude Code.\n\n# userEmail\nThe user's email address is priv@example.com.\n\n# Harness\n - do things";
+  const out = stripSystemBoilerplate(sys);
+  assert.doesNotMatch(out, /priv@example\.com/);
+  assert.doesNotMatch(out, /# userEmail/);
+  assert.match(out, /# Harness/);
+});
+
 // ---------- auto-continue trigger ----------
 
 test("auto-continue fires on announcements the model did not act on", () => {
