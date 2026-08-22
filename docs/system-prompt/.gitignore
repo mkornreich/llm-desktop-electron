@@ -1,0 +1,6 @@
+# Local-only: verbatim vendor (Anthropic) Claude Code system prompt + tool schemas.
+# This repo is public — do NOT publish these. Regenerate locally per README.md.
+upstream-instructions.txt
+upstream-instructions.cli-portion.txt
+upstream-instructions.proxy-appended.txt
+example-full-request.txt
