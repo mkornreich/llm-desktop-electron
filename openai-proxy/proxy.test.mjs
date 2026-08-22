@@ -1196,9 +1196,18 @@ test("issue #6/#11: the safety verdict never uses a model measured to be more pe
 });
 
 test("issue #6: safety and prefix resolve to different models from the main one", () => {
-  const main = pickModel({ system: "You are Claude Code.", messages: [] });
-  const safety = pickModel({ system: AUTO_MODE_SYS, messages: [] });
-  const prefix = pickModel({ system: PREFIX_SYS, messages: [] });
+  // Assert the SHIPPED DEFAULTS' invariant via the pure modelForRoute, independent of the operator's live
+  // .openai-model — a safety verdict must never inherit the small prefix-detection model. (A user may now
+  // deliberately point both classifiers at one model in Settings; that is their call, not a bug.)
+  const cfg = {
+    main: "gpt-5.6-sol",
+    prefixModel: DEFAULTS.OPENAI_CLASSIFIER_MODEL,
+    safetyModel: DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL,
+    safetyModelIsBlank: DEFAULTS.OPENAI_CLASSIFIER_SAFETY_MODEL === "",
+  };
+  const main = modelForRoute(ROUTE.MAIN, cfg);
+  const safety = modelForRoute(ROUTE.SAFETY_BLOCK, cfg);
+  const prefix = modelForRoute(ROUTE.PREFIX, cfg);
   // a safety verdict must never land on the prefix-detection model
   assert.notEqual(safety, prefix, "safety must not inherit the small prefix model");
   assert.ok(!/^gpt-4\.1/.test(safety), `safety must not be a gpt-4.1 variant (got ${safety})`);

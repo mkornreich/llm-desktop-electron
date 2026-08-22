@@ -396,16 +396,20 @@ export function resolve({ env = process.env, project, home, keyfile } = {}) {
     : values.OPENAI_CLASSIFIER_MODEL ? "OPENAI_CLASSIFIER_MODEL" : "default";
 
   // Unless the upstream is OpenAI's own API, the classifier/compaction settings' remote gpt-5.x
-  // defaults (and any value carried over from .openai-model) point at models the upstream cannot
+  // defaults (and any BARE value carried over from .openai-model) point at models the upstream cannot
   // serve — so every prefix/safety verdict and compaction call would 404 ("auto mode cannot determine
   // the safety of …"). On a local server, OpenRouter or Cohere, default those auxiliary calls to the
-  // model actually in use. An explicit env override still wins (e.g. a smaller/cheaper classifier).
+  // model actually in use. Two things are respected and NOT clobbered: an explicit env override (a
+  // smaller/cheaper classifier), and an explicit "<provider>:<model>" pick — the proxy resolves a classifier
+  // model's provider prefix now, so e.g. local:qwen3:1.7b or groq:… routes to THAT provider and is servable.
+  // Only a bare id (no known provider prefix), which would hit this non-OpenAI default upstream, is rewritten.
   if (!servesOpenAiDefaults(values.OPENAI_BASE_URL)) {
     for (const name of ["OPENAI_CLASSIFIER_MODEL", "OPENAI_CLASSIFIER_SAFETY_MODEL", "OPENAI_COMPACT_MODEL"]) {
-      if (sources[name] !== "env") {
-        values[name] = values.OPENAI_MODEL;
-        sources[name] = "non-openai upstream -> model in use";
-      }
+      if (sources[name] === "env") continue;                        // an explicit env override always wins
+      const v = values[name], i = typeof v === "string" ? v.indexOf(":") : -1;
+      if (i > 0 && PROVIDERS[v.slice(0, i)]) continue;              // routable <provider>:<model> pick -> keep it
+      values[name] = values.OPENAI_MODEL;
+      sources[name] = "non-openai upstream -> model in use";
     }
   }
 
