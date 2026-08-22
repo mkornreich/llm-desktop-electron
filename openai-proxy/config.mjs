@@ -311,7 +311,10 @@ function hostMatcher(endpoint) {
 export function buildProviders(config = loadConfig()) {
   const out = {};
   for (const [id, p] of Object.entries(config.providers || {})) {
-    const baseURL = id === "local"
+    // The managed on-device Ollama rediscovers its base at launch (run.sh's ensure_ollama serves on a
+    // DIFFERENT port than the endpoint), so LLMD_LOCAL_BASE overrides it. Keyed off the managed engine,
+    // NOT the id, and NEVER applied to freetoken (whose fixed port is already its endpoint).
+    const baseURL = p.managed?.engine === "ollama"
       ? (process.env.LLMD_LOCAL_BASE || p.endpoint || "http://127.0.0.1:11434/v1")
       : (p.endpoint || "");
     out[id] = {
@@ -320,6 +323,8 @@ export function buildProviders(config = loadConfig()) {
       keyNames: Array.isArray(p.keyNames) ? p.keyNames : [],
       isOpenAI: !!p.isOpenAI,
       responses: !!p.responses,   // /responses CAPABILITY (explicit) — distinct from the default `api` surface
+      loopback: !!p.loopback,     // keyless on-device server — exposed so callers key off the flag, not the id
+      managed: p.managed || null, // the launcher's autostart block (engine/port/launch/...), or null
       match: p.match ? new RegExp(p.match, "i") : (p.loopback ? LOOPBACK_RE : hostMatcher(baseURL)),
     };
   }
@@ -644,7 +649,7 @@ export function validate(opts = {}) {
       const prov = id.slice(0, i);
       if (isNonToolModel(id)) warnings.push(`composite member '${id}' cannot do tool calling — it will be skipped (an agent turn always carries tools)`);
       else if (!PROVIDERS[prov]) warnings.push(`composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
-      else if (prov !== "local" && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
+      else if (PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
     }
   }
 
@@ -657,7 +662,7 @@ export function validate(opts = {}) {
       const prov = id.slice(0, i);
       if (isNonToolModel(id)) warnings.push(`compaction member '${id}' cannot do tool calling — it will be skipped`);
       else if (!PROVIDERS[prov]) warnings.push(`compaction member '${id}' names an unknown provider '${prov}' — it will be skipped`);
-      else if (prov !== "local" && !active.has(prov)) warnings.push(`compaction member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
+      else if (PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`compaction member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
       else if (!RESPONSES_PROVIDER_IDS.has(prov)) warnings.push(`compaction member '${id}' uses '${prov}', which does not serve /responses — the summariser will fail over past it`);
     }
   }
@@ -721,28 +726,50 @@ export function emitEnv({ env = process.env } = {}) {
   const comp = getPath(C, "composite");
   if (Array.isArray(comp) && comp.length) put("LLMD_COMPOSITE", JSON.stringify({ members: comp }));
 
-  // Compaction window: local derives it per-model (explicit compactWindow, else 3/4 of the model's context);
-  // every other provider uses the flat configured value.
+  // Compaction window: an on-device provider derives it per-model (explicit compactWindow, else 3/4 of
+  // the model's context); every other provider uses the flat configured value. Keyed off the DEFAULT
+  // provider's own config, not the literal "local".
   let acw = v.CLAUDE_CODE_AUTO_COMPACT_WINDOW || undefined;
-  if (dp === "local") {
+  {
     const m = v.OPENAI_MODEL;
-    const cw = getPath(C, `providers.local.compactWindow.${m}`);
-    const ctx = getPath(C, `providers.local.context.${m}`) || getPath(C, "providers.local.ollama.contextLength");
+    const cw = getPath(C, `providers.${dp}.compactWindow.${m}`);
+    const ctx = getPath(C, `providers.${dp}.context.${m}`) || getPath(C, `providers.${dp}.managed.contextLength`);
     acw = Number(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) || cw || (ctx ? Math.floor(ctx * 3 / 4) : acw);
   }
   putIf("CLAUDE_CODE_AUTO_COMPACT_WINDOW", acw);
 
-  // Local: the OLLAMA_* knobs run.sh's ensure_ollama reads to bring up the managed on-device server.
-  if (dp === "local") {
-    const ol = getPath(C, "providers.local.ollama") || {};
+  // Managed on-device Ollama: the OLLAMA_* knobs run.sh's ensure_ollama reads. Emitted only when the
+  // DEFAULT provider is the ollama-engine managed one (its `managed` block), so a freetoken default
+  // does not emit meaningless OLLAMA_* values.
+  const dpManaged = getPath(C, `providers.${dp}.managed`) || {};
+  if (dpManaged.engine === "ollama") {
     const m = v.OPENAI_MODEL;
-    putIf("OLLAMA_CONTEXT_LENGTH", getPath(C, `providers.local.context.${m}`) || ol.contextLength);
-    put("OLLAMA_KV_CACHE_TYPE", ol.kvCacheType || "q8_0");
-    put("OLLAMA_FLASH_ATTENTION", ol.flashAttention === false ? "0" : "1");
-    put("OLLAMA_NUM_PARALLEL", ol.numParallel || 1);
-    put("OLLAMA_KEEP_ALIVE", ol.keepAlive || "30m");
-    putIf("OLLAMA_MANAGED_PORT", ol.managedPort);
-    put("OLLAMA_AUTOSTART", ol.autostart === false ? "0" : "1");
+    putIf("OLLAMA_CONTEXT_LENGTH", getPath(C, `providers.${dp}.context.${m}`) || dpManaged.contextLength);
+    put("OLLAMA_KV_CACHE_TYPE", dpManaged.kvCacheType || "q8_0");
+    put("OLLAMA_FLASH_ATTENTION", dpManaged.flashAttention === false ? "0" : "1");
+    put("OLLAMA_NUM_PARALLEL", dpManaged.numParallel || 1);
+    put("OLLAMA_KEEP_ALIVE", dpManaged.keepAlive || "30m");
+    putIf("OLLAMA_MANAGED_PORT", dpManaged.managedPort);
+    put("OLLAMA_AUTOSTART", dpManaged.autostart === false ? "0" : "1");
+  }
+
+  // Managed FreeToken engine: run.sh brings it up INDEPENDENTLY of the default provider (so a picked
+  // freetoken:<model> works even when the default is ollama). Emitted for whichever provider declares a
+  // freetoken-engine managed block.
+  for (const [, prov] of Object.entries(C.providers || {})) {
+    const mg = prov && prov.managed;
+    if (mg && mg.engine === "freetoken") {
+      put("FREETOKEN_AUTOSTART", mg.autostart === false ? "0" : "1");
+      put("FREETOKEN_PORT", mg.port || 1919);
+      putIf("FREETOKEN_MODEL_PATH", mg.modelPath);
+      putIf("FREETOKEN_SERVED_MODEL", mg.servedModelName);
+      putIf("FREETOKEN_TOOL_PARSER", mg.toolCallParser);
+      putIf("FREETOKEN_REASONING_PARSER", mg.reasoningParser);
+      putIf("FREETOKEN_LAUNCH", mg.launch);
+      putIf("FREETOKEN_HEALTH_PATH", mg.healthPath);
+      putIf("FREETOKEN_ENDPOINT", prov.endpoint);
+      break;   // one managed FreeToken server
+    }
   }
   return out.join("\n") + "\n";
 }

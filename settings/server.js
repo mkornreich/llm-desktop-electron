@@ -377,7 +377,7 @@ async function handle(req, res) {
               method: "POST", headers: { "content-type": "application/json" },
               body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(2500),
             });
-            if (r.ok) { const caps = (await r.json()).capabilities; if (Array.isArray(caps) && caps.includes("thinking")) add("local", name); }
+            if (r.ok) { const caps = (await r.json()).capabilities; if (Array.isArray(caps) && caps.includes("thinking")) add("ollama", name); }
           } catch { /* leave out */ }
         }));
       } catch { /* no Ollama */ }

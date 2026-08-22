@@ -126,18 +126,14 @@ fi
 #                 dropdown (the proxy routes that turn to the named provider's key).
 #   anthropic  -> stock behaviour: the agent calls Anthropic directly with Claude
 #
-#   DEFAULT_PROVIDER (proxy mode only): openai | local | openrouter | cohere | gemini | mistral
-#     openai     -> api.openai.com (model in .openai-model, key in .openai-key)
-#     local      -> an on-device OpenAI-compatible server (Ollama by default) on THIS machine's GPU,
-#                   no API key; endpoint/model in .local-model
-#     openrouter -> OpenRouter (openrouter.ai), any model it serves; model in .openrouter-model, sk-or- key in .openai-key
-#     cohere     -> Cohere's OpenAI-compatible endpoint; model in .cohere-model, Cohere key in .openai-key
-#     gemini     -> Google Gemini's OpenAI-compatible endpoint; model in .gemini-model, Gemini key in .openai-key
-#     mistral    -> Mistral's OpenAI-compatible endpoint; model in .mistral-model, Mistral key in .openai-key
-#     groq       -> Groq's OpenAI-compatible endpoint (fast LPU inference, serves /responses); model in
-#                   .groq-model, Groq key in .openai-key
-#     ollama     -> Ollama Cloud (ollama.com) remote hosted models (serves /responses); model in
-#                   .ollama-model, Ollama key in .openai-key. (DISTINCT from `local` = on-device Ollama.)
+#   DEFAULT_PROVIDER (proxy mode only) — any id from config.jsonc `providers`, e.g.:
+#     openai       -> api.openai.com (keyed)
+#     ollama       -> on-device Ollama on THIS machine's GPU (keyless, loopback; the launcher can
+#                     autostart a managed instance on a side port with a big context — see below)
+#     freetoken    -> on-device FreeToken engine (keyless, loopback :1919; managed/autostarted below)
+#     ollama-cloud -> Ollama Cloud (ollama.com) remote hosted models (serves /responses; keyed)
+#     openrouter | cohere | gemini | mistral | groq | nvidia | llm7 -> their OpenAI-compatible endpoints (keyed)
+#   Keys live in .openai-key; every other per-provider field lives in config.jsonc `providers.<id>`.
 #
 # Only the agent sub-layer is affected either way; the chat window is remote claude.ai.
 # The bundle patches read PROXY_ANTHROPIC_BASE_URL, so leaving it unset restores the
@@ -275,25 +271,68 @@ unload_managed_ollama() {
   done
 }
 
+# Managed FreeToken (on-device engine, OpenAI-compatible). Brought up INDEPENDENTLY of the default
+# provider so a picked freetoken:<model> resolves even when the default is Ollama. Reuse a live server;
+# non-fatal if it cannot start. FREETOKEN_* come from config.jsonc providers.<id>.managed via config.mjs.
+ensure_freetoken() {
+  local base="http://127.0.0.1:${FREETOKEN_PORT:-1919}"
+  local ready="${base}${FREETOKEN_HEALTH_PATH:-/v1/models}"
+  if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then
+    echo "[run] managed FreeToken: reusing the server already on ${base}"; return 0
+  fi
+  local launch="${FREETOKEN_LAUNCH:-}"
+  if [ -z "$launch" ] || [ ! -x "$launch" ]; then
+    echo "[run] managed FreeToken: launcher '${launch:-<unset>}' not executable — skipping (a freetoken: pick won't resolve)"; return 1
+  fi
+  if [ -z "${FREETOKEN_MODEL_PATH:-}" ]; then
+    echo "[run] managed FreeToken: no FREETOKEN_MODEL_PATH — skipping"; return 1
+  fi
+  local logfile="user-data/freetoken-managed.log" pid i
+  echo "[run] managed FreeToken: starting on ${base} (model ${FREETOKEN_SERVED_MODEL:-$(basename "$FREETOKEN_MODEL_PATH")})"
+  nohup "$launch" serve \
+    --model-path "$FREETOKEN_MODEL_PATH" \
+    --port "${FREETOKEN_PORT:-1919}" \
+    ${FREETOKEN_SERVED_MODEL:+--served-model-name "$FREETOKEN_SERVED_MODEL"} \
+    ${FREETOKEN_TOOL_PARSER:+--tool-call-parser "$FREETOKEN_TOOL_PARSER"} \
+    ${FREETOKEN_REASONING_PARSER:+--reasoning-parser "$FREETOKEN_REASONING_PARSER"} \
+    > "$logfile" 2>&1 &
+  pid=$!
+  echo "$pid" > user-data/freetoken-managed
+  for i in $(seq 1 60); do
+    if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then echo "[run] managed FreeToken: ready after ${i}s (pid ${pid})"; return 0; fi
+    if ! kill -0 "$pid" 2>/dev/null; then echo "[run] managed FreeToken: FAILED to start — see ${logfile}"; return 1; fi
+    sleep 1
+  done
+  echo "[run] managed FreeToken: not ready in 60s — see ${logfile} (continuing; a freetoken: pick won't resolve yet)"; return 1
+}
+stop_managed_freetoken() {
+  [ -r user-data/freetoken-managed ] || return 0
+  local pid; pid="$(cat user-data/freetoken-managed 2>/dev/null || true)"
+  [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null || true
+  rm -f user-data/freetoken-managed
+}
+# One EXIT trap for BOTH managed servers — each is a no-op when its server isn't ours.
+cleanup_managed() { unload_managed_ollama; stop_managed_freetoken; }
+
 if [ "$PROVIDER" = "proxy" ]; then
   PORT="${PORT:-${LLMD_PORT:-8123}}"
   PROXY_URL="http://127.0.0.1:${PORT}"
 
   # `local` provider: the SAME translation proxy, pointed at an on-device OpenAI-compatible
   # server (Ollama by default) instead of api.openai.com, so the agent runs on this machine's
-  # GPU. Read the endpoint/model from .local-model and export them as OPENAI_* env vars, which
+  # GPU. Read the endpoint/model from .ollama-model and export them as OPENAI_* env vars, which
   # outrank .openai-model in the proxy's precedence — so ensure-proxy's config hash AND the
   # proxy both target the local server. No API key needed: the proxy treats a loopback
   # OPENAI_BASE_URL as keyless. Everything downstream (proxy start, PROXY_ANTHROPIC_BASE_URL,
   # the Claude Code identity) is shared with openai mode below; only CONF differs.
   CONF=".openai-model"
-  if [ "$DEFAULT_PROVIDER" = "local" ]; then
-    CONF=".local-model"
+  if [ "$DEFAULT_PROVIDER" = "ollama" ]; then
+    CONF=".ollama-model"
     export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_MODEL="${OPENAI_MODEL:-qwen2.5:7b-instruct}"
     # OpenAI surface for the local server. Default chat/completions: every local server has it,
     # and its 128-tool cap helps a small model fit its context. Recent Ollama also serves
-    # /responses — set OPENAI_API=responses in .local-model to use it.
+    # /responses — set OPENAI_API=responses in .ollama-model to use it.
     export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_API="${OPENAI_API:-chat}"
 
@@ -314,7 +353,7 @@ if [ "$PROVIDER" = "proxy" ]; then
     done < <(grep -E '^COMPACT_' "$CONF" 2>/dev/null)
 
     # Managed on-device Ollama (default on). Give the agent a big context the system Ollama
-    # usually caps. Tuning knobs come from .local-model (env wins).
+    # usually caps. Tuning knobs come from .ollama-model (env wins).
     OLLAMA_AUTOSTART="${OLLAMA_AUTOSTART:-$(sed -n 's/^OLLAMA_AUTOSTART=//p' "$CONF" 2>/dev/null | head -1)}"
     if [ "${OLLAMA_AUTOSTART:-1}" != "0" ] && command -v ollama >/dev/null 2>&1; then
       # OLLAMA_* are set by the config emitter; OLLAMA_MODELS (the models dir) is not a config.jsonc value,
@@ -331,10 +370,11 @@ if [ "$PROVIDER" = "proxy" ]; then
       if [ -z "$MODELS_DIR" ] && [ -r /usr/share/ollama/.ollama/models ]; then MODELS_DIR=/usr/share/ollama/.ollama/models; fi
       if ensure_ollama "${OLLAMA_MANAGED_PORT:-11435}" "$DESIRED_CTX" "$MODELS_DIR"; then
         export OPENAI_BASE_URL="http://127.0.0.1:${OLLAMA_MANAGED_PORT:-11435}/v1"
-        # Free the model's VRAM when this launcher exits (app quit or killed).
-        trap unload_managed_ollama EXIT
+        # Free the model's VRAM when this launcher exits (app quit or killed). One trap covers both
+        # managed servers (Ollama here + a managed FreeToken below).
+        trap cleanup_managed EXIT
       else
-        echo "[run] managed Ollama unavailable; falling back to OPENAI_BASE_URL from .local-model"
+        echo "[run] managed Ollama unavailable; falling back to OPENAI_BASE_URL from .ollama-model"
       fi
     fi
 
@@ -451,8 +491,8 @@ if [ "$PROVIDER" = "proxy" ]; then
   # models, keyed. DISTINCT from `local` (on-device Ollama, keyless, loopback). Reads model/api from
   # .ollama-model; the Ollama key resolves from .openai-key (ollamaApiKey=). Serves /responses, so api
   # defaults to responses.
-  if [ "$DEFAULT_PROVIDER" = "ollama" ]; then
-    CONF=".ollama-model"
+  if [ "$DEFAULT_PROVIDER" = "ollama-cloud" ]; then
+    CONF=".ollama-cloud-model"
     export OPENAI_MODEL="${OPENAI_MODEL:-$(sed -n 's/^OPENAI_MODEL=//p' "$CONF" 2>/dev/null | head -1)}"
     export OPENAI_MODEL="${OPENAI_MODEL:-gpt-oss:120b}"
     export OPENAI_API="${OPENAI_API:-$(sed -n 's/^OPENAI_API=//p' "$CONF" 2>/dev/null | head -1)}"
@@ -502,6 +542,13 @@ if [ "$PROVIDER" = "proxy" ]; then
   # command, so `node ... | sed` would report sed's success and the check would never fire. This
   # script does set `pipefail`, which happens to make it work — but a correctness guarantee that
   # depends on a `set` line a hundred lines away is one refactor from being silently wrong.
+
+  # Managed FreeToken: autostart it (independent of the default provider) so a picked freetoken:<model>
+  # resolves. Gated on FREETOKEN_AUTOSTART (config.jsonc providers.freetoken.managed.autostart). Non-fatal.
+  if [ "${FREETOKEN_AUTOSTART:-0}" = "1" ]; then
+    if ensure_freetoken; then trap cleanup_managed EXIT; fi
+  fi
+
   if ! node scripts/ensure-proxy.mjs --port "$PORT"; then
     echo "[run] the translation proxy is not serving the configured settings — see the lines above"
     exit 1
@@ -537,7 +584,7 @@ if [ "$PROVIDER" = "proxy" ]; then
   # one. Derive it from the per-model context — 3/4, leaving headroom for the tools + reply —
   # unless a per-model COMPACT_<model> or an explicit CLAUDE_CODE_AUTO_COMPACT_WINDOW was given
   # (the latter is exported by the loop above, so gate on it being unset).
-  if [ "$DEFAULT_PROVIDER" = "local" ] && [ -z "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
+  if [ "$DEFAULT_PROVIDER" = "ollama" ] && [ -z "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" ]; then
     export CLAUDE_CODE_AUTO_COMPACT_WINDOW="${DESIRED_COMPACT:-$(( DESIRED_CTX * 3 / 4 ))}"
     echo "[run] CLAUDE_CODE_AUTO_COMPACT_WINDOW=${CLAUDE_CODE_AUTO_COMPACT_WINDOW} (${OPENAI_MODEL}, ${DESIRED_CTX}-token context)"
   fi

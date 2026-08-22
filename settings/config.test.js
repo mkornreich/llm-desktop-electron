@@ -23,8 +23,8 @@ function withTempConfig(body, fn) {
 const SAMPLE = `{
   // which provider backs the agent — a long doc line that must survive a write
   "mode": "proxy",
-  "defaultProvider": "local",
-  "providers": { "local": { "model": "gemma4:latest", "context": { "granite4.1:8b": 65536 } } },
+  "defaultProvider": "ollama",
+  "providers": { "ollama": { "model": "gemma4:latest", "loopback": true, "context": { "granite4.1:8b": 65536 } } },
   "reasoning": { "effort": "max", "showThinking": true },
   "privacy": { "disableTelemetry": true }
 }
@@ -37,7 +37,7 @@ test("writing a value edits config.jsonc in place and preserves every comment", 
     assert.match(after, /"mode": "anthropic"/);
     assert.ok(!/"mode": "proxy"/.test(after), "old value must be gone");
     assert.match(after, /a long doc line that must survive a write/, "the comment survives");
-    assert.equal(jsonc.readConfigText(after).defaultProvider, "local", "siblings are untouched");
+    assert.equal(jsonc.readConfigText(after).defaultProvider, "ollama", "siblings are untouched");
   });
 });
 
@@ -66,7 +66,7 @@ test("a per-model CONTEXT_<model> with a dotted name is one path segment", () =>
   withTempConfig(SAMPLE, (file) => {
     writeValues({ "CONTEXT_granite4.1:8b": "32768" }, file);
     const c = jsonc.readConfig(file);
-    assert.equal(c.providers.local.context["granite4.1:8b"], 32768, "the '.' in the model name is not a path split");
+    assert.equal(c.providers.ollama.context["granite4.1:8b"], 32768, "the '.' in the model name is not a path split");
   });
 });
 
@@ -100,7 +100,7 @@ test("every GUI setting maps to a live path in config.jsonc, and the key knobs a
     assert.ok(parent && typeof parent === "object", `GUI path for ${key} ('${p}') has no parent object in config.jsonc`);
   }
   const exposed = new Set(Object.values(PATHS));
-  for (const p of ["mode", "defaultProvider", "providers.local.model", "reasoning.effort",
+  for (const p of ["mode", "defaultProvider", "providers.ollama.model", "reasoning.effort",
                    "output.maxTurnOutputTokens", "privacy.disableTelemetry", "sync.sessions",
                    "diagnostics.ultracode", "compaction.autoCompactWindow"])
     assert.ok(exposed.has(p), `${p} must be exposed in the GUI (PATHS)`);
@@ -113,15 +113,19 @@ test("provider groups + DEFAULT_PROVIDER options are generated from config.jsonc
   const dp = SCHEMA.find((s) => s.key === "DEFAULT_PROVIDER");
   assert.ok(dp && dp.file === ".provider");
   assert.deepEqual(dp.options.slice().sort(), ids.slice().sort(), "DEFAULT_PROVIDER options ARE the config.jsonc providers");
-  // Every provider except the structurally-special openai/local has a generated "<Label> model" group.
+  // Every provider except openai (shared group) and the loopback on-device ones (ollama static group,
+  // freetoken managed) has a generated "<Label> model" group.
+  const provs = jsonc.readConfig().providers;
   for (const id of ids) {
-    if (id === "openai" || id === "local") continue;
+    if (id === "openai" || provs[id].loopback) continue;
     const U = id.toUpperCase();
     assert.ok(SCHEMA.find((s) => s.key === `${U}_MODEL` && s.path === `providers.${id}.model` && s.provider === id), `${id} MODEL entry generated`);
     assert.ok(SCHEMA.find((s) => s.key === `${U}_API` && s.path === `providers.${id}.api`), `${id} API entry generated`);
   }
   // NVIDIA was added via config.jsonc ONLY (no per-provider code) — its presence proves the data-driven path.
   assert.ok(ids.includes("nvidia") && SCHEMA.find((s) => s.key === "NVIDIA_MODEL"), "a config.jsonc-only provider surfaces in the GUI");
+  // The loopback on-device providers get NO generated group (would carry a misleading 'put your key' help).
+  assert.ok(!SCHEMA.find((s) => s.key === "FREETOKEN_MODEL"), "freetoken (loopback) is not auto-generated");
 });
 
 test("every schema entry is well formed", () => {

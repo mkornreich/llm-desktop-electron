@@ -158,7 +158,7 @@ const upstreamHeaders = () => { const p = curProvider(); return { "Content-Type"
 // active provider for a request is carried in AsyncLocalStorage, so the wire helpers (upstreamHeaders,
 // callOpenAI/callResponses, apiForModel) pick it up without threading it through every retry path.
 const DEFAULT_PROVIDER = {
-  id: providerForBase(OPENAI_BASE)?.id || (IS_LOCAL_ENDPOINT ? "local" : "custom"),
+  id: providerForBase(OPENAI_BASE)?.id || (IS_LOCAL_ENDPOINT ? "ollama" : "custom"),
   baseURL: OPENAI_BASE, auth: OPENAI_AUTH, api: OPENAI_API, isOpenAI: IS_OPENAI_ENDPOINT, extraHeaders: EXTRA_HEADERS,
 };
 const PROVIDER_KEYS = providerKeys();   // { googleApiKey, cohereApiKey, … } from .openai-key
@@ -170,11 +170,11 @@ function resolvePickedProvider(reqModel) {
   if (i <= 0) return null;
   const reg = PROVIDERS[s.slice(0, i)];
   if (!reg) return null;
-  // Keyless on-device provider (Ollama): route to the local Ollama /v1 with a placeholder auth and
-  // the bare model id — no key required. LLMD_LOCAL_BASE is the reachable Ollama run.sh discovered.
-  if (reg.id === "local") {
-    const baseURL = process.env.LLMD_LOCAL_BASE || reg.baseURL;
-    return { provider: { id: "local", baseURL, auth: "local", api: reg.api, isOpenAI: false, extraHeaders: {} }, model: s.slice(i + 1) };
+  // Keyless on-device provider (ollama / freetoken): route to its loopback /v1 with a placeholder auth
+  // and the bare model id — no key required. reg.baseURL already folds LLMD_LOCAL_BASE for the managed
+  // Ollama, so it is used directly here (never re-applying the Ollama base to freetoken's 1919 port).
+  if (reg.loopback) {
+    return { provider: { id: reg.id, baseURL: reg.baseURL, auth: reg.id, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {} }, model: s.slice(i + 1) };
   }
   const auth = providerAuth(reg);
   if (!auth) return null;

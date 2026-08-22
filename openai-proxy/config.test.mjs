@@ -184,10 +184,11 @@ test("providerForBase recognizes each provider's host", () => {
   assert.equal(providerForBase("https://openrouter.ai/api/v1")?.id, "openrouter");
   assert.equal(providerForBase("https://api.mistral.ai/v1")?.id, "mistral");
   assert.equal(providerForBase("https://api.groq.com/openai/v1")?.id, "groq");
-  assert.equal(providerForBase("https://ollama.com/v1")?.id, "ollama");
+  assert.equal(providerForBase("https://ollama.com/v1")?.id, "ollama-cloud");
   assert.equal(providerForBase("https://api.openai.com/v1")?.id, "openai");
-  assert.equal(providerForBase("http://127.0.0.1:11435/v1")?.id, "local");   // loopback -> the keyless local provider
-  assert.equal(providerForBase("http://localhost:11434/v1")?.id, "local");
+  assert.equal(providerForBase("http://127.0.0.1:11435/v1")?.id, "ollama");   // managed port -> on-device Ollama
+  assert.equal(providerForBase("http://localhost:11434/v1")?.id, "ollama");
+  assert.equal(providerForBase("http://127.0.0.1:1919/v1")?.id, "freetoken"); // port-scoped, distinct from Ollama
 });
 
 test("buildProviders builds the registry entirely from config.jsonc providers (data-driven)", () => {
@@ -369,7 +370,7 @@ test("every behaviour-affecting setting is part of the hash", () => {
     OPENAI_SHOW_THINKING: "0", OPENAI_REASONING_EFFORT: "low", OPENAI_THINKING_MIN_BUDGET: "99",
     OPENAI_VERBOSITY: "low", OPENAI_EMPTY_RETRY: "0", OPENAI_MAX_EMPTY_RETRIES: "9",
     OPENAI_CONTINUE_ON_TRUNCATION: "0", OPENAI_MAX_TRANSPORT_RETRIES: "9",
-    OPENAI_AUTO_CONTINUE: "0", OPENAI_MAX_CONTINUATIONS: "9", OPENAI_TASK_ECHO: "0",
+    OPENAI_AUTO_CONTINUE: "0", OPENAI_MAX_CONTINUATIONS: "9", OPENAI_TASK_ECHO: "0", OPENAI_BARE_MODE: "1",
     OPENAI_MAX_TEXT_CHARS: "99", OPENAI_COMPACT_SUMMARY: "0", OPENAI_COMPACT_MODEL: "cm",
     OPENAI_CLAUDE_CODE_MODEL: "claude-x", CLAUDE_CODE_AUTO_COMPACT_WINDOW: "99",
     PROXY_DUMP_TOOLS: "1", OPENAI_API_KEY: "k2", OPENAI_EXTRA_HEADERS: "X-Test:1",

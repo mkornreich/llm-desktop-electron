@@ -24,29 +24,29 @@ const SCHEMA = [
     label: "Default upstream (proxy mode)",
     help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, local -> Local model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
 
-  // The local (on-device) model, its own file. .local-model reuses the OPENAI_MODEL/OPENAI_API
+  // The local (on-device) model, its own file. .ollama-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)
-  // plus a `fileKey` (the actual line written to .local-model) to avoid colliding with the
+  // plus a `fileKey` (the actual line written to .ollama-model) to avoid colliding with the
   // .openai-model group above.
-  { group: "Local model", file: ".local-model", key: "LOCAL_MODEL", fileKey: "OPENAI_MODEL",
+  { group: "Ollama model", file: ".ollama-model", key: "LOCAL_MODEL", fileKey: "OPENAI_MODEL",
     type: "ollama", default: "", placeholder: "qwen2.5:7b-instruct",
     label: "On-device model",
-    help: "The Ollama model the agent runs when PROVIDER=local. The dropdown lists models installed in Ollama (managed :11435 and system :11434); pull more with `ollama pull <name>` and reopen this window. Give a model its context with a CONTEXT_<model>=<tokens> line in .local-model — run.sh sizes the managed instance from it." },
-  { group: "Local model", file: ".local-model", key: "LOCAL_API", fileKey: "OPENAI_API",
+    help: "The Ollama model the agent runs when PROVIDER=ollama. The dropdown lists models installed in Ollama (managed :11435 and system :11434); pull more with `ollama pull <name>` and reopen this window. Give a model its context with a CONTEXT_<model>=<tokens> line in .ollama-model — run.sh sizes the managed instance from it." },
+  { group: "Ollama model", file: ".ollama-model", key: "LOCAL_API", fileKey: "OPENAI_API",
     type: "enum", options: ["chat", "responses"], default: "chat",
     label: "API surface",
     help: "Ollama's OpenAI-compatible endpoint speaks Chat Completions, so this is normally 'chat'. Chat caps tools at 128 while this app sends 200+, so some are dropped — a limit of the local server, not the proxy." },
-  { group: "Local model", file: ".local-model", key: "OLLAMA_AUTOSTART", type: "bool",
+  { group: "Ollama model", file: ".ollama-model", key: "OLLAMA_AUTOSTART", type: "bool",
     default: "1", label: "Auto-start a managed Ollama",
-    help: "On: run.sh brings up its own Ollama on the managed port with the context and GPU tuning below, sharing the system Ollama's models. Off: you run and size Ollama yourself and the proxy talks to OPENAI_BASE_URL from .local-model." },
-  { group: "Local model", file: ".local-model", key: "LOCAL_CONTEXT", type: "ollama-context",
+    help: "On: run.sh brings up its own Ollama on the managed port with the context and GPU tuning below, sharing the system Ollama's models. Off: you run and size Ollama yourself and the proxy talks to OPENAI_BASE_URL from .ollama-model." },
+  { group: "Ollama model", file: ".ollama-model", key: "LOCAL_CONTEXT", type: "ollama-context",
     default: "32768", label: "Context window (tokens)",
-    help: "Per model: the tokens the managed Ollama loads the SELECTED model with. Saved as a CONTEXT_<model> line in .local-model — run.sh reads it and it overrides the OLLAMA_CONTEXT_LENGTH default. Picking a different model above shows that model's context. Bigger costs VRAM; the q8_0 KV cache and flash attention roughly halve it." },
-  { group: "Local model", file: ".local-model", key: "OLLAMA_KEEP_ALIVE", type: "text",
+    help: "Per model: the tokens the managed Ollama loads the SELECTED model with. Saved as a CONTEXT_<model> line in .ollama-model — run.sh reads it and it overrides the OLLAMA_CONTEXT_LENGTH default. Picking a different model above shows that model's context. Bigger costs VRAM; the q8_0 KV cache and flash attention roughly halve it." },
+  { group: "Ollama model", file: ".ollama-model", key: "OLLAMA_KEEP_ALIVE", type: "text",
     default: "30m", placeholder: "30m",
     label: "Keep the model loaded for",
     help: "How long Ollama keeps the model resident after the last request (e.g. 30m, 1h, 0 to unload immediately, -1 to keep forever). run.sh also unloads it from the GPU when the app exits." },
-  { group: "Local model", file: ".local-model", key: "OLLAMA_MANAGED_PORT", type: "int",
+  { group: "Ollama model", file: ".ollama-model", key: "OLLAMA_MANAGED_PORT", type: "int",
     default: "11435", label: "Managed Ollama port",
     help: "The side port run.sh runs its own Ollama on, kept off the system Ollama's 11434 so the two never fight over a bound port." },
 
@@ -249,9 +249,9 @@ function readFile(f) {
 // picker generates from the selected model — and is handled in writeValues.
 const PATHS = {
   PROVIDER: "mode", DEFAULT_PROVIDER: "defaultProvider",
-  LOCAL_MODEL: "providers.local.model", LOCAL_API: "providers.local.api",
-  OLLAMA_AUTOSTART: "providers.local.ollama.autostart", OLLAMA_KEEP_ALIVE: "providers.local.ollama.keepAlive",
-  OLLAMA_MANAGED_PORT: "providers.local.ollama.managedPort",
+  LOCAL_MODEL: "providers.ollama.model", LOCAL_API: "providers.ollama.api",
+  OLLAMA_AUTOSTART: "providers.ollama.managed.autostart", OLLAMA_KEEP_ALIVE: "providers.ollama.managed.keepAlive",
+  OLLAMA_MANAGED_PORT: "providers.ollama.managed.managedPort",
   OPENAI_MODEL: "providers.openai.model", OPENAI_API: "providers.openai.api",
   // Every other provider's <ID>_MODEL / <ID>_API path is generated from config.jsonc below (buildProviderSchema).
   OPENAI_CLAUDE_CODE_MODEL: "providers.openai.claudeCodeModel",
@@ -281,15 +281,16 @@ const getPath = (o, dot) => String(dot).split(".").reduce((x, k) => (x == null ?
 const isArrayType = (t) => t === "composite";   // composite/compact/dropdown are JSON arrays; every other type is a scalar
 
 // ---- provider model groups, GENERATED from config.jsonc (once, at load) ----
-// Every provider EXCEPT openai (its model/api live in the shared "OpenAI model" group) and local (extra
-// Ollama fields) gets a uniform "<label> model" group — a MODEL + an API-surface field — plus its PATHS
-// entries. So adding a `providers.<id>` block to config.jsonc surfaces the provider in the Settings window
-// with NO code change here. The `file` label (".<id>-model") drives the anthropic-mode dimming in index.html.
+// Every provider EXCEPT openai (its model/api live in the shared "OpenAI model" group) and the loopback
+// on-device ones (ollama has its hand-coded "Ollama model" group with the managed controls; freetoken is
+// managed via config.jsonc) gets a uniform "<label> model" group — a MODEL + an API-surface field — plus
+// its PATHS entries. So adding a keyed `providers.<id>` block to config.jsonc surfaces the provider in the
+// Settings window with NO code change here. The `file` label (".<id>-model") drives the anthropic dimming.
 function buildProviderSchema() {
   const provs = jsonc.readConfig().providers || {};
   const out = [];
   for (const [id, p] of Object.entries(provs)) {
-    if (id === "openai" || id === "local") continue;              // structurally special, kept static above
+    if (id === "openai" || p.loopback) continue;                  // openai shares a group; loopback ones are special
     const U = id.toUpperCase(), label = p.label || id, key0 = (p.keyNames || [])[0] || "apiKey";
     out.push({
       group: `${label} model`, file: `.${id}-model`, provider: id, key: `${U}_MODEL`, path: `providers.${id}.model`,
@@ -353,7 +354,7 @@ function writeValues(updates, file = jsonc.CONFIG_FILE) {
     const item = SCHEMA.find((s) => s.key === key);
     let pathArr;
     if (item && PATHS[key]) pathArr = PATHS[key].split(".");
-    else if (/^CONTEXT_.+/.test(key)) pathArr = ["providers", "local", "context", key.slice(8)];   // per-model context
+    else if (/^CONTEXT_.+/.test(key)) pathArr = ["providers", "ollama", "context", key.slice(8)];   // per-model context
     else continue;                                          // unknown key
     jsonc.editConfig(file, pathArr, toNative(value, item ? item.type : "ollama-context"));
     wrote = true;
@@ -367,10 +368,10 @@ function writeValues(updates, file = jsonc.CONFIG_FILE) {
 // dotfile removal.
 function localModelValues(file = jsonc.CONFIG_FILE) {
   const C = jsonc.readConfig(file);
-  const local = (C.providers && C.providers.local) || {};
+  const local = (C.providers && C.providers.ollama) || {};
   const out = {};
   for (const [m, ctx] of Object.entries(local.context || {})) out["CONTEXT_" + m] = String(ctx);
-  const ol = local.ollama || {};
+  const ol = local.managed || {};
   if (ol.contextLength) out.OLLAMA_CONTEXT_LENGTH = String(ol.contextLength);
   if (ol.managedPort) out.OLLAMA_MANAGED_PORT = String(ol.managedPort);
   if (C.reasoning && C.reasoning.showThinking !== undefined) out.OPENAI_SHOW_THINKING = C.reasoning.showThinking ? "1" : "0";
@@ -389,7 +390,7 @@ function previewConfig(updates, file = jsonc.CONFIG_FILE) {
     const item = SCHEMA.find((s) => s.key === key);
     let parts;
     if (item && PATHS[key]) parts = PATHS[key].split(".");
-    else if (/^CONTEXT_.+/.test(key)) parts = ["providers", "local", "context", key.slice(8)];
+    else if (/^CONTEXT_.+/.test(key)) parts = ["providers", "ollama", "context", key.slice(8)];
     else continue;
     setPath(C, parts, toNative(value, item ? item.type : "ollama-context"));
   }

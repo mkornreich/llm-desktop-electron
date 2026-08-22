@@ -656,19 +656,19 @@ test("resolvePickedProvider parses a <provider>:<model> id, or null for unprefix
   }
 });
 
-test("resolvePickedProvider routes a keyless local:<model> pick to the on-device Ollama", () => {
+test("resolvePickedProvider routes a keyless ollama:<model> pick to the on-device Ollama", () => {
   // Local is keyless (no .openai-key entry), so unlike the remote providers it resolves
-  // unconditionally — the proxy routes it to the local Ollama /v1 and strips the "local:" prefix.
-  const l = resolvePickedProvider("local:qwen3:8b");
-  assert.ok(l, "local: pick must resolve without a key");
-  assert.equal(l.provider.id, "local");
-  assert.equal(l.provider.auth, "local");
+  // unconditionally — the proxy routes it to the local Ollama /v1 and strips the "ollama:" prefix.
+  const l = resolvePickedProvider("ollama:qwen3:8b");
+  assert.ok(l, "ollama: pick must resolve without a key");
+  assert.equal(l.provider.id, "ollama");
+  assert.equal(l.provider.auth, "ollama");
   assert.ok(["chat", "responses"].includes(l.provider.api), "local surface is config-driven (providers.local.api)");
   assert.equal(l.provider.isOpenAI, false);
   assert.equal(l.model, "qwen3:8b");
   assert.match(l.provider.baseURL, /\/v1$/);   // an Ollama /v1 base (LLMD_LOCAL_BASE, or the loopback default)
   // Split on the FIRST colon, so a model id keeps any colons of its own (an :tag / hf.co path).
-  assert.equal(resolvePickedProvider("local:hf.co/org/model:Q4").model, "hf.co/org/model:Q4");
+  assert.equal(resolvePickedProvider("ollama:hf.co/org/model:Q4").model, "hf.co/org/model:Q4");
 });
 
 test("classifier/compaction routing: an Ollama model:tag stays on the default, a provider prefix routes", () => {
@@ -678,32 +678,32 @@ test("classifier/compaction routing: an Ollama model:tag stays on the default, a
   // provider prefix routes to that provider.
   for (const tag of ["qwen3:1.7b", "gpt-oss:120b", "gemma4:latest"])
     assert.equal(resolvePickedProvider(tag), null, `${tag} is an Ollama tag -> default provider, not mis-routed`);
-  const l = resolvePickedProvider("local:qwen3:0.6b");
-  assert.ok(l && l.provider.id === "local" && l.model === "qwen3:0.6b", "local: prefix routes to on-device Ollama");
+  const l = resolvePickedProvider("ollama:qwen3:0.6b");
+  assert.ok(l && l.provider.id === "ollama" && l.model === "qwen3:0.6b", "ollama: prefix routes to on-device Ollama");
 });
 
 // ---------- composite (fallback) model ----------
 
 test("parseCompositeMembers trims, drops empties, keeps order", () => {
-  assert.deepEqual(parseCompositeMembers("openai:gpt-5.6-sol, local:qwen3:8b ,,  gemini:g "),
-    ["openai:gpt-5.6-sol", "local:qwen3:8b", "gemini:g"]);
+  assert.deepEqual(parseCompositeMembers("openai:gpt-5.6-sol, ollama:qwen3:8b ,,  gemini:g "),
+    ["openai:gpt-5.6-sol", "ollama:qwen3:8b", "gemini:g"]);
   assert.deepEqual(parseCompositeMembers(""), []);
   assert.deepEqual(parseCompositeMembers(null), []);
 });
 
 test("resolveComposite returns null unless reqModel is the composite id with a non-empty list", () => {
-  assert.equal(resolveComposite("claude-opus-4-8", { membersStr: "local:qwen3:8b" }), null);   // not the composite id
+  assert.equal(resolveComposite("claude-opus-4-8", { membersStr: "ollama:qwen3:8b" }), null);   // not the composite id
   assert.equal(resolveComposite("composite", { membersStr: "" }), null);                        // empty list
-  assert.equal(resolveComposite("composite", { compositeId: "", membersStr: "local:x" }), null);// feature off
+  assert.equal(resolveComposite("composite", { compositeId: "", membersStr: "ollama:x" }), null);// feature off
 });
 
 test("resolveComposite expands members in order, keyless local + bare, dropping unkeyed remotes", () => {
-  // local: is keyless (always resolves); a bare id -> the default provider; a remote member with no key
+  // ollama: is keyless (always resolves); a bare id -> the default provider; a remote member with no key
   // in .openai-key resolves to null and is dropped. So the surviving list is order-preserving.
-  const r = resolveComposite("composite", { membersStr: "local:qwen3:8b, some-bare-model, cohere:command-a-03-2025" });
+  const r = resolveComposite("composite", { membersStr: "ollama:qwen3:8b, some-bare-model, cohere:command-a-03-2025" });
   assert.ok(Array.isArray(r) && r.length >= 2, "local + bare always survive");
-  assert.equal(r[0].id, "local:qwen3:8b");
-  assert.equal(r[0].provider.id, "local");
+  assert.equal(r[0].id, "ollama:qwen3:8b");
+  assert.equal(r[0].provider.id, "ollama");
   assert.equal(r[0].model, "qwen3:8b");
   assert.equal(r[1].id, "some-bare-model");
   assert.equal(r[1].model, "some-bare-model");        // bare -> default provider, model unchanged
@@ -715,10 +715,10 @@ test("resolveComposite expands members in order, keyless local + bare, dropping 
 
 test("resolveComposite and resolveCompactChain drop members that cannot tool-call", () => {
   // groq/compound rejects a tools array outright, so it can never serve an agent turn and must not sit
-  // in either chain (nor waste a fallover attempt). local:qwen3:8b survives on both sides of it.
-  const comp = resolveComposite("composite", { membersStr: "local:qwen3:8b, groq:groq/compound, some-bare" });
+  // in either chain (nor waste a fallover attempt). ollama:qwen3:8b survives on both sides of it.
+  const comp = resolveComposite("composite", { membersStr: "ollama:qwen3:8b, groq:groq/compound, some-bare" });
   assert.deepEqual(comp.map((m) => m.model), ["qwen3:8b", "some-bare"], "compound dropped, order preserved");
-  const chain = resolveCompactChain({ membersStr: "local:qwen3:8b, groq:groq/compound-mini, some-bare" });
+  const chain = resolveCompactChain({ membersStr: "ollama:qwen3:8b, groq:groq/compound-mini, some-bare" });
   assert.deepEqual(chain.map((m) => m.model), ["qwen3:8b", "some-bare"], "compound-mini dropped from compaction too");
 });
 
@@ -737,9 +737,9 @@ test("resolveCompactChain: empty -> single default member, else ordered members"
   const dflt = resolveCompactChain({ membersStr: "" });
   assert.equal(dflt.length, 1, "empty chain -> one member (default provider + COMPACT_MODEL)");
   assert.ok(dflt[0].provider && dflt[0].provider.baseURL);
-  const chain = resolveCompactChain({ membersStr: "local:qwen3:8b, some-bare, cohere:command-a-03-2025" });
+  const chain = resolveCompactChain({ membersStr: "ollama:qwen3:8b, some-bare, cohere:command-a-03-2025" });
   assert.ok(chain.length >= 2, "local + bare always survive (cohere only with a key)");
-  assert.equal(chain[0].provider.id, "local");
+  assert.equal(chain[0].provider.id, "ollama");
   assert.equal(chain[0].model, "qwen3:8b");
   assert.equal(chain[1].model, "some-bare");              // bare id -> the default provider
   assert.ok(chain[1].provider && chain[1].provider.baseURL);
