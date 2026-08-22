@@ -93,14 +93,9 @@ async function wouldBreak(updates) {
   const env = { ...process.env, PORT: String(PROXY_PORT) };
   const before = new Set(cfg.validate({ resolved: cfg.resolve({ env }) }).errors);
 
-  // The prospective state: the project file's current values with the updates applied. Only
-  // .openai-model and .provider feed the proxy's configuration; .privacy and .sync do not.
-  const project = { ...config.readFile(".openai-model").values };
-  for (const [k, v] of Object.entries(updates)) {
-    const item = config.SCHEMA.find((s) => s.key === k);
-    if (item?.file === ".openai-model") project[k] = String(v);
-  }
-  const after = cfg.validate({ resolved: cfg.resolve({ env, project }) }).errors;
+  // The prospective state: config.jsonc with the updates applied to a fresh copy. previewConfig maps each
+  // GUI key to its JSONC path and native type, so validate() sees exactly what a save would persist.
+  const after = cfg.validate({ resolved: cfg.resolve({ env, config: config.previewConfig(updates) }) }).errors;
   return after.filter((e) => !before.has(e));
 }
 
@@ -268,7 +263,7 @@ async function handle(req, res) {
   try {
     if (url.pathname === "/api/config" && req.method === "GET")
       return send(res, 200, { schema: config.SCHEMA, values: config.readValues(), root: config.ROOT,
-                              localModel: config.readFile(".local-model").values });
+                              localModel: config.localModelValues() });
 
     if (url.pathname === "/api/config" && req.method === "POST") {
       const updates = await readJson(req);
@@ -281,7 +276,7 @@ async function handle(req, res) {
         return send(res, 400, { error: `These values cannot work: ${bad.join("; ")}`, errors: bad });
       const written = config.writeValues(updates);
       return send(res, 200, { written, values: config.readValues(),
-                              localModel: config.readFile(".local-model").values });
+                              localModel: config.localModelValues() });
     }
 
     // Installed Ollama models, for the local model picker. Unioned across the managed side port
@@ -293,11 +288,11 @@ async function handle(req, res) {
     // thinking on, non-thinking models are filtered out rather than left selectable to fail at
     // runtime; with thinking explicitly off, every installed model is offered.
     if (url.pathname === "/api/ollama-models" && req.method === "GET") {
-      const localVals = config.readFile(".local-model").values;
+      const localVals = config.localModelValues();
       const managed = parseInt(localVals.OLLAMA_MANAGED_PORT || "11435", 10) || 11435;
       const ports = [...new Set([managed, 11434])];
-      // OPENAI_SHOW_THINKING may live in either file; default (unset) is ON, matching the proxy.
-      const showThinkingRaw = localVals.OPENAI_SHOW_THINKING ?? config.readFile(".openai-model").values.OPENAI_SHOW_THINKING;
+      // OPENAI_SHOW_THINKING from config.jsonc reasoning.showThinking; default (unset) is ON, matching the proxy.
+      const showThinkingRaw = localVals.OPENAI_SHOW_THINKING;
       const requireThinking = showThinkingRaw === undefined
         ? true : !/^(0|false|off|no)$/i.test(String(showThinkingRaw).trim());
 
@@ -342,7 +337,7 @@ async function handle(req, res) {
     // that is set but unlisted, so a missing source never drops a valid id.
     if (url.pathname === "/api/composite-choices" && req.method === "GET") {
       const sug = (key) => (config.SCHEMA.find((s) => s.key === key) || {}).suggestions || [];
-      const configured = (file) => { const v = config.readFile(file).values.OPENAI_MODEL; return v ? [v] : []; };
+      const configured = (providerId) => { const v = config.providerModel(providerId); return v ? [v] : []; };
       // ?responses=1 -> only providers that serve /responses (the compaction summariser calls it). Mirrors
       // config.mjs RESPONSES_PROVIDER_IDS (kept in sync by hand — server.js is CommonJS, can't import the ESM).
       const respOnly = url.searchParams.get("responses") === "1";
@@ -359,16 +354,16 @@ async function handle(req, res) {
         if (seen.has(id)) return; seen.add(id);
         choices.push({ id, label: `${provider}: ${model}`, provider });
       };
-      for (const m of [...sug("OPENAI_MODEL"), ...configured(".openai-model")]) add("openai", m);
-      for (const m of [...sug("GEMINI_MODEL"), ...configured(".gemini-model")]) add("gemini", m);
-      for (const m of [...sug("COHERE_MODEL"), ...configured(".cohere-model")]) add("cohere", m);
-      for (const m of [...sug("MISTRAL_MODEL"), ...configured(".mistral-model")]) add("mistral", m);
-      for (const m of [...sug("GROQ_MODEL"), ...configured(".groq-model")]) add("groq", m);
-      for (const m of [...sug("OLLAMA_MODEL"), ...configured(".ollama-model")]) add("ollama", m);
-      for (const m of configured(".openrouter-model")) add("openrouter", m);
+      for (const m of [...sug("OPENAI_MODEL"), ...configured("openai")]) add("openai", m);
+      for (const m of [...sug("GEMINI_MODEL"), ...configured("gemini")]) add("gemini", m);
+      for (const m of [...sug("COHERE_MODEL"), ...configured("cohere")]) add("cohere", m);
+      for (const m of [...sug("MISTRAL_MODEL"), ...configured("mistral")]) add("mistral", m);
+      for (const m of [...sug("GROQ_MODEL"), ...configured("groq")]) add("groq", m);
+      for (const m of [...sug("OLLAMA_MODEL"), ...configured("ollama")]) add("ollama", m);
+      for (const m of configured("openrouter")) add("openrouter", m);
       // Local Ollama thinking models (live) — same discovery as /api/ollama-models.
       try {
-        const localVals = config.readFile(".local-model").values;
+        const localVals = config.localModelValues();
         const managed = parseInt(localVals.OLLAMA_MANAGED_PORT || "11435", 10) || 11435;
         const ports = [...new Set([managed, 11434])];
         const port = new Map();

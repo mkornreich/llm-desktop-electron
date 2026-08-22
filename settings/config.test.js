@@ -9,116 +9,101 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { SCHEMA } = require("./config.js");
+const { SCHEMA, readValues, writeValues } = require("./config.js");
+const jsonc = require("../openai-proxy/jsonc.cjs");
 
-// Work on a scratch copy so the real dot files are never touched by a test run.
-function withTempRoot(files, fn) {
+// A scratch config.jsonc so the real one is never touched by a test run.
+function withTempConfig(body, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-test-"));
-  for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body);
-  // Re-require config.js with __dirname pointing inside the scratch dir.
-  const sub = path.join(dir, "settings");
-  fs.mkdirSync(sub);
-  fs.copyFileSync(path.join(__dirname, "config.js"), path.join(sub, "config.js"));
-  delete require.cache[path.join(sub, "config.js")];
-  const mod = require(path.join(sub, "config.js"));
-  try { return fn(mod, dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  const file = path.join(dir, "config.jsonc");
+  fs.writeFileSync(file, body);
+  try { return fn(file); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
-const DOCUMENTED = `# Which model provider backs the agent.
-#
-#   openai     -> route through the proxy
-#   anthropic  -> call Anthropic directly
-#
-# Long explanation that must survive a write.
-PROVIDER=openai
+const SAMPLE = `{
+  // which provider backs the agent — a long doc line that must survive a write
+  "mode": "proxy",
+  "defaultProvider": "local",
+  "providers": { "local": { "model": "gemma4:latest", "context": { "granite4.1:8b": 65536 } } },
+  "reasoning": { "effort": "max", "showThinking": true },
+  "privacy": { "disableTelemetry": true }
+}
 `;
 
-test("writing a value preserves every comment and the file shape", () => {
-  withTempRoot({ ".provider": DOCUMENTED }, (mod, dir) => {
-    mod.writeValues({ PROVIDER: "anthropic" });
-    const after = fs.readFileSync(path.join(dir, ".provider"), "utf8");
-    assert.match(after, /^PROVIDER=anthropic$/m);
-    assert.ok(!/PROVIDER=openai/.test(after), "old value must be gone");
-    // every comment line survives, in order
-    const before = DOCUMENTED.split("\n").filter((l) => l.startsWith("#"));
-    const now = after.split("\n").filter((l) => l.startsWith("#"));
-    assert.deepEqual(now, before, "comments must be byte-identical and in order");
-    assert.equal(after.split("\n").length, DOCUMENTED.split("\n").length, "no lines added or lost");
+test("writing a value edits config.jsonc in place and preserves every comment", () => {
+  withTempConfig(SAMPLE, (file) => {
+    writeValues({ PROVIDER: "anthropic" }, file);
+    const after = fs.readFileSync(file, "utf8");
+    assert.match(after, /"mode": "anthropic"/);
+    assert.ok(!/"mode": "proxy"/.test(after), "old value must be gone");
+    assert.match(after, /a long doc line that must survive a write/, "the comment survives");
+    assert.equal(jsonc.readConfigText(after).defaultProvider, "local", "siblings are untouched");
   });
 });
 
-test("a key absent from the file is appended, not silently dropped", () => {
-  withTempRoot({ ".openai-model": "# header\nOPENAI_MODEL=gpt-5.4\n" }, (mod, dir) => {
-    mod.writeValues({ OPENAI_THINKING_MIN_BUDGET: "4000" });
-    const after = fs.readFileSync(path.join(dir, ".openai-model"), "utf8");
-    assert.match(after, /^OPENAI_THINKING_MIN_BUDGET=4000$/m);
-    assert.match(after, /# header/);
-    assert.match(after, /OPENAI_MODEL=gpt-5\.4/);
-    assert.match(after, /Added by the settings window/);
+test("types round-trip: bool -> JSON boolean, int -> number, composite -> array", () => {
+  withTempConfig(SAMPLE, (file) => {
+    // showThinking exists (replaced); minBudget + composite are absent leaves (inserted).
+    writeValues({ OPENAI_SHOW_THINKING: "0", OPENAI_THINKING_MIN_BUDGET: "4000", OPENAI_COMPOSITE_MODELS: "a, b ,c" }, file);
+    const c = jsonc.readConfig(file);
+    assert.equal(c.reasoning.showThinking, false, "bool stored as a real boolean");
+    assert.equal(c.reasoning.minBudget, 4000, "int stored as a number");
+    assert.deepEqual(c.composite, ["a", "b", "c"], "composite stored as a trimmed array");
   });
 });
 
-test("a commented-out key is not mistaken for the real one", () => {
-  // .privacy documents the setting in prose above it — the writer must not edit the comment.
-  const body = "# DISABLE_TELEMETRY=1 -> turn OFF all telemetry\n#\nDISABLE_TELEMETRY=1\n";
-  withTempRoot({ ".privacy": body }, (mod, dir) => {
-    mod.writeValues({ DISABLE_TELEMETRY: "0" });
-    const after = fs.readFileSync(path.join(dir, ".privacy"), "utf8");
-    assert.match(after, /^# DISABLE_TELEMETRY=1 -> turn OFF all telemetry$/m, "comment untouched");
-    assert.match(after, /^DISABLE_TELEMETRY=0$/m, "real line updated");
+test("reading maps native JSONC values back to the GUI string form", () => {
+  withTempConfig(SAMPLE, (file) => {
+    const v = readValues(file);
+    assert.equal(v.PROVIDER.value, "proxy");
+    assert.equal(v.OPENAI_SHOW_THINKING.value, "1", "true -> '1' for the checkbox");
+    assert.equal(v.DISABLE_TELEMETRY.value, "1");
+    assert.equal(v.LOCAL_MODEL.value, "gemma4:latest");
   });
 });
 
-test("writes are grouped per file and only touch the files involved", () => {
-  withTempRoot({ ".provider": "PROVIDER=openai\n", ".sync": "SYNC_CLAUDE_SESSIONS=1\n" }, (mod, dir) => {
-    const before = fs.readFileSync(path.join(dir, ".sync"), "utf8");
-    const written = mod.writeValues({ PROVIDER: "anthropic" });
-    assert.deepEqual(written, [".provider"]);
-    assert.equal(fs.readFileSync(path.join(dir, ".sync"), "utf8"), before, "untouched file must be byte-identical");
+test("a per-model CONTEXT_<model> with a dotted name is one path segment", () => {
+  withTempConfig(SAMPLE, (file) => {
+    writeValues({ "CONTEXT_granite4.1:8b": "32768" }, file);
+    const c = jsonc.readConfig(file);
+    assert.equal(c.providers.local.context["granite4.1:8b"], 32768, "the '.' in the model name is not a path split");
   });
 });
 
 test("unknown keys are ignored rather than written", () => {
-  withTempRoot({ ".provider": "PROVIDER=openai\n" }, (mod, dir) => {
-    const written = mod.writeValues({ NOT_A_REAL_SETTING: "x" });
-    assert.deepEqual(written, []);
-    assert.equal(fs.readFileSync(path.join(dir, ".provider"), "utf8"), "PROVIDER=openai\n");
+  withTempConfig(SAMPLE, (file) => {
+    const before = fs.readFileSync(file, "utf8");
+    assert.deepEqual(writeValues({ NOT_A_REAL_SETTING: "x" }, file), []);
+    assert.equal(fs.readFileSync(file, "utf8"), before, "the file is untouched");
   });
 });
 
 test("reading falls back to the schema default when a key is absent", () => {
-  withTempRoot({ ".provider": "PROVIDER=anthropic\n" }, (mod) => {
-    const v = mod.readValues();
+  withTempConfig(`{ "mode": "anthropic" }\n`, (file) => {
+    const v = readValues(file);
     assert.equal(v.PROVIDER.value, "anthropic");
     assert.equal(v.PROVIDER.fromFile, true);
-    // absent from the scratch dir entirely
-    assert.equal(v.DISABLE_TELEMETRY.value, "1");
+    assert.equal(v.DISABLE_TELEMETRY.value, "1", "absent -> schema default");
     assert.equal(v.DISABLE_TELEMETRY.fromFile, false);
   });
 });
 
-test("the schema covers every parameter the proxy and launcher read", () => {
-  // Guards against adding a knob to proxy.mjs and forgetting to surface it in the GUI.
-  const proxy = fs.readFileSync(path.join(__dirname, "..", "openai-proxy", "proxy.mjs"), "utf8");
-  const run = fs.readFileSync(path.join(__dirname, "..", "run.sh"), "utf8");
-  const keys = new Set(SCHEMA.map((s) => s.key));
-  const fromProxy = new Set([...proxy.matchAll(/PROJECT\.([A-Z_]+)/g)].map((m) => m[1]));
-  const missing = [...fromProxy].filter((k) => !keys.has(k));
-  assert.deepEqual(missing, [], `proxy reads settings the GUI does not expose: ${missing}`);
-  for (const k of ["PROVIDER", "DISABLE_TELEMETRY", "SYNC_CLAUDE_SESSIONS"])
-    assert.ok(run.includes(k) && keys.has(k), `${k} must be read by run.sh and exposed`);
-
-  // The check above only sees what the PROXY reads (PROJECT.X). Anything run.sh reads straight
-  // out of a dot file slipped past it — which is how CLAUDE_CODE_AUTO_COMPACT_WINDOW, the knob
-  // that decides the context window the app displays, stayed invisible in the GUI. So assert
-  // against the dot files themselves: if a setting is persisted, it is exposed.
-  for (const f of [".provider", ".privacy", ".sync", ".openai-model", ".diagnostics", ".openrouter-model", ".cohere-model", ".gemini-model", ".mistral-model", ".groq-model", ".ollama-model"]) {
-    const txt = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
-    const persisted = [...txt.matchAll(/^([A-Z][A-Z0-9_]+)=/gm)].map((m) => m[1]);
-    assert.ok(persisted.length, `${f} should define at least one setting`);
-    const absent = persisted.filter((k) => !keys.has(k));
-    assert.deepEqual(absent, [], `${f} persists settings the GUI does not expose: ${absent}`);
+test("every GUI setting maps to a live path in config.jsonc, and the key knobs are covered", () => {
+  // Guards against a GUI setting pointing at a config.jsonc path that does not exist (a dead editor field),
+  // and against adding a section without exposing its knobs. Every setting's PARENT object must exist so
+  // writeValues can replace or insert the leaf; and the load-bearing knobs must be present in PATHS.
+  const { PATHS } = require("./config.js");
+  const C = jsonc.readConfig();
+  const getPath = (o, d) => d.split(".").reduce((x, k) => (x == null ? undefined : x[k]), o);
+  for (const [key, p] of Object.entries(PATHS)) {
+    const parent = p.includes(".") ? getPath(C, p.slice(0, p.lastIndexOf("."))) : C;
+    assert.ok(parent && typeof parent === "object", `GUI path for ${key} ('${p}') has no parent object in config.jsonc`);
   }
+  const exposed = new Set(Object.values(PATHS));
+  for (const p of ["mode", "defaultProvider", "providers.local.model", "reasoning.effort",
+                   "output.maxTurnOutputTokens", "privacy.disableTelemetry", "sync.sessions",
+                   "diagnostics.ultracode", "compaction.autoCompactWindow"])
+    assert.ok(exposed.has(p), `${p} must be exposed in the GUI (PATHS)`);
 });
 
 test("the provider enum is proxy|anthropic with a default-upstream selector", () => {

@@ -8,6 +8,7 @@
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
+const jsonc = require("../openai-proxy/jsonc.cjs");   // shared comment-preserving JSONC reader/editor
 
 const ROOT = path.resolve(__dirname, "..");
 const filePath = (f) => path.join(ROOT, f);
@@ -318,50 +319,126 @@ function readFile(f) {
   return { values: out, exists: true };
 }
 
-// Current value of every parameter, falling back to the schema default.
-function readValues() {
-  const cache = {};
+// config.jsonc path for each SCHEMA key. The GUI still groups/dims settings by their `file` label, but the
+// VALUES all live in the one config.jsonc now. LOCAL_CONTEXT is special — a per-model CONTEXT_<model> the
+// picker generates from the selected model — and is handled in writeValues.
+const PATHS = {
+  PROVIDER: "mode", DEFAULT_PROVIDER: "defaultProvider",
+  LOCAL_MODEL: "providers.local.model", LOCAL_API: "providers.local.api",
+  OLLAMA_AUTOSTART: "providers.local.ollama.autostart", OLLAMA_KEEP_ALIVE: "providers.local.ollama.keepAlive",
+  OLLAMA_MANAGED_PORT: "providers.local.ollama.managedPort",
+  OPENROUTER_MODEL: "providers.openrouter.model", OPENROUTER_API: "providers.openrouter.api",
+  COHERE_MODEL: "providers.cohere.model", COHERE_API: "providers.cohere.api",
+  GEMINI_MODEL: "providers.gemini.model", GEMINI_API: "providers.gemini.api",
+  MISTRAL_MODEL: "providers.mistral.model", MISTRAL_API: "providers.mistral.api",
+  GROQ_MODEL: "providers.groq.model", GROQ_API: "providers.groq.api",
+  OLLAMA_MODEL: "providers.ollama.model", OLLAMA_API: "providers.ollama.api",
+  OPENAI_MODEL: "providers.openai.model", OPENAI_API: "providers.openai.api",
+  OPENAI_CLAUDE_CODE_MODEL: "providers.openai.claudeCodeModel",
+  OPENAI_CLASSIFIER_MODEL: "classifier.prefix", OPENAI_CLASSIFIER_SAFETY_MODEL: "classifier.safety",
+  OPENAI_CLASSIFIER_MAX_TOOLS: "classifier.maxTools", OPENAI_CLASSIFIER_SLOW_MS: "classifier.slowMs",
+  CLAUDE_CODE_BG_CLASSIFIER_MODEL: "classifier.background",
+  OPENAI_PICKER_MODELS: "picker.models", DROPDOWN_MODELS: "picker.dropdownModels",
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "picker.gatewayModelDiscovery",
+  OPENAI_COMPOSITE_MODELS: "composite", OPENAI_COMPOSITE_MAX_WAIT_MS: "compositeMaxWaitMs", OPENAI_COMPACT_MODELS: "compact",
+  OPENAI_REASONING_EFFORT: "reasoning.effort", OPENAI_SHOW_THINKING: "reasoning.showThinking",
+  OPENAI_THINKING_MIN_BUDGET: "reasoning.minBudget", OPENAI_VERBOSITY: "reasoning.verbosity",
+  OPENAI_PERSISTENCE: "agent.persistence", OPENAI_AUTO_CONTINUE: "agent.autoContinue",
+  OPENAI_MAX_CONTINUATIONS: "agent.maxContinuations", OPENAI_OUTPUT_FIXUPS: "agent.outputFixups", OPENAI_TASK_ECHO: "agent.taskEcho",
+  OPENAI_EMPTY_RETRY: "output.emptyRetry", OPENAI_MAX_TRANSPORT_RETRIES: "output.maxTransportRetries",
+  OPENAI_MAX_EMPTY_RETRIES: "output.maxEmptyRetries", OPENAI_CONTINUE_ON_TRUNCATION: "output.continueOnTruncation",
+  OPENAI_MAX_TURN_OUTPUT_TOKENS: "output.maxTurnOutputTokens", OPENAI_DEFAULT_MAX_TOKENS: "output.defaultMaxTokens",
+  OPENAI_MAX_TEXT_CHARS: "compaction.maxTextChars", OPENAI_COMPACT_SUMMARY: "compaction.summary",
+  OPENAI_COMPACT_MODEL: "compaction.model", CLAUDE_CODE_AUTO_COMPACT_WINDOW: "compaction.autoCompactWindow",
+  PROXY_SEND_CHROME_TOOLS: "tools.sendChromeTools", PROXY_SEND_IOS_TOOLS: "tools.sendIosTools",
+  PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
+  DISABLE_TELEMETRY: "privacy.disableTelemetry",
+  SYNC_CLAUDE_SESSIONS: "sync.sessions", SYNC_CLAUDE_GROUPING: "sync.grouping",
+  DESKTOP_LOG_LEVEL: "diagnostics.logLevel", PROXY_DUMP_TOOLS: "diagnostics.dumpTools", ULTRACODE_DEFAULT: "diagnostics.ultracode",
+};
+const getPath = (o, dot) => String(dot).split(".").reduce((x, k) => (x == null ? undefined : x[k]), o);
+const isArrayType = (t) => t === "composite";   // composite/compact/dropdown are JSON arrays; every other type is a scalar
+
+// JSONC native value -> the string form the GUI widgets use (bool -> "1"/"0", array -> comma-joined).
+function toGui(v, type) {
+  if (v === undefined || v === null) return undefined;
+  if (isArrayType(type)) return Array.isArray(v) ? v.join(",") : String(v);
+  if (type === "bool") return v ? "1" : "0";
+  return String(v);
+}
+// GUI string -> the JSONC native value to store.
+function toNative(s, type) {
+  if (isArrayType(type)) return String(s).split(",").map((x) => x.trim()).filter(Boolean);
+  if (type === "bool") return String(s) !== "0";
+  if (type === "int" || type === "ollama-context") { const n = parseInt(s, 10); return Number.isNaN(n) ? 0 : n; }
+  return String(s);
+}
+
+// Current value of every parameter (in GUI string form), falling back to the schema default.
+function readValues(file = jsonc.CONFIG_FILE) {
+  const C = jsonc.readConfig(file);
   const result = {};
   for (const item of SCHEMA) {
-    cache[item.file] ||= readFile(item.file).values;
-    const raw = cache[item.file][item.fileKey || item.key];
-    result[item.key] = { value: raw === undefined ? item.default : raw, fromFile: raw !== undefined };
+    const p = PATHS[item.key];
+    const gui = toGui(p ? getPath(C, p) : undefined, item.type);   // LOCAL_CONTEXT + any unmapped -> default
+    result[item.key] = { value: gui === undefined ? item.default : gui, fromFile: gui !== undefined };
   }
   return result;
 }
 
-// Surgical write: replace the KEY= line in place, or append if absent. Everything else in
-// the file — every comment, blank line and ordering — is preserved byte for byte.
-function writeValues(updates) {
-  const byFile = new Map();
+// Write each changed value into config.jsonc, preserving every comment / blank line / key order
+// (jsonc.editConfig edits one value span in place). The path is passed as an ARRAY so a model name that
+// itself contains a dot (e.g. CONTEXT_granite4.1:8b) is one path segment, not two.
+function writeValues(updates, file = jsonc.CONFIG_FILE) {
+  let wrote = false;
   for (const [key, value] of Object.entries(updates)) {
     const item = SCHEMA.find((s) => s.key === key);
-    // Per-model context lines (CONTEXT_<model>) are written straight to .local-model even though
-    // they are not fixed schema keys — the model picker generates the key from the selection.
-    const file = item ? item.file : (/^CONTEXT_.+/.test(key) ? ".local-model" : null);
-    const fileKey = item ? (item.fileKey || item.key) : key;
-    if (!file) continue;                                   // ignore unknown keys
-    if (!byFile.has(file)) byFile.set(file, []);
-    byFile.get(file).push([fileKey, String(value)]);
+    let pathArr;
+    if (item && PATHS[key]) pathArr = PATHS[key].split(".");
+    else if (/^CONTEXT_.+/.test(key)) pathArr = ["providers", "local", "context", key.slice(8)];   // per-model context
+    else continue;                                          // unknown key
+    jsonc.editConfig(file, pathArr, toNative(value, item ? item.type : "ollama-context"));
+    wrote = true;
   }
-  const written = [];
-  for (const [file, pairs] of byFile) {
-    const p = filePath(file);
-    let text = "";
-    try { text = fs.readFileSync(p, "utf8"); } catch { text = ""; }
-    const hadTrailingNewline = text.endsWith("\n") || text === "";
-    let lines = text.split(/\r?\n/);
-    if (hadTrailingNewline && lines[lines.length - 1] === "") lines.pop();
-    for (const [key, value] of pairs) {
-      const re = new RegExp(`^\\s*${key}\\s*=`);
-      const idx = lines.findIndex((l) => re.test(l) && !l.trim().startsWith("#"));
-      if (idx >= 0) lines[idx] = `${key}=${value}`;
-      else lines.push("", `# Added by the settings window.`, `${key}=${value}`);
-    }
-    fs.writeFileSync(p, lines.join("\n") + "\n");
-    written.push(file);
-  }
-  return written;
+  return wrote ? ["config.jsonc"] : [];
 }
 
-module.exports = { SCHEMA, ROOT, readFile, readValues, writeValues, filePath };
+// A flat, KV-shaped view of the local provider's settings — for the GUI's per-model context widget and the
+// /api/config `localModel` payload (index.html's modelCtx/maxCtx read CONTEXT_<model> + OLLAMA_CONTEXT_LENGTH,
+// and the ollama-models endpoint reads OPENAI_SHOW_THINKING). Rebuilt from config.jsonc so it survives the
+// dotfile removal.
+function localModelValues(file = jsonc.CONFIG_FILE) {
+  const C = jsonc.readConfig(file);
+  const local = (C.providers && C.providers.local) || {};
+  const out = {};
+  for (const [m, ctx] of Object.entries(local.context || {})) out["CONTEXT_" + m] = String(ctx);
+  const ol = local.ollama || {};
+  if (ol.contextLength) out.OLLAMA_CONTEXT_LENGTH = String(ol.contextLength);
+  if (ol.managedPort) out.OLLAMA_MANAGED_PORT = String(ol.managedPort);
+  if (C.reasoning && C.reasoning.showThinking !== undefined) out.OPENAI_SHOW_THINKING = C.reasoning.showThinking ? "1" : "0";
+  return out;
+}
+// The configured model id for a provider (for the composite / model-picker catalog).
+function providerModel(id, file = jsonc.CONFIG_FILE) {
+  const C = jsonc.readConfig(file);
+  return (C.providers && C.providers[id] && C.providers[id].model) || "";
+}
+// config.jsonc with the GUI `updates` applied to a fresh copy — for pre-write validation (wouldBreak).
+function previewConfig(updates, file = jsonc.CONFIG_FILE) {
+  const C = jsonc.readConfig(file);   // a fresh object each call, safe to mutate
+  const setPath = (o, parts, val) => { let x = o; for (let i = 0; i < parts.length - 1; i++) { if (typeof x[parts[i]] !== "object" || x[parts[i]] == null) x[parts[i]] = {}; x = x[parts[i]]; } x[parts[parts.length - 1]] = val; };
+  for (const [key, value] of Object.entries(updates)) {
+    const item = SCHEMA.find((s) => s.key === key);
+    let parts;
+    if (item && PATHS[key]) parts = PATHS[key].split(".");
+    else if (/^CONTEXT_.+/.test(key)) parts = ["providers", "local", "context", key.slice(8)];
+    else continue;
+    setPath(C, parts, toNative(value, item ? item.type : "ollama-context"));
+  }
+  return C;
+}
+
+module.exports = {
+  SCHEMA, ROOT, readFile, readValues, writeValues, filePath, PATHS, CONFIG_FILE: jsonc.CONFIG_FILE,
+  readConfig: jsonc.readConfig, localModelValues, providerModel, previewConfig,
+};
