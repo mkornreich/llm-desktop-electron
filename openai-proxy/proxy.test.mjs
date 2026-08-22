@@ -31,9 +31,10 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
-        rememberSignature, recallSignature, sigFromToolCall, providerALS,
+        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic,
         approxTokens, kilo } =
   await import("./proxy.mjs");
+const { ToolRegistry } = await import("./tool-registry.mjs");
 
 // ---------- math delimiter rewriting ----------
 
@@ -560,6 +561,22 @@ test("the signature store is bounded (evicts oldest past the cap)", () => {
   for (let i = 0; i < 4100; i++) rememberSignature("bulk_" + i, "s" + i);
   assert.equal(recallSignature("bulk_0"), undefined, "oldest evicted past the 4000 cap");
   assert.equal(recallSignature("bulk_4099"), "s4099", "newest retained");
+});
+
+// ---------- composite member surfaced in the thinking panel ----------
+
+test("a composite turn leads with a thinking line naming the member; a normal turn does not", () => {
+  const registry = ToolRegistry.from([]);
+  const oai = { choices: [{ message: { content: "hello there", tool_calls: [] }, finish_reason: "stop" }], usage: {} };
+  const composite = toAnthropic(oai, "composite", registry, "gemini:gemini-3-flash-preview");
+  assert.equal(composite.content[0].type, "thinking", "thinking block leads");
+  assert.match(composite.content[0].thinking, /composite → gemini:gemini-3-flash-preview/);
+  assert.equal(composite.content[1].type, "text");
+  assert.match(composite.content[1].text, /hello there/);
+  // no note (direct pick) -> no injected thinking block
+  const plain = toAnthropic(oai, "gemini:gemini-3-flash-preview", registry, null);
+  assert.notEqual(plain.content[0]?.type, "thinking");
+  assert.equal(plain.content[0].type, "text");
 });
 
 // ---------- auto-continue trigger ----------
