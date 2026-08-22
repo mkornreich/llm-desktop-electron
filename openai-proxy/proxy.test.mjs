@@ -438,6 +438,15 @@ test("resolveComposite expands members in order, keyless local + bare, dropping 
   if (cohere) { assert.equal(cohere.provider.id, "cohere"); assert.equal(cohere.model, "command-a-03-2025"); }
 });
 
+test("resolveComposite and resolveCompactChain drop members that cannot tool-call", () => {
+  // groq/compound rejects a tools array outright, so it can never serve an agent turn and must not sit
+  // in either chain (nor waste a fallover attempt). local:qwen3:8b survives on both sides of it.
+  const comp = resolveComposite("composite", { membersStr: "local:qwen3:8b, groq:groq/compound, some-bare" });
+  assert.deepEqual(comp.map((m) => m.model), ["qwen3:8b", "some-bare"], "compound dropped, order preserved");
+  const chain = resolveCompactChain({ membersStr: "local:qwen3:8b, groq:groq/compound-mini, some-bare" });
+  assert.deepEqual(chain.map((m) => m.model), ["qwen3:8b", "some-bare"], "compound-mini dropped from compaction too");
+});
+
 test("parseRetryAfter handles delta-seconds and HTTP-date, else null", () => {
   const h = (v) => ({ get: (k) => (k === "retry-after" ? v : null) });
   assert.equal(parseRetryAfter(h("120")), 120000);
@@ -1598,8 +1607,22 @@ test("an unsupported parameter is dropped by name and retried, on both surfaces"
   assert.equal(hits.length, 2, "both callOpenAI and callResponses must recover");
   assert.equal((src.match(/rejected '\$\{bad(\[1\])?\}' — dropped it and retried/g) || []).length, 2);
   // it must only drop a parameter that is actually present, never blindly
-  assert.match(src, /if \(base\[bad\[1\]\] !== undefined\)/);
-  assert.match(src, /if \(payload\[bad\] !== undefined\)/);
+  assert.match(src, /if \(base\[bad\[1\]\] !== undefined\)/);        // chat surface (top-level)
+  assert.match(src, /else if \(hasPath\(payload, bad\)\)/);          // responses surface (nested paths)
+  // the responses recovery also understands groq's "Field 'x' is not supported" dialect, not just
+  // OpenAI's machine-readable {"param":"x"} — otherwise a groq member 400s and never self-heals.
+  assert.ok(src.includes("Field '([^']+)' is not supported"), "groq unsupported-field dialect recognised");
+});
+
+test("a nested rejected field is stripped by path, leaving its siblings intact", () => {
+  // groq rejects reasoning.summary (which the proxy sets unconditionally) but accepts reasoning.effort.
+  // Dropping the whole `reasoning` object would throw away the effort too, so the strip must be by path.
+  const payload = { model: "test-model-nested", reasoning: { effort: "high", summary: "detailed" }, max_tokens: 50 };
+  rememberUnsupported("test-model-nested", "reasoning.summary", "responses");
+  const after = stripUnsupported(payload, "responses");
+  assert.equal(after.reasoning.summary, undefined, "the rejected nested field is gone");
+  assert.equal(after.reasoning.effort, "high", "its sibling survives");
+  assert.equal(payload.reasoning.summary, "detailed", "the caller's object is not mutated");
 });
 
 // ---------- per-model unsupported-parameter memo ----------

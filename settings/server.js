@@ -347,10 +347,14 @@ async function handle(req, res) {
       // config.mjs RESPONSES_PROVIDER_IDS (kept in sync by hand — server.js is CommonJS, can't import the ESM).
       const respOnly = url.searchParams.get("responses") === "1";
       const RESPONSES_PROVIDERS = new Set(["openai", "groq", "ollama", "local"]);
+      // Models that cannot do tool calling never appear as a selectable member. Mirrors config.mjs
+      // NON_TOOL_MODEL_RES / isNonToolModel verbatim (server.js is CommonJS, can't import that ESM module).
+      const NON_TOOL_MODEL_RES = [/(^|[:/])compound(-mini)?$/i];
+      const isNonToolModel = (id) => { const s = String(id || ""); const m = s.includes(":") ? s.slice(s.indexOf(":") + 1) : s; return NON_TOOL_MODEL_RES.some((re) => re.test(m) || re.test(s)); };
       const choices = [];
       const seen = new Set();
       const add = (provider, model) => {
-        if (!model || (respOnly && !RESPONSES_PROVIDERS.has(provider))) return;
+        if (!model || (respOnly && !RESPONSES_PROVIDERS.has(provider)) || isNonToolModel(model)) return;
         const id = `${provider}:${model}`;
         if (seen.has(id)) return; seen.add(id);
         choices.push({ id, label: `${provider}: ${model}`, provider });

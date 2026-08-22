@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   resolve as resolveConfig, snapshot, configHash, codeVersion, validate, provider,
-  PROVIDERS, providerForBase, providerKeys, isLocalEndpoint,
+  PROVIDERS, providerForBase, providerKeys, isLocalEndpoint, isNonToolModel,
 } from "./config.mjs";
 import {
   newInstanceId, writeManifest, readManifest, clearManifest, REPO,
@@ -190,6 +190,7 @@ export function resolveComposite(reqModel, { compositeId = COMPOSITE_ID, members
   if (!compositeId || String(reqModel) !== compositeId) return null;
   const out = [];
   for (const id of parseCompositeMembers(membersStr)) {
+    if (isNonToolModel(id)) { log(`  composite: skipping ${id} — cannot do tool calling`); continue; }
     if (id.includes(":")) {
       const picked = resolvePickedProvider(id);
       if (picked) out.push({ id, provider: picked.provider, model: picked.model });
@@ -234,7 +235,7 @@ async function fetchProviderCatalog(reg) {
     const data = (await r.json())?.data || [];
     return data
       .map((m) => String(m.id || "").replace(/^models\//, ""))    // Gemini ids arrive as "models/gemini-…"
-      .filter((id) => id && !NON_CHAT_MODEL_RE.test(id))
+      .filter((id) => id && !NON_CHAT_MODEL_RE.test(id) && !isNonToolModel(id))   // agent needs tools: drop compound et al.
       .map((id) => ({ id: `${reg.id}:${id}`, name: `${reg.label}: ${id}` }));
   } catch (e) { log(`  /v1/models: ${reg.id} catalog fetch failed (${e.message})`); return []; }
 }
@@ -500,6 +501,7 @@ export function resolveCompactChain({ membersStr = OPENAI_COMPACT_MODELS } = {})
   if (!ids.length) return single;
   const out = [];
   for (const id of ids) {
+    if (isNonToolModel(id)) { log(`  ! compaction: skipping ${id} — cannot do tool calling`); continue; }
     if (id.includes(":")) {
       const picked = resolvePickedProvider(id);
       if (picked) out.push({ provider: picked.provider, model: picked.model });

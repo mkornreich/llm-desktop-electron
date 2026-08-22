@@ -306,6 +306,18 @@ export const PROVIDERS = {
 // 404s). local = on-device Ollama, which serves /responses on recent versions. (openrouter is per-model, so
 // left out to be safe.) Used by validate() and mirrored by the settings picker's responses-only filter.
 export const RESPONSES_PROVIDER_IDS = new Set(["openai", "groq", "ollama", "local"]);
+// Models that CANNOT do tool calling, so they must never serve an agent turn, sit in a fallback chain, or
+// be offered as a selectable model. groq's "compound" systems are agentic pipelines that reject a `tools`
+// array outright ("tool calling is not supported with this model"), and an agent turn always carries tools —
+// so a chain member that is one is a guaranteed-dead slot. Evidence-based (probed against each provider's
+// API); extend the patterns as more surface. Matched against the model segment of a `<provider>:<model>` id
+// AND the whole id. Mirrored verbatim in settings/server.js (CommonJS — cannot import this ESM module).
+export const NON_TOOL_MODEL_RES = [/(^|[:/])compound(-mini)?$/i];
+export function isNonToolModel(id) {
+  const s = String(id || "");
+  const model = s.includes(":") ? s.slice(s.indexOf(":") + 1) : s;
+  return NON_TOOL_MODEL_RES.some((re) => re.test(model) || re.test(s));
+}
 // The registry entry whose host matches this base URL, or null (loopback / unknown host).
 export function providerForBase(url) {
   return Object.values(PROVIDERS).find((p) => p.match.test(String(url || ""))) || null;
@@ -549,7 +561,8 @@ export function validate(opts = {}) {
       const i = id.indexOf(":");
       if (i <= 0) continue;
       const prov = id.slice(0, i);
-      if (!PROVIDERS[prov]) warnings.push(`composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
+      if (isNonToolModel(id)) warnings.push(`composite member '${id}' cannot do tool calling — it will be skipped (an agent turn always carries tools)`);
+      else if (!PROVIDERS[prov]) warnings.push(`composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
       else if (prov !== "local" && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
     }
   }
@@ -561,7 +574,8 @@ export function validate(opts = {}) {
       const i = id.indexOf(":");
       if (i <= 0) continue;
       const prov = id.slice(0, i);
-      if (!PROVIDERS[prov]) warnings.push(`compaction member '${id}' names an unknown provider '${prov}' — it will be skipped`);
+      if (isNonToolModel(id)) warnings.push(`compaction member '${id}' cannot do tool calling — it will be skipped`);
+      else if (!PROVIDERS[prov]) warnings.push(`compaction member '${id}' names an unknown provider '${prov}' — it will be skipped`);
       else if (prov !== "local" && !active.has(prov)) warnings.push(`compaction member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
       else if (!RESPONSES_PROVIDER_IDS.has(prov)) warnings.push(`compaction member '${id}' uses '${prov}', which does not serve /responses — the summariser will fail over past it`);
     }

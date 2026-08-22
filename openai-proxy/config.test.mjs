@@ -12,7 +12,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   SETTINGS, resolve, snapshot, configHash, keyFingerprint, codeVersion, validate, loadKV,
-  PROVIDERS, providerForBase, activeProviders,
+  PROVIDERS, providerForBase, activeProviders, isNonToolModel,
 } from "./config.mjs";
 
 // Resolve against explicit sources so the developer's own dotfiles cannot change a result.
@@ -213,6 +213,24 @@ test("local mode does not warn about a blank safety model (main-model verdicts a
     OPENAI_CLASSIFIER_SAFETY_MODEL: "",
   } }) });
   assert.ok(!r.warnings.some((w) => /safety verdicts run on/.test(w)));
+});
+
+test("isNonToolModel flags the groq compound family (bare and prefixed), nothing else", () => {
+  for (const id of ["groq:groq/compound", "groq:groq/compound-mini", "groq/compound", "compound", "compound-mini"])
+    assert.equal(isNonToolModel(id), true, `${id} cannot tool-call`);
+  for (const id of ["groq:openai/gpt-oss-120b", "mistral:codestral-latest", "local:gemma4:latest",
+                    "gemini:gemini-3-flash-preview", "cohere:command-a-plus-05-2026", "some-bare-model"])
+    assert.equal(isNonToolModel(id), false, `${id} can tool-call`);
+});
+
+test("validate warns that a non-tool-calling chain member will be skipped, on both chains", () => {
+  const r = validate({ resolved: resolve({ env: {
+    OPENAI_API_KEY: "k",
+    OPENAI_COMPOSITE_MODELS: "groq:openai/gpt-oss-120b,groq:groq/compound",
+    OPENAI_COMPACT_MODELS: "groq:openai/gpt-oss-120b,groq:groq/compound-mini",
+  }, project: {}, home: {} }) });
+  assert.ok(r.warnings.some((w) => /composite member 'groq:groq\/compound' cannot do tool calling/.test(w)));
+  assert.ok(r.warnings.some((w) => /compaction member 'groq:groq\/compound-mini' cannot do tool calling/.test(w)));
 });
 
 test("`0` means off where the original allowed it, and snaps back where it did not", () => {

@@ -106,7 +106,7 @@ const SCHEMA = [
   // real choice — default to responses (no 128-tool cap, reasoning). Model ids can contain a "/".
   { group: "Groq model", file: ".groq-model", key: "GROQ_MODEL", fileKey: "OPENAI_MODEL",
     type: "text", default: "openai/gpt-oss-120b", placeholder: "openai/gpt-oss-120b",
-    suggestions: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b", "groq/compound", "groq/compound-mini"],
+    suggestions: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
     label: "Groq model",
     help: "Any Groq model id that supports tool calling (the agent is tool calls end to end) — e.g. openai/gpt-oss-120b (default), openai/gpt-oss-20b, qwen/qwen3.6-27b, groq/compound (agentic). Put your Groq key in .openai-key as groqApiKey=. Full list: GET https://api.groq.com/openai/v1/models. (This is Groq the inference cloud, not xAI's Grok.)" },
   { group: "Groq model", file: ".groq-model", key: "GROQ_API", fileKey: "OPENAI_API",
