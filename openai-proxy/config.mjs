@@ -705,6 +705,10 @@ export function emitEnv({ env = process.env } = {}) {
   if (Array.isArray(dd) && dd.length) put("LLMD_DROPDOWN_MODELS", JSON.stringify(dd));
   if (getPath(C, "privacy.disableTelemetry"))
     for (const k of ["DISABLE_TELEMETRY", "DO_NOT_TRACK", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "PRIVACY_DISABLE_TELEMETRY"]) put(k, "1");
+  // Session sync gates (run.sh reads these). Always emit 0/1 so run.sh's ${SYNC_*:-…} never falls through
+  // to a (now-removed) .sync read.
+  put("SYNC_CLAUDE_SESSIONS", getPath(C, "sync.sessions") ? "1" : "0");
+  put("SYNC_CLAUDE_GROUPING", getPath(C, "sync.grouping") ? "1" : "0");
 
   if (mode === "anthropic") return out.join("\n") + "\n";   // proxy-only vars omitted; run.sh unsets any inherited
 

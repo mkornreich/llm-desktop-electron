@@ -192,34 +192,11 @@ export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-max}"
 export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT="${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT:-1}"
 echo "[run] CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL} (always-enable=${CLAUDE_CODE_ALWAYS_ENABLE_EFFORT})"
 
-# Diagnostics (.diagnostics dot file, edited by the settings window): the app's log level and the
-# proxy's per-request tool dump. Both are read here and exported into the launch environment — the
-# app reads DESKTOP_LOG_LEVEL, the proxy reads PROXY_DUMP_TOOLS (it inherits this env). An unset or
-# blank value leaves the built-in default in place.
-DESKTOP_LOG_LEVEL_VAL=$(sed -n 's/^DESKTOP_LOG_LEVEL=//p' .diagnostics 2>/dev/null | head -1)
-[ -n "${DESKTOP_LOG_LEVEL_VAL}" ] && export DESKTOP_LOG_LEVEL="${DESKTOP_LOG_LEVEL_VAL}"
-PROXY_DUMP_TOOLS_VAL=$(sed -n 's/^PROXY_DUMP_TOOLS=//p' .diagnostics 2>/dev/null | head -1)
-[ "${PROXY_DUMP_TOOLS_VAL}" = "1" ] && export PROXY_DUMP_TOOLS=1
-[ -n "${DESKTOP_LOG_LEVEL_VAL}" ] && echo "[run] DESKTOP_LOG_LEVEL=${DESKTOP_LOG_LEVEL_VAL}${PROXY_DUMP_TOOLS:+, PROXY_DUMP_TOOLS=1}"
-# Ultracode default: force every Code-tab session into ultracode (xhigh effort + standing dynamic-
-# workflow orchestration). There is no CLAUDE_CODE_* env hook for it, so the patched session-start
-# settings-spread (app/.vite/build/index.chunk-DT0P6tKR.js) injects ultracode:true into the SDK query
-# settings when LLMD_ULTRACODE=1 is in the app's environment. Toggled from the settings window.
-ULTRACODE_DEFAULT_VAL=$(sed -n 's/^ULTRACODE_DEFAULT=//p' .diagnostics 2>/dev/null | head -1)
-[ "${ULTRACODE_DEFAULT_VAL}" = "1" ] && export LLMD_ULTRACODE=1
+# Diagnostics (log level, tool dump), ultracode default, and the Code-tab dropdown model list are all
+# set by the config emitter above from config.jsonc (diagnostics.* / picker.dropdownModels). Just report.
+[ -n "${DESKTOP_LOG_LEVEL:-}" ] && echo "[run] DESKTOP_LOG_LEVEL=${DESKTOP_LOG_LEVEL}${PROXY_DUMP_TOOLS:+, PROXY_DUMP_TOOLS=1}"
 [ -n "${LLMD_ULTRACODE:-}" ] && echo "[run] ULTRACODE default: ON — every Code-tab session runs in ultracode"
-# Code-tab dropdown model list (.diagnostics DROPDOWN_MODELS, edited by the settings picker). An ordered
-# comma-separated list of <provider>:<model> ids; hand it to the renderer-unlock preload as a JSON array
-# (LLMD_DROPDOWN_MODELS) so it injects exactly these into the Code-tab dropdown, in order (the app numbers
-# the first ~9 selectable as keys 1-9). Empty -> the preload's short built-in default list.
-DROPDOWN_MODELS_VAL=$(sed -n 's/^DROPDOWN_MODELS=//p' .diagnostics 2>/dev/null | head -1)
-if [ -n "$DROPDOWN_MODELS_VAL" ] && command -v node >/dev/null 2>&1; then
-  LLMD_DROPDOWN_MODELS_VAL="$(DROPDOWN_MODELS="$DROPDOWN_MODELS_VAL" node -e 'const m=(process.env.DROPDOWN_MODELS||"").split(",").map(s=>s.trim()).filter(Boolean); if(m.length) process.stdout.write(JSON.stringify(m))' 2>/dev/null || true)"
-  if [ -n "$LLMD_DROPDOWN_MODELS_VAL" ]; then
-    export LLMD_DROPDOWN_MODELS="$LLMD_DROPDOWN_MODELS_VAL"
-    echo "[run] Code-tab dropdown models: ${DROPDOWN_MODELS_VAL}"
-  fi
-fi
+[ -n "${LLMD_DROPDOWN_MODELS:-}" ] && echo "[run] Code-tab dropdown models: set from config.jsonc (picker.dropdownModels)"
 
 # Bring up a run.sh-managed Ollama on a side port with a big context and GPU tuning, sharing the
 # system Ollama's models. Non-destructive by design: a system Ollama is usually pinned to a small
@@ -323,7 +300,7 @@ if [ "$PROVIDER" = "proxy" ]; then
     # fixed compaction window would be wrong for all but one of them. Resolution: CONTEXT_<model>
     # if present, else the OLLAMA_CONTEXT_LENGTH default, else 32768. COMPACT_<model> optionally
     # overrides just the compaction window (otherwise it is derived from the context).
-    if [ -z "${OLLAMA_CONTEXT_LENGTH:-}" ]; then OLLAMA_CONTEXT_LENGTH="$(sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' "$CONF" 2>/dev/null | head -1)"; fi
+    if [ -z "${OLLAMA_CONTEXT_LENGTH:-}" ]; then OLLAMA_CONTEXT_LENGTH="$(sed -n 's/^OLLAMA_CONTEXT_LENGTH=//p' "$CONF" 2>/dev/null | head -1 || true)"; fi
     DESIRED_CTX=""
     while IFS='=' read -r k v; do
       if [ "${k#CONTEXT_}" = "$OPENAI_MODEL" ]; then DESIRED_CTX="$v"; fi
@@ -338,9 +315,11 @@ if [ "$PROVIDER" = "proxy" ]; then
     # usually caps. Tuning knobs come from .local-model (env wins).
     OLLAMA_AUTOSTART="${OLLAMA_AUTOSTART:-$(sed -n 's/^OLLAMA_AUTOSTART=//p' "$CONF" 2>/dev/null | head -1)}"
     if [ "${OLLAMA_AUTOSTART:-1}" != "0" ] && command -v ollama >/dev/null 2>&1; then
+      # OLLAMA_* are set by the config emitter; OLLAMA_MODELS (the models dir) is not a config.jsonc value,
+      # so it may be unset here — the `|| true` keeps a missing legacy $CONF from aborting under `set -e`.
       for k in OLLAMA_MANAGED_PORT OLLAMA_KV_CACHE_TYPE OLLAMA_FLASH_ATTENTION OLLAMA_NUM_PARALLEL OLLAMA_KEEP_ALIVE OLLAMA_MODELS; do
         if [ -z "${!k:-}" ]; then
-          fv="$(sed -n "s/^${k}=//p" "$CONF" 2>/dev/null | head -1)"
+          fv="$(sed -n "s/^${k}=//p" "$CONF" 2>/dev/null | head -1 || true)"
           if [ -n "$fv" ]; then export "$k=$fv"; fi
         fi
       done
@@ -381,7 +360,7 @@ if [ "$PROVIDER" = "proxy" ]; then
     export OPENAI_API="${OPENAI_API:-chat}"
     export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
     # Optional OpenRouter attribution headers (HTTP-Referer / X-Title). Format: "Key:Value,Key:Value".
-    OPENAI_EXTRA_HEADERS_VAL=$(sed -n 's/^OPENAI_EXTRA_HEADERS=//p' "$CONF" 2>/dev/null | head -1)
+    OPENAI_EXTRA_HEADERS_VAL="${OPENAI_EXTRA_HEADERS:-}"   # set by the config emitter (providers.openrouter.extraHeaders)
     [ -n "${OPENAI_EXTRA_HEADERS_VAL}" ] && export OPENAI_EXTRA_HEADERS="${OPENAI_EXTRA_HEADERS_VAL}"
     echo "[run] openrouter model: ${OPENAI_MODEL} via ${OPENAI_BASE_URL} (api ${OPENAI_API}, key from .openai-key)"
     # The sk-or- key must resolve, from OPENAI_API_KEY in the environment or apiKey= in .openai-key.
@@ -502,19 +481,9 @@ if [ "$PROVIDER" = "proxy" ]; then
     fi
   fi
 
-  # Composite (fallback) model. OPENAI_COMPOSITE_MODELS (in .openai-model, or the env) is the ordered
-  # member list; when non-empty, hand it to the preload as LLMD_COMPOSITE so it injects a "Composite" entry
-  # FIRST in the Code-tab dropdown and makes it the default for new sessions. The proxy owns the actual
-  # chain + failover (it reads OPENAI_COMPOSITE_MODELS itself); this only drives the picker entry. Built
-  # via node to JSON-quote member ids safely (env-passed so members with odd characters can't break it).
-  COMPOSITE_MODELS_VAL="${OPENAI_COMPOSITE_MODELS:-$(sed -n 's/^OPENAI_COMPOSITE_MODELS=//p' .openai-model 2>/dev/null | head -1)}"
-  if [ -n "$COMPOSITE_MODELS_VAL" ] && command -v node >/dev/null 2>&1; then
-    LLMD_COMPOSITE_VAL="$(OPENAI_COMPOSITE_MODELS="$COMPOSITE_MODELS_VAL" node -e 'const m=(process.env.OPENAI_COMPOSITE_MODELS||"").split(",").map(s=>s.trim()).filter(Boolean); if(m.length) process.stdout.write(JSON.stringify({members:m}))' 2>/dev/null || true)"
-    if [ -n "$LLMD_COMPOSITE_VAL" ]; then
-      export LLMD_COMPOSITE="$LLMD_COMPOSITE_VAL"
-      echo "[run] composite model: ${COMPOSITE_MODELS_VAL} (first + default in the Code-tab picker)"
-    fi
-  fi
+  # Composite (fallback) model: LLMD_COMPOSITE is already set by the config emitter above (as
+  # {"members":[…]} from config.jsonc `composite`); it drives the "Composite" Code-tab entry. Just report.
+  [ -n "${LLMD_COMPOSITE:-}" ] && echo "[run] composite model: set from config.jsonc (first + default in the Code-tab picker)"
 
   # This used to be `curl -sf /health` — "something answered, good enough". It was not:
   #   * a model change did not take effect, because the OLD proxy answered /health and got
@@ -587,12 +556,9 @@ fi
 # (./run.sh and ./run-openai.sh, which execs this). See .privacy for what each lever
 # does and ANTHROPIC_ENDPOINTS.md for the traffic it suppresses.
 EXTRA=()
-DISABLE_TELEMETRY_VAL=$(sed -n 's/^DISABLE_TELEMETRY=//p' .privacy 2>/dev/null | head -1)
-# Telemetry is OFF BY DEFAULT. The kill switch engages unless .privacy explicitly opts back IN
-# with DISABLE_TELEMETRY=0 — so a missing or blank .privacy still disables telemetry (the same
-# default-on-unless-0 shape as .sync), rather than the old behaviour where deleting .privacy
-# quietly re-enabled it.
-if [ "${DISABLE_TELEMETRY_VAL:-1}" != "0" ]; then
+# Telemetry gate: the config emitter (openai-proxy/config.mjs --env) sets DISABLE_TELEMETRY=1 iff
+# privacy.disableTelemetry is on in config.jsonc — which is the default. Run the suppression block on that.
+if [ -n "${DISABLE_TELEMETRY:-}" ]; then
   # 1. The bundled Claude Code agent reads these (its own "no-telemetry" mode).
   export DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   # 2. The desktop shell's OWN telemetry ignores those env vars — it gates on the
