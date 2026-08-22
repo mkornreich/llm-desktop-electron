@@ -31,6 +31,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
+        rememberSignature, recallSignature, sigFromToolCall, providerALS,
         approxTokens, kilo } =
   await import("./proxy.mjs");
 
@@ -526,6 +527,39 @@ test("recordToolUse tallies invocations; toolUsageSummary ranks by count and ign
   const t = toolUsageSummary().total;
   recordToolUse(null); recordToolUse(""); recordToolUse(42);
   assert.equal(toolUsageSummary().total, t, "null/empty/non-string names are not counted");
+});
+
+// ---------- Gemini thought-signature round-trip ----------
+
+test("sigFromToolCall reads the nested google path; the store refreshes recency and ignores junk", () => {
+  assert.equal(sigFromToolCall({ extra_content: { google: { thought_signature: "S" } } }), "S");
+  assert.equal(sigFromToolCall({ function: { name: "x" } }), undefined);
+  assert.equal(sigFromToolCall(null), undefined);
+  rememberSignature("k1", "v1"); rememberSignature("k1", "v1b");   // refresh
+  assert.equal(recallSignature("k1"), "v1b");
+  rememberSignature("k2", null); rememberSignature("", "v");       // junk
+  assert.equal(recallSignature("k2"), undefined);
+  assert.equal(recallSignature(""), undefined);
+});
+
+test("a remembered Gemini thought-signature is echoed back to Gemini and to no other provider", () => {
+  rememberSignature("call_sig1", "SIGVALUE");
+  const body = { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "call_sig1", name: "Bash", input: { command: "ls" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "call_sig1", content: "files" }] },
+  ], max_tokens: 100 };
+  // default (non-Gemini) provider: signature is NOT attached
+  assert.doesNotMatch(JSON.stringify(toOpenAI(body, "gpt-4.1-mini").payload), /thought_signature/);
+  // Gemini provider context (scoped run, no leak): signature echoed back on the historical call
+  const gem = providerALS.run({ id: "gemini", baseURL: "https://x/v1", isOpenAI: false }, () => toOpenAI(body, "gemini-3-flash-preview"));
+  const asst = gem.payload.messages.find((m) => m.role === "assistant");
+  assert.equal(asst.tool_calls[0].extra_content?.google?.thought_signature, "SIGVALUE");
+});
+
+test("the signature store is bounded (evicts oldest past the cap)", () => {
+  for (let i = 0; i < 4100; i++) rememberSignature("bulk_" + i, "s" + i);
+  assert.equal(recallSignature("bulk_0"), undefined, "oldest evicted past the 4000 cap");
+  assert.equal(recallSignature("bulk_4099"), "s4099", "newest retained");
 });
 
 // ---------- auto-continue trigger ----------

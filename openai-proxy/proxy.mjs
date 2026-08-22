@@ -735,6 +735,26 @@ function toolUsageSummary() {
   return { since: toolUsage.since, lastAt: toolUsage.lastAt, total: toolUsage.total, distinct: tools.length, tools };
 }
 
+// ---------- Gemini thought-signature round-trip ----------
+// Gemini 3 returns an opaque `thought_signature` on every function call
+// (`tool_calls[].extra_content.google.thought_signature`) and REQUIRES it echoed back when that call
+// reappears in the conversation history, or it hard-400s ("Function call is missing a
+// thought_signature"). The Anthropic tool_use block has nowhere to carry it, so the proxy remembers
+// the signature by the tool-call id it emits — which the client round-trips verbatim — and re-attaches
+// it when translating that same call back to Gemini. Bounded (evict-oldest) so a long-lived proxy
+// can't grow without limit. Lost on a proxy restart: the first tool-turn after a restart mid-session
+// may 400 once, then recover as new calls are re-signed.
+const SIG_STORE = new Map();
+const SIG_STORE_MAX = 4000;
+function rememberSignature(id, sig) {
+  if (!id || !sig || typeof sig !== "string") return;
+  if (SIG_STORE.has(id)) SIG_STORE.delete(id);       // refresh recency (Map keeps insertion order)
+  SIG_STORE.set(id, sig);
+  if (SIG_STORE.size > SIG_STORE_MAX) SIG_STORE.delete(SIG_STORE.keys().next().value);
+}
+const recallSignature = (id) => (id ? SIG_STORE.get(id) : undefined);
+const sigFromToolCall = (tc) => tc?.extra_content?.google?.thought_signature;
+
 // Record one upstream request. THE unit of accounting — every call to the API goes through here,
 // including the retries that used to be invisible.
 function recordAttempt(fields) {
@@ -1851,8 +1871,13 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
     const toolCalls = [], toolResults = [], companions = [];
     const parts = decodeBlocks(content);
     for (const blk of content) {
-      if (blk.type === "tool_use")
-        toolCalls.push({ id: blk.id, type: "function", function: { name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) } });
+      if (blk.type === "tool_use") {
+        const call = { id: blk.id, type: "function", function: { name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) } };
+        // Gemini requires its thought_signature echoed back on the historical call, or it 400s.
+        const sig = curProvider().id === "gemini" ? recallSignature(blk.id) : undefined;
+        if (sig) call.extra_content = { google: { thought_signature: sig } };
+        toolCalls.push(call);
+      }
       else if (blk.type === "tool_result") {
         const { text: resultText, media } = decodeToolResult(blk);
         toolResults.push({ tool_call_id: blk.tool_use_id,
@@ -1938,7 +1963,9 @@ function toAnthropic(oai, reqModel, registry) {
     const nm = registry.originalName(tc.function?.name);
     // Throws on unparseable arguments; the route handler turns that into an error response rather
     // than handing the agent a call it cannot trust.
-    content.push({ type: "tool_use", id: tc.id || rid("toolu_"), name: nm,
+    const tuId = tc.id || rid("toolu_");
+    rememberSignature(tuId, sigFromToolCall(tc));   // Gemini thought-signature, keyed by the id we emit
+    content.push({ type: "tool_use", id: tuId, name: nm,
                    input: toolArgs(registry, nm, tc.function?.arguments) });
     recordToolUse(nm);
   }
@@ -2107,6 +2134,7 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
           tb.toolName = registry.originalName(tc.function?.name || "");
           tb.callId = tc.id || rid("toolu_");
         }
+        if (sigFromToolCall(tc)) tb.signature = sigFromToolCall(tc);   // Gemini thought-signature
         if (tc.function?.arguments) tb.argBuf += tc.function.arguments;
       }
     }
@@ -2127,8 +2155,10 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     try { pruned = toolArgs(registry, tb.toolName, tb.argBuf); }
     catch (e) { withheld = withheld || e; log(`  ! withholding ${tb.toolName}: ${e.message}`); continue; }
     const aIndex = nextIndex++;
+    const tuId = tb.callId || rid("toolu_");
+    rememberSignature(tuId, tb.signature);          // Gemini thought-signature, keyed by the id we emit
     sse(res, "content_block_start", { type: "content_block_start", index: aIndex,
-        content_block: { type: "tool_use", id: tb.callId || rid("toolu_"), name: tb.toolName, input: {} } });
+        content_block: { type: "tool_use", id: tuId, name: tb.toolName, input: {} } });
     sse(res, "content_block_delta", { type: "content_block_delta", index: aIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(pruned) } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: aIndex });
     recordToolUse(tb.toolName);
@@ -3612,6 +3642,7 @@ const server = http.createServer(async (req, res) => {
 // this module without binding the port.
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
          inTokensField, cacheWarning, recordUsage, usageSummary, recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
+         rememberSignature, recallSignature, sigFromToolCall, providerALS,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          stripSystemBoilerplate,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
