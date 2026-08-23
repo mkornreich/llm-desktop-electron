@@ -642,6 +642,22 @@ test("the model-note line is stripped back off assistant history so the model ne
   assert.equal(u.content, "model → what does this arrow mean?", "user content is never stripped");
 });
 
+test("a note embedded in tool_result content is stripped, keeping the surrounding text", () => {
+  // The real leak: a web-search summary IS a model response (note and all), and the client feeds it
+  // back as tool_result content — where the note sits mid-text, no clean line boundary, e.g.
+  // "…results\n\ncomposite → cohere:command-a-plus-05-2026**What I did**…". Only the note token goes.
+  const body = { messages: [
+    { role: "user", content: "search" },
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "WebSearch", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1",
+        content: "Search results:\n\ncomposite → cohere:command-a-plus-05-2026**Summary** three hiring companies." }] },
+  ], max_tokens: 100 };
+  const tool = toOpenAI(body, "gpt-4.1-mini").payload.messages.find((m) => m.role === "tool");
+  assert.doesNotMatch(tool.content, /composite → /, "the embedded note token is removed");
+  assert.match(tool.content, /Search results:/, "surrounding text before the note survives");
+  assert.match(tool.content, /\*\*Summary\*\* three hiring companies\./, "text after the note token survives");
+});
+
 // ---------- auto-continue trigger ----------
 
 test("auto-continue fires on announcements the model did not act on", () => {

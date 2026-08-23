@@ -1892,7 +1892,8 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
         toolCalls.push(call);
       }
       else if (blk.type === "tool_result") {
-        const { text: resultText, media } = decodeToolResult(blk);
+        const { text, media } = decodeToolResult(blk);
+        const resultText = stripModelNoteAnywhere(text);   // a fed-back summary can carry our own note
         toolResults.push({ tool_call_id: blk.tool_use_id,
                            content: blk.is_error ? `[tool error] ${resultText}` : resultText });
         // A tool-role message cannot carry media on this surface either, so it follows as a companion
@@ -1986,6 +1987,11 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
 // echoing it. Kept in sync with the labels the handler builds (model / composite / compaction).
 const MODEL_NOTE_RE = /^(?:model|composite|compaction) → \S/;
 const stripLeadingModelNote = (s) => String(s).replace(/^(?:model|composite|compaction) → [^\n]*(?:\n+|$)/, "");
+// A note can also appear mid-text, not just as a clean leading block: a tool_result carries it when a
+// web-search summary (which IS a model response, note and all) is fed back as tool output. Match only
+// the note token (provider:model = [\w.:@/-]+) so following prose survives ("…qwen3.8-27b**What I did**"
+// keeps "**What I did**"). Applied to tool_result content so the model never reads its own note.
+const stripModelNoteAnywhere = (s) => String(s).replace(/(?:model|composite|compaction) → [\w.:@/-]+ ?/g, "");
 
 // Optional session recording. Every client /v1/messages turn's request + full raw response is
 // appended to session-recording.jsonl (one JSON line per turn) while recording is on. Turned on by
@@ -2277,7 +2283,8 @@ function toResponses(body, model, route = routeForRequest(body)) {
       if (blk.type === "tool_use")
         toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
       else if (blk.type === "tool_result") {
-        const { text: resultText, media } = decodeToolResult(blk);
+        const { text, media } = decodeToolResult(blk);
+        const resultText = stripModelNoteAnywhere(text);   // a fed-back summary can carry our own note
         toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id,
                            output: blk.is_error ? `[tool error] ${resultText}` : resultText });
         // A function_call_output takes a string, so media cannot live there. The text stays PAIRED
@@ -3245,6 +3252,15 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     const next = fallover.shift();
     log(`  -> no answer streamed; composite falling over to ${next.provider.id}:${next.model}`);
     noteCompositeModel(`${next.provider.id}:${next.model}`, Date.now(), log, "composite");
+    // The note block already sent named the member that produced NOTHING. Emit an updated note (no
+    // content has streamed yet, so it leads the real answer) so the panel shows the member that
+    // actually answers, not the one that was skipped.
+    if (modelNote) {
+      const nIdx = nextIndex++;
+      sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "text", text: "" } });
+      sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: `composite → ${next.provider.id}:${next.model}` } });
+      sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
+    }
     providerALS.enterWith(next.provider);
     const retry = { ...payload, model: next.model };
     let up;
