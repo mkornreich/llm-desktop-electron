@@ -73,12 +73,23 @@
   .msg.ok{color:var(--ok)} .msg.warn{color:var(--warn)}
   .note{padding:11px 16px;font-size:12.5px;color:var(--muted);background:var(--chip);
         border-bottom:1px solid var(--line)}
+  .search{width:100%;margin-top:12px;background:var(--panel);color:var(--ink);
+          border:1px solid var(--line);border-radius:9px;padding:8px 12px;font:13px inherit}
+  .search:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:1px}
+  .search::placeholder{color:var(--muted)}
+  .no-results{padding:22px 4px;color:var(--muted)}
+  /* Search hides non-matching rows and empty sections; an explicit rule is needed because .row sets
+     its own display:grid, which would otherwise win over the [hidden] user-agent default. */
+  [hidden]{display:none!important}
+  mark{background:color-mix(in srgb,var(--accent) 30%,transparent);color:inherit;border-radius:2px}
 </style>
 </head>
 <body>
 <header>
   <h1>LLM Desktop settings</h1>
   <div class="sub">Edits the launcher's dot files. Comments in those files are preserved — only the value lines change.</div>
+  <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
+         aria-label="Search settings" placeholder="Search settings by name, key, or description…   ( press / )" />
   <div class="status" id="status"></div>
 </header>
 
@@ -115,6 +126,7 @@ window.settings = {
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
+let SEARCH = "";   // current search query; filters rows/sections in applySearch(), re-applied after every render
 let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [], COMPACT_CHOICES = [];
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
@@ -362,10 +374,17 @@ function render() {
     }
     for (const s of items) {
       const row = document.createElement("div"); row.className = "row"; row.id = "row-" + s.key;
+      // Fields the search box matches against (and the originals it highlights), stashed on the row so
+      // applySearch() can filter without consulting SCHEMA.
+      row.dataset.label = s.label || "";
+      row.dataset.help = s.help || "";
+      row.dataset.search = [s.group, s.label, s.fileKey || s.key, s.help, s.file]
+        .filter(Boolean).join(" ").toLowerCase();
       const left = document.createElement("div");
-      const lab = document.createElement("label"); lab.textContent = s.label;
+      const lab = document.createElement("label");
+      const labText = document.createElement("span"); labText.className = "lab-text"; labText.textContent = s.label;
       const key = document.createElement("span"); key.className = "key"; key.textContent = s.fileKey || s.key;
-      lab.append(key);
+      lab.append(labText, key);
       const help = document.createElement("div"); help.className = "help"; help.textContent = s.help || "";
       left.append(lab, help);
       // In Anthropic mode the OpenAI-only settings are inert — run.sh does not export them, and
@@ -395,6 +414,53 @@ function render() {
     form.append(sec);
   }
   refreshDirty();
+  applySearch();   // re-apply the active filter to the freshly-rendered rows
+}
+
+// Live filter. Shows a row when the query is a substring of its name / key / description / group /
+// file (all folded into row.dataset.search), hides sections with no visible row, and highlights the
+// match in the label and help. The query lives in SEARCH so it survives the frequent re-renders.
+function applySearch() {
+  const q = SEARCH.trim().toLowerCase();
+  const form = $("#form");
+  const prior = form.querySelector(".no-results"); if (prior) prior.remove();
+  let anyVisible = false;
+  for (const sec of form.querySelectorAll("section")) {
+    let secVisible = false;
+    for (const row of sec.querySelectorAll(".row")) {
+      const match = !q || (row.dataset.search || "").includes(q);
+      row.hidden = !match;
+      if (match) {
+        secVisible = true;
+        highlight(row.querySelector(".lab-text"), row.dataset.label || "", q);
+        highlight(row.querySelector(".help"), row.dataset.help || "", q);
+      }
+    }
+    sec.hidden = !secVisible;
+    if (secVisible) anyVisible = true;
+  }
+  if (q && !anyVisible) {
+    const p = document.createElement("p"); p.className = "msg no-results";
+    p.textContent = `No settings match “${SEARCH.trim()}”.`;
+    form.append(p);
+  }
+}
+
+// Rebuild an element's text with <mark> around each occurrence of q. Built from DOM nodes (not
+// innerHTML) so it is injection-proof and satisfies the page CSP. q === "" restores the plain text,
+// which also clears stale highlights when the search is emptied.
+function highlight(el, text, q) {
+  if (!el) return;
+  el.textContent = "";
+  if (!q) { el.textContent = text; return; }
+  const lower = text.toLowerCase();
+  let i = 0, idx;
+  while ((idx = lower.indexOf(q, i)) !== -1) {
+    if (idx > i) el.append(text.slice(i, idx));
+    const m = document.createElement("mark"); m.textContent = text.slice(idx, idx + q.length); el.append(m);
+    i = idx + q.length;
+  }
+  el.append(text.slice(i));
 }
 
 function chip(text, value, state) {
@@ -557,6 +623,19 @@ $("#relaunch").onclick = async () => {
   } catch (e) { setMsg("Restart failed: " + e.message, "warn"); }
   finally { btn.disabled = false; }
 };
+
+// Search box: filter as you type; `/` focuses it from anywhere (unless already typing in a field),
+// Ctrl/Cmd+F too, and Escape clears and unfocuses it.
+$("#search").oninput = (e) => { SEARCH = e.target.value; applySearch(); };
+addEventListener("keydown", (e) => {
+  const box = $("#search");
+  const inField = /^(input|select|textarea)$/i.test(document.activeElement?.tagName || "");
+  if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") || (e.key === "/" && !inField)) {
+    e.preventDefault(); box.focus(); box.select();
+  } else if (e.key === "Escape" && document.activeElement === box) {
+    box.value = ""; SEARCH = ""; applySearch(); box.blur();
+  }
+});
 
 load().catch((e) => { $("#form").textContent = "Failed to load settings: " + e.message; });
 refreshStatus();
