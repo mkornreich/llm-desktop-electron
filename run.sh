@@ -274,17 +274,21 @@ unload_managed_ollama() {
 # Managed FreeToken (on-device engine, OpenAI-compatible). Brought up INDEPENDENTLY of the default
 # provider so a picked freetoken:<model> resolves even when the default is Ollama. Reuse a live server;
 # non-fatal if it cannot start. FREETOKEN_* come from config.jsonc providers.<id>.managed via config.mjs.
-# Enlarge FreeToken's SWA (sliding-window) radix-cache window pool past the fixed auto-mode classifier
-# rulebook (~27k tokens). gemma's default window pool (~26k) is SMALLER than the rulebook, so its KV
-# can't be retained between calls and every verdict re-prefills all ~55k tokens (~50s). A window pool
-# that clears the rulebook lets a repeated / near-identical prefix (multi-action turns, retries, a
-# growing transcript) reuse instead — ~50s collapses to sub-second. num_pages caps the full pool
-# (context) so the bigger window still fits the 8GB budget; both come from config.jsonc managed.
-# Runtime-only (resets on restart) so it is re-applied on every managed start. Best-effort + idle-only:
-# a reject just leaves FreeToken's default (still correct, only slower).
+# FALLBACK path for enlarging FreeToken's SWA (sliding-window) radix-cache window pool past the fixed
+# auto-mode classifier rulebook (~27k tokens). gemma's default window pool (~26k) is SMALLER than the
+# rulebook, so its KV can't be retained between calls and every verdict re-prefills all ~55k tokens
+# (~50s). A window pool that clears the rulebook lets a repeated / near-identical prefix (multi-action
+# turns, retries, a growing transcript) reuse instead — ~50s collapses to sub-second. The PREFERRED
+# path is --swa-full-tokens-ratio at LOAD (FreeToken PR #109), which ensure_freetoken uses when the
+# local build has the flag (cleaner, and keeps more full-pool capacity); this runtime /v1/cache/rebuild
+# is the fallback for a stock build. num_pages caps the full pool (context) so the bigger window fits
+# the 8GB budget. Runtime-only (resets on restart), re-applied on every managed start. Best-effort +
+# idle-only: a reject just leaves FreeToken's default (still correct, only slower).
 freetoken_resize_swa_cache() {
+  local base="$1" sized_at_load="$2" body rr
+  # Already sized at load via --swa-full-tokens-ratio — the runtime rebuild would be redundant.
+  [ -n "${sized_at_load:-}" ] && return 0
   [ -n "${FREETOKEN_NUM_SWA_PAGES:-}${FREETOKEN_NUM_PAGES:-}" ] || return 0
-  local base="$1" body rr
   body="{\"mode\":\"if_idle\"${FREETOKEN_NUM_PAGES:+,\"num_pages\":${FREETOKEN_NUM_PAGES}}${FREETOKEN_NUM_SWA_PAGES:+,\"num_swa_pages\":${FREETOKEN_NUM_SWA_PAGES}}}"
   rr="$(curl -s --max-time 120 -X POST "${base}/v1/cache/rebuild" -H 'Content-Type: application/json' -d "$body" 2>/dev/null)"
   echo "[run] managed FreeToken: SWA cache resize ${body} -> ${rr:-<no response>}"
@@ -319,7 +323,16 @@ ensure_freetoken() {
     echo "[run] managed FreeToken: no FREETOKEN_MODEL_PATH — skipping"; return 1
   fi
   local logfile="user-data/freetoken-managed.log" pid i
-  echo "[run] managed FreeToken: starting on ${base} (model ${FREETOKEN_SERVED_MODEL:-$(basename "$FREETOKEN_MODEL_PATH")})"
+  # Prefer sizing the SWA window pool at LOAD via --swa-full-tokens-ratio (FreeToken PR #109) when the
+  # local build has the flag — cleaner, and keeps more full-pool capacity than a post-start rebuild.
+  # Detect support by grepping the installed args.py (instant; no ft spawn). If absent, swa_load_flag
+  # stays empty and freetoken_resize_swa_cache does the runtime /v1/cache/rebuild fallback instead.
+  local swa_load_flag="" _va
+  if [ -n "${FREETOKEN_SWA_RATIO:-}" ]; then
+    _va="$(ls "$(dirname "$launch")"/.venv/lib/python*/site-packages/freetoken/server/args.py 2>/dev/null | head -1)"
+    [ -n "$_va" ] && grep -q -- '--swa-full-tokens-ratio' "$_va" 2>/dev/null && swa_load_flag="--swa-full-tokens-ratio $FREETOKEN_SWA_RATIO"
+  fi
+  echo "[run] managed FreeToken: starting on ${base} (model ${FREETOKEN_SERVED_MODEL:-$(basename "$FREETOKEN_MODEL_PATH")})${swa_load_flag:+ [swa window sized at load: ${FREETOKEN_SWA_RATIO}]}"
   nohup "$launch" serve \
     --model-path "$FREETOKEN_MODEL_PATH" \
     --port "${FREETOKEN_PORT:-1919}" \
@@ -329,13 +342,14 @@ ensure_freetoken() {
     ${FREETOKEN_MAX_RUNNING_REQ:+--max-running-requests "$FREETOKEN_MAX_RUNNING_REQ"} \
     ${FREETOKEN_CUDA_GRAPH_MAX_BS:+--cuda-graph-max-bs "$FREETOKEN_CUDA_GRAPH_MAX_BS"} \
     ${FREETOKEN_MEMORY_RATIO:+--memory-ratio "$FREETOKEN_MEMORY_RATIO"} \
+    ${swa_load_flag} \
     > "$logfile" 2>&1 &
   pid=$!
   echo "$pid" > user-data/freetoken-managed
   for i in $(seq 1 60); do
     if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then
       echo "[run] managed FreeToken: ready after ${i}s (pid ${pid})"
-      freetoken_resize_swa_cache "$base"
+      freetoken_resize_swa_cache "$base" "$swa_load_flag"
       return 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then echo "[run] managed FreeToken: FAILED to start — see ${logfile}"; return 1; fi

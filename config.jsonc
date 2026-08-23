@@ -65,12 +65,13 @@
       // failed closed). GPU-fit knobs are REQUIRED for a model this size on 8GB: maxRunningRequests=1
       // (one verdict at a time; keeps prefill activation small), cudaGraphMaxBs=1, memoryRatio=0.82
       // (leaves ~1.3GB runtime headroom — 0.9 OOM'd on the 27k-token rulebook prefill).
-      // numPages/numSwaPages: after start, run.sh resizes the KV pools (POST /v1/cache/rebuild) so the
-      // SWA window pool (33k) CLEARS the ~27k rulebook — the default (~26k) is smaller than the rulebook,
-      // so its KV wasn't retained and every verdict re-prefilled all ~55k tokens (~50s). Clearing it lets
-      // a repeated/near-identical prefix reuse (multi-action turns, retries, growing transcript) →
-      // sub-second. numPages (full pool = context cap) shrinks 129k→100k so the bigger window fits 8GB.
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/gemma-4-E2B-it-q4gguf/gemma-4-E2B_q4_0-it.gguf", "servedModelName": "gemma-4-e2b", "toolCallParser": "gemma4", "reasoningParser": "gemma4", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.82, "numPages": 100000, "numSwaPages": 33000, "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      // SWA window pool must CLEAR the ~27k rulebook or its KV isn't retained and every verdict
+      // re-prefills all ~55k tokens (~50s); clearing it lets a repeated/near-identical prefix reuse
+      // (multi-action turns, retries, growing transcript) → sub-second. swaFullTokensRatio sizes it at
+      // LOAD via --swa-full-tokens-ratio (FreeToken PR #109): ratio 0.3 → window ~34k, full pool ~113k.
+      // numPages/numSwaPages are the fallback for a stock build without the flag: run.sh does a
+      // post-start /v1/cache/rebuild instead (full pool 100k, window 33k). run.sh picks one automatically.
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/gemma-4-E2B-it-q4gguf/gemma-4-E2B_q4_0-it.gguf", "servedModelName": "gemma-4-e2b", "toolCallParser": "gemma4", "reasoningParser": "gemma4", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.82, "swaFullTokensRatio": 0.3, "numPages": 100000, "numSwaPages": 33000, "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
