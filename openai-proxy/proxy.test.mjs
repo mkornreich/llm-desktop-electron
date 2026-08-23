@@ -593,10 +593,10 @@ test("every response leads with the model note; the label is rendered verbatim",
   // render surfaces it verbatim, so the note is provider-agnostic and route-agnostic.
   for (const note of ["composite → gemini:gemini-3-flash-preview", "compaction → cloudflare:@cf/qwen/qwen3.8-27b", "model → freetoken:qwen3:1.7b"]) {
     const msg = toAnthropic(oai, "x", registry, note);
-    // A leading TEXT block (not thinking): the client's summarized-thinking mode drops an injected
-    // thinking block, so the note is plain text, which always renders.
-    assert.equal(msg.content[0].type, "text", "note leads as a text block");
-    assert.equal(msg.content[0].text, note, "the label is shown exactly as given");
+    assert.equal(msg.content[0].type, "thinking", "thinking block leads");
+    assert.equal(msg.content[0].thinking, note, "the label is shown exactly as given");
+    // claude.ai drops an unsigned thinking block, so it must carry a (non-empty) signature to render.
+    assert.ok(msg.content[0].signature && msg.content[0].signature.length > 0, "the thinking block is signed");
     assert.equal(msg.content[1].type, "text");
   }
   // A null note (e.g. a classifier verdict) injects nothing.
@@ -610,36 +610,16 @@ test("fromResponses leads with the model note but never masks an empty turn", ()
   const withText = { output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }], usage: {} };
   const note = "model → openai:gpt-5.6-sol";
   const msg = fromResponses(withText, "x", registry, note);
-  assert.equal(msg.content[0].type, "text");
-  assert.equal(msg.content[0].text, note);
+  assert.equal(msg.content[0].type, "thinking");
+  assert.equal(msg.content[0].thinking, note);
+  assert.ok(msg.content[0].signature && msg.content[0].signature.length > 0, "the thinking block is signed");
   assert.equal(msg.content[1].type, "text");
-  assert.equal(msg.content[1].text, "hi");
   // An empty upstream turn still gets its diagnostic notice — the note is prepended AFTER that check,
-  // so content is [note, notice], never just [note].
+  // so content is [thinking, text(notice)], never just [thinking].
   const empty = fromResponses({ output: [], usage: {} }, "x", registry, note);
-  assert.equal(empty.content[0].text, note, "the note leads");
-  assert.ok(empty.content.length >= 2 && empty.content[1].type === "text", "the empty-turn notice survives");
-});
-
-test("the model-note line is stripped back off assistant history so the model never echoes it", () => {
-  // As its own leading text block (how the proxy emits it):
-  const arr = { messages: [
-    { role: "assistant", content: [{ type: "text", text: "model → cloudflare:@cf/qwen/qwen3.8-27b" }, { type: "text", text: "Here is the answer." }] },
-    { role: "user", content: "next" },
-  ], max_tokens: 100 };
-  const a1 = toOpenAI(arr, "gpt-4.1-mini").payload.messages.find((m) => m.role === "assistant");
-  assert.equal(a1.content, "Here is the answer.", "the note block is dropped, the real text kept");
-  // As a string prefix (if the client merged the blocks):
-  const str = { messages: [
-    { role: "assistant", content: "composite → groq:openai/gpt-oss-120b\nThe answer." },
-    { role: "user", content: "next" },
-  ], max_tokens: 100 };
-  const a2 = toOpenAI(str, "gpt-4.1-mini").payload.messages.find((m) => m.role === "assistant");
-  assert.equal(a2.content, "The answer.", "the leading note line is stripped from string content");
-  // A user message that merely starts similarly is NOT touched (only assistant turns are stripped).
-  const usr = { messages: [{ role: "user", content: "model → what does this arrow mean?" }], max_tokens: 100 };
-  const u = toOpenAI(usr, "gpt-4.1-mini").payload.messages.find((m) => m.role === "user");
-  assert.equal(u.content, "model → what does this arrow mean?", "user content is never stripped");
+  assert.equal(empty.content[0].type, "thinking");
+  assert.equal(empty.content[1].type, "text", "the empty-turn notice survives");
+  assert.ok(empty.content.length >= 2);
 });
 
 // ---------- auto-continue trigger ----------

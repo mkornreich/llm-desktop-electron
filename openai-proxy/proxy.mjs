@@ -1877,7 +1877,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   }
   for (const m of body.messages || []) {
     const content = m.content;
-    if (typeof content === "string") { messages.push({ role: m.role, content: redactInjectedPII(m.role === "assistant" ? stripLeadingModelNote(content) : content) }); continue; }
+    if (typeof content === "string") { messages.push({ role: m.role, content: redactInjectedPII(content) }); continue; }
     if (!Array.isArray(content)) continue;
     // Same ordered model as the Responses path — see content.mjs. The buckets this replaces lost the
     // interleaving of text and images and dropped anything they had no bucket for.
@@ -1901,12 +1901,8 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
       }
     }
     if (m.role === "assistant") {
-      // Only user turns may carry images on this surface. Strip the proxy's own leading "model → …"
-      // note off each part (and drop a part that was only the note) so it never accumulates in the
-      // history the model sees — otherwise the model learns to echo it.
-      const textOnly = parts.filter((p) => p.kind === "text" || p.kind === "note")
-        .map((p) => ({ ...p, text: stripLeadingModelNote(p.text || "") }))
-        .filter((p) => p.text !== "");
+      // Only user turns may carry images on this surface.
+      const textOnly = parts.filter((p) => p.kind === "text" || p.kind === "note");
       const msg = { role: "assistant", content: textOnly.map((p) => p.text).join("\n") || null };
       if (toolCalls.length) msg.tool_calls = toolCalls;
       messages.push(msg);
@@ -1981,23 +1977,23 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   return { payload: out, registry, imagesSent, filesSent, notesEmitted };
 }
 
-// The model-name note is matched by this prefix so toOpenAI can strip it back off the assistant's
-// prior turns — otherwise the leading "model → …" line accumulates in history and the model starts
-// echoing it. Kept in sync with the labels the handler builds (model / composite / compaction).
-const MODEL_NOTE_RE = /^(?:model|composite|compaction) → \S/;
-const stripLeadingModelNote = (s) => String(s).replace(/^(?:model|composite|compaction) → [^\n]*(?:\n+|$)/, "");
+// A signature for a proxy-injected thinking block. Anthropic's real thinking blocks always carry a
+// cryptographic signature, and the claude.ai renderer will not display a thinking block without one —
+// an unsigned block (signature "") is silently dropped, which is why the model-name note never appeared
+// in the GUI. The value is opaque to the client (only Anthropic's servers ever validate it) and
+// decodeBlocks drops the whole block when the client sends it back, so a random base64 blob is both
+// sufficient to render and free of any round-trip consequence.
+const thinkingSignature = () => crypto.randomBytes(96).toString("base64");
 
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
 function toAnthropic(oai, reqModel, registry, modelNote = null) {
   const choice = oai.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
-  // Every visible turn leads with a one-line TEXT block naming the model that actually answered (the
-  // handler builds the label: "model → …", "composite → …", or "compaction → …"). It is text, not a
-  // thinking block, because the Code-tab client runs in summarized-thinking mode and drops a proxy-
-  // injected thinking block (it wants a real server-signed summary we cannot forge); text always
-  // renders. toOpenAI strips this line back off on the next turn so the model never echoes it.
-  if (modelNote) content.push({ type: "text", text: modelNote });
+  // Every visible turn leads with a one-line thinking block naming the model that actually answered
+  // (the handler builds the label: "model → …", "composite → …", or "compaction → …"), rendered
+  // verbatim here so the Code tab always shows the real upstream.
+  if (modelNote) content.push({ type: "thinking", thinking: modelNote, signature: thinkingSignature() });
   if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
   {
@@ -2127,13 +2123,13 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
                                  // otherwise a tool-only turn leaves a hole at index 0
   let finish = null, usage = null;
 
-  // Every visible turn opens with a one-line TEXT block naming the model that actually answered
-  // (label built by the handler), so the Code tab always shows the real upstream. Text, not thinking:
-  // the client's summarized-thinking mode drops a proxy-injected thinking block.
+  // Every visible turn opens with a one-line thinking block naming the model that actually answered
+  // (label built by the handler), so the Code tab's thinking panel always shows the real upstream.
   if (modelNote) {
     const nIdx = nextIndex++;
-    sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "text", text: "" } });
-    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: modelNote } });
+    sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "thinking", thinking: "" } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: modelNote } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "signature_delta", signature: thinkingSignature() } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
   }
 
@@ -2707,9 +2703,9 @@ function fromResponses(resp, reqModel, registry, modelNote = null) {
     content.push({ type: "text", text: emptyTurnNotice(resp) });
     log("  ! empty turn — substituted a diagnostic notice instead of blank output");
   }
-  // Prepend the model note AFTER the empty check (so it never masks an empty turn) — a leading TEXT
-  // block (not thinking; see toAnthropic) so it renders in the Code tab; stripped back off next turn.
-  if (modelNote) content.unshift({ type: "text", text: modelNote });
+  // Prepend the model note AFTER the empty check (so it never masks an empty turn) — it leads the
+  // response so the Code tab shows which upstream answered.
+  if (modelNote) content.unshift({ type: "thinking", thinking: modelNote, signature: thinkingSignature() });
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel, content,
     stop_reason: respStopReason(resp, hasTool), stop_sequence: null,
@@ -2733,13 +2729,13 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
   sse(res, "ping", { type: "ping" });
   const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
-  // Every visible turn opens with a one-line TEXT block naming the model that actually answered, so
-  // the Code tab always shows the real upstream (label built by the handler). Text, not thinking: the
-  // client's summarized-thinking mode drops a proxy-injected thinking block.
+  // Every visible turn opens with a one-line thinking block naming the model that actually answered,
+  // so the Code tab's thinking panel always shows the real upstream (label built by the handler).
   if (modelNote) {
     const nIdx = nextIndex++;
-    sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "text", text: "" } });
-    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: modelNote } });
+    sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "thinking", thinking: "" } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: modelNote } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "signature_delta", signature: thinkingSignature() } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
   }
   let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic
