@@ -278,7 +278,23 @@ ensure_freetoken() {
   local base="http://127.0.0.1:${FREETOKEN_PORT:-1919}"
   local ready="${base}${FREETOKEN_HEALTH_PATH:-/v1/models}"
   if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then
-    echo "[run] managed FreeToken: reusing the server already on ${base}"; return 0
+    # A server is up on 1919 — but reuse it ONLY if it serves the model we want. A stale or
+    # hand-started FreeToken on a different --model would otherwise be reused and a picked
+    # freetoken:<model> would silently run the wrong weights (this bit us: a manual gemma
+    # instance shadowed the configured qwen3). Compare /v1/models; on mismatch, stop it and reload.
+    local want="${FREETOKEN_SERVED_MODEL:-}" have=""
+    [ -n "$want" ] && have="$(curl -sf --max-time 2 "$ready" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(String((j.data&&j.data[0]&&j.data[0].id)||""))}catch(e){}})' 2>/dev/null)"
+    if [ -z "$want" ] || [ -z "$have" ] || [ "$have" = "$want" ]; then
+      echo "[run] managed FreeToken: reusing the server already on ${base}${have:+ (serving ${have})}"; return 0
+    fi
+    echo "[run] managed FreeToken: ${base} serves '${have}', want '${want}' — stopping it and reloading"
+    local owner; owner="$(ss -ltnp 2>/dev/null | grep '127.0.0.1:1919' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+    if [ -n "${owner:-}" ]; then
+      local pg; pg="$(ps -o pgid= -p "$owner" 2>/dev/null | tr -d ' ')"
+      { [ -n "$pg" ] && kill -TERM "-$pg" 2>/dev/null; } || kill -TERM "$owner" 2>/dev/null || true
+    fi
+    rm -f user-data/freetoken-managed
+    for i in $(seq 1 15); do ss -ltn 2>/dev/null | grep -q '127.0.0.1:1919' || break; sleep 1; done
   fi
   local launch="${FREETOKEN_LAUNCH:-}"
   if [ -z "$launch" ] || [ ! -x "$launch" ]; then

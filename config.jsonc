@@ -62,7 +62,7 @@
       // managed bring-up. modelPath is the weights dir; served model name defaults to its basename.
       // Serves the small qwen3:1.7b so it fits the GPU alongside nothing else (the 8GB card can't hold
       // both FreeToken and a managed Ollama — see onDeviceEngine below, which runs exactly one).
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3:1.7b", "toolCallParser": "qwen3", "reasoningParser": "qwen3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3:1.7b", "toolCallParser": "qwen25", "reasoningParser": "qwen3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
