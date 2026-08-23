@@ -167,12 +167,18 @@
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
   "compact": ["groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "groq:qwen/qwen3.6-27b", "ollama-cloud:deepseek-v4-pro:preview", "ollama-cloud:gpt-oss:120b", "ollama-cloud:gpt-oss:20b", "ollama:gemma4:latest"],
 
-  // Classifier models. These run on the DEFAULT provider unless the value is a routable "<provider>:<model>".
+  // Classifier models. Each runs on the DEFAULT provider unless the value is a routable "<provider>:<model>".
   // safety="" means "use the main model" (measured: 57% unparseable verdicts -> avoid). prefix is the
   // low-stakes Bash-prefix detector. background is the CLI's own hint (may not reach the in-app agent).
+  // Each may be a single id OR an ordered FALLOVER CHAIN (an array): the proxy tries members in turn,
+  // falling over on a member's overflow / error to the next — every member judges the FULL transcript
+  // (never shortened), and the verdict fails closed only if ALL members fail. safety below tries the
+  // on-device gemma FIRST (private; ~50s but usually succeeds) and falls over to a big-window cloud
+  // model when gemma overflows or errors (instead of failing closed to manual approval). Put a cloud
+  // model FIRST instead if you want speed on every verdict (each verdict then egresses the transcript).
   "classifier": {
     "prefix": "freetoken:gemma-4-e2b",
-    "safety": "freetoken:gemma-4-e2b",
+    "safety": ["freetoken:gemma-4-e2b", "gemini:gemini-3-flash-preview"],
     "background": "freetoken:gemma-4-e2b",
     "maxTools": 4,
     "slowMs": 20000

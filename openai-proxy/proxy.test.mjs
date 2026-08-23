@@ -23,6 +23,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         COMPACT_STEPS, TRIMMED, compactResponsesInputSummarised,
         isClassifierRequest, classifierFamily, classifierPrompt, toResponses, toOpenAI, pickModel, resolvePickedProvider,
         parseCompositeMembers, resolveComposite, parseRetryAfter, classifyUpstream, noteCompositeModel, resolveCompactChain,
+        resolveClassifierChain,
         taskToolKind, parseTaskReminder, applyTaskCall, collectPriorTasks, renderTaskEcho,
         newTaskState, appendTaskEcho, shouldRetryEmpty, BENIGN_EVENTS,
         rememberUnsupported, stripUnsupported, isTransportError, MAX_TRANSPORT_RETRIES,
@@ -922,6 +923,22 @@ test("resolveCompactChain: empty -> single default member, else ordered members"
   assert.equal(chain[0].model, "qwen3:8b");
   assert.equal(chain[1].model, "some-bare");              // bare id -> the default provider
   assert.ok(chain[1].provider && chain[1].provider.baseURL);
+});
+
+test("resolveClassifierChain: single/blank -> null (single-shot), a list -> an ordered fallover chain", () => {
+  // A single configured model keeps the single-shot path (returns null so the handler resolves it there).
+  assert.equal(resolveClassifierChain(ROUTE.SAFETY_BLOCK, { safetyStr: "freetoken:gemma-4-e2b" }), null);
+  assert.equal(resolveClassifierChain(ROUTE.SAFETY_SEVERITY, { safetyStr: "" }), null, "blank safety -> null -> main model");
+  // A comma-separated list becomes an ordered chain the verdict tries in turn (obtainUpstream falls over).
+  const chain = resolveClassifierChain(ROUTE.SAFETY_BLOCK, { safetyStr: "freetoken:gemma-4-e2b, cohere:command-a-03-2025, some-bare" });
+  assert.equal(chain.length, 3, "local + keyed remote + bare all survive (unlike composite, NOT filtered by tool-calling)");
+  assert.equal(chain[0].model, "gemma-4-e2b");
+  assert.equal(chain[1].provider.id, "cohere");             // keyed remote member routes to its provider
+  assert.equal(chain[2].model, "some-bare");
+  assert.ok(chain[2].provider && chain[2].provider.baseURL, "a bare id -> the default provider");
+  // The PREFIX route reads the prefix config, not safety.
+  assert.equal(resolveClassifierChain(ROUTE.PREFIX, { prefixStr: "a:x", safetyStr: "b:y,c:z" }), null, "prefix single -> null");
+  assert.ok(resolveClassifierChain(ROUTE.PREFIX, { prefixStr: "freetoken:gemma-4-e2b, cohere:command-a-03-2025" }).length === 2);
 });
 
 test("noteCompositeModel logs on change, else at most once per second", () => {

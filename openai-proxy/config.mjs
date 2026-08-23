@@ -715,6 +715,11 @@ export function emitEnv({ env = process.env } = {}) {
     const i = String(val || "").indexOf(":"); const prov = i > 0 ? String(val).slice(0, i) : "";
     return (onDev && prov !== onDev && C.providers?.[prov]?.managed && C.providers?.[onDev]?.managed) ? `${onDev}${String(val).slice(i)}` : val;
   };
+  // A classifier model may be a fallover CHAIN (a config.jsonc array or a comma-separated string): swap
+  // each member's on-device engine independently and rejoin. A single value round-trips unchanged; a
+  // blank collapses to "" (so putIf drops it and the blank-safety -> main-model behaviour is kept).
+  const swapEngineList = (val) =>
+    (Array.isArray(val) ? val : String(val ?? "").split(",")).map((s) => swapEngine(String(s).trim())).filter((s) => s !== "").join(",");
   const out = [];
   const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
   const put = (k, val) => out.push(`export ${k}=${q(val)}`);
@@ -763,11 +768,11 @@ export function emitEnv({ env = process.env } = {}) {
   put("OPENAI_BASE_URL", v.OPENAI_BASE_URL);   // local: run.sh's ensure_ollama overrides with the managed port
   putIf("OPENAI_EXTRA_HEADERS", v.OPENAI_EXTRA_HEADERS);
   putIf("LLM_DESKTOP_OPENAI_CLAUDE_CODE_MODEL", v.OPENAI_CLAUDE_CODE_MODEL);
-  putIf("CLAUDE_CODE_BG_CLASSIFIER_MODEL", swapEngine(getPath(C, "classifier.background")));
+  putIf("CLAUDE_CODE_BG_CLASSIFIER_MODEL", swapEngineList(getPath(C, "classifier.background")));
   // Classifier models as env overrides so the proxy routes prefix/safety verdicts to the ACTIVE
   // on-device engine (config.jsonc holds the default engine's ids; the toggle swaps the provider).
-  putIf("OPENAI_CLASSIFIER_MODEL", swapEngine(getPath(C, "classifier.prefix")));
-  putIf("OPENAI_CLASSIFIER_SAFETY_MODEL", swapEngine(getPath(C, "classifier.safety")));
+  putIf("OPENAI_CLASSIFIER_MODEL", swapEngineList(getPath(C, "classifier.prefix")));
+  putIf("OPENAI_CLASSIFIER_SAFETY_MODEL", swapEngineList(getPath(C, "classifier.safety")));
   put("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", getPath(C, "picker.gatewayModelDiscovery") === false ? "0" : "1");
   put("PROXY_ANTHROPIC_BASE_URL", `http://127.0.0.1:${v.PORT}`);
   const comp = getPath(C, "composite");

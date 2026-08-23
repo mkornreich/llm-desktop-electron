@@ -522,6 +522,31 @@ export function resolveCompactChain({ membersStr = OPENAI_COMPACT_MODELS } = {})
   }
   return out.length ? out : single;
 }
+// Resolve the CONFIGURED classifier model for a route into an ordered fallover chain, or null when it
+// is a single model (then the normal single-shot path handles it, blank safety still -> main model).
+// The configured value is comma-separated "<provider>:<model>" ids (config.jsonc allows an array).
+// Unlike the composite/compaction chains, classifier members are NOT filtered by tool-calling — a
+// classifier is given no tools, so a non-tool model is a valid member. This lets a safety/prefix
+// verdict try a fast local model first and fall over to a big-window cloud model when the local one
+// overflows or errors: obtainUpstream does the fallover (a member's context 400 -> skip -> next
+// member), and every member still judges the FULL transcript (never shortened) so the fail-closed
+// safety guarantee holds — only when EVERY member fails does the verdict fail closed.
+export function resolveClassifierChain(route, {
+  prefixStr = OPENAI_CLASSIFIER_MODEL, safetyStr = OPENAI_CLASSIFIER_SAFETY_MODEL,
+} = {}) {
+  const cfg = route === ROUTE.PREFIX ? prefixStr : isSafety(route) ? safetyStr : "";
+  const ids = parseCompositeMembers(cfg);
+  if (ids.length < 2) return null;                     // single/blank -> single-shot path
+  const out = [];
+  for (const id of ids) {
+    if (id.includes(":")) {
+      const picked = resolvePickedProvider(id);
+      if (picked) out.push({ provider: picked.provider, model: picked.model });
+      else log(`  ! classifier chain: skipping ${id} — unknown provider or no key`);
+    } else out.push({ provider: DEFAULT_PROVIDER, model: id });
+  }
+  return out.length ? out : null;
+}
 const AUTO_CONTINUE = CFG.OPENAI_AUTO_CONTINUE;
 const MAX_CONTINUATIONS = CFG.OPENAI_MAX_CONTINUATIONS;
 // Text that promises or proposes an action rather than reporting one. Deliberately narrow:
@@ -3702,6 +3727,7 @@ const server = http.createServer(async (req, res) => {
     // is a single member.
     const members = route === ROUTE.MAIN ? resolveComposite(reqModel)
       : (route === ROUTE.COMPACTION && OPENAI_COMPACT_MODELS) ? resolveCompactChain()
+      : isCls ? resolveClassifierChain(route)   // configurable classifier fallover chain (else single-shot)
       : null;
     // Single-member provider + model. A MAIN turn resolves the REQUEST's "<provider>:<model>". A classifier
     // (prefix/safety) or un-chained compaction turn resolves the CONFIGURED model's prefix the SAME way, so a
@@ -3747,7 +3773,7 @@ const server = http.createServer(async (req, res) => {
     const { upstream, useResp, payload, registry, model, startedAt } = got;
     // Announce which member of a chain actually answered (throttled — on change, else <=1/s). `members` is
     // set for a composite MAIN turn or a chained COMPACTION turn; label the line accordingly.
-    if (members) noteCompositeModel(`${got.provider.id}:${got.model}`, Date.now(), log, route === ROUTE.COMPACTION ? "compaction" : "composite");
+    if (members) noteCompositeModel(`${got.provider.id}:${got.model}`, Date.now(), log, route === ROUTE.COMPACTION ? "compaction" : isCls ? "classifier" : "composite");
     // The thinking line that leads EVERY visible response, naming the model that ACTUALLY answered —
     // a composite winner, the compaction summariser's own model/chain, or a single-provider turn.
     // Classifier verdicts are excluded: their body is parsed for a <block> answer, not read by a human.
