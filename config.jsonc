@@ -141,15 +141,18 @@
     // NOT the native .../ai/run, whose request/response shape this proxy doesn't speak. {cloudflareAccountId}
     // and the API token both live in .openai-key: the account id is account-specific and kept out of this
     // PUBLIC file, and fillEndpoint() substitutes it at resolve time. Model must be tool-capable (the agent
-    // always sends tools) — Llama 3.3 70B is.
-    "cloudflare": {"label":"Cloudflare","endpoint":"https://api.cloudflare.com/client/v4/accounts/{cloudflareAccountId}/ai/v1","api":"chat","keyNames":["cloudflareApiKey","apiKey"],"isOpenAI":false,"responses":false,"model":"@cf/meta/llama-3.3-70b-instruct-fp8-fast","claudeCodeModel":"claude-opus-4-8[1m]"}
+    // always sends tools) AND have a big enough context: Cloudflare HARD-CAPS context per model, and
+    // @cf/meta/llama-3.3-70b-instruct-fp8-fast is capped at 24k — the Code-tab prompt alone overflows it
+    // ("Prompt is too long"). qwen3.8-27b gives 256k and does tools. deepseek-v4-*/kimi-k2 are bigger but
+    // Workers-Free-plan gated (403). Content is flattened to strings for this provider (STRING_CONTENT_PROVIDERS).
+    "cloudflare": {"label":"Cloudflare","endpoint":"https://api.cloudflare.com/client/v4/accounts/{cloudflareAccountId}/ai/v1","api":"chat","keyNames":["cloudflareApiKey","apiKey"],"isOpenAI":false,"responses":false,"model":"@cf/qwen/qwen3.8-27b","claudeCodeModel":"claude-opus-4-8[1m]"}
 
   },
 
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
   // failing over on transport/HTTP errors and honouring Retry-After on 429s. First in the Code-tab
   // dropdown and the default for new sessions. "maxWaitMs" bounds the wait when EVERY member is 429'd.
-  "composite": ["mistral:mistral-large-latest","cohere:command-a-plus-05-2026","llm7:gpt-oss:20b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","ollama:gemma4:latest"],
+  "composite": ["cloudflare:@cf/qwen/qwen3.8-27b","mistral:mistral-large-latest","cohere:command-a-plus-05-2026","llm7:gpt-oss:20b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:qwen3:1.7b"],
   "compositeMaxWaitMs": 30000,
 
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
@@ -261,7 +264,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b","cloudflare:@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b","cloudflare:@cf/qwen/qwen3.8-27b"],
     "gatewayModelDiscovery": true
   },
 
