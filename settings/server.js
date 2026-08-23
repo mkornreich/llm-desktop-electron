@@ -461,16 +461,46 @@ function shutdown(why) {
 }
 
 // One watchdog tick. unref() so it never keeps the process alive on its own — the http server does
-// that, and the moment the server is the only thing left running we want to be free to exit.
-setInterval(() => {
-  if (activeRequests > 0) return;                    // don't cut off an in-flight request or relaunch
-  const now = Date.now();
-  if (!seenBeat) { if (now - startedAt > BOOT_GRACE_MS) shutdown("the window never opened"); return; }
-  if (closeAt && now - closeAt > CLOSE_GRACE_MS) return shutdown("the settings window was closed");
-  if (now - lastBeat > IDLE_GRACE_MS) shutdown("the settings window went away");
-}, 1500).unref();
+// that, and the moment the server is the only thing left running we want to be free to exit. Only
+// armed in standalone (browser) mode: a plain page has no close event, so the heartbeat's absence is
+// the shutdown signal. The Electron wrapper embeds this server and owns the lifecycle, so it starts
+// the server with watchdog:false and closes it on window-all-closed.
+let watchdogTimer = null;
+function startWatchdog() {
+  if (watchdogTimer) return;
+  watchdogTimer = setInterval(() => {
+    if (activeRequests > 0) return;                    // don't cut off an in-flight request or relaunch
+    const now = Date.now();
+    if (!seenBeat) { if (now - startedAt > BOOT_GRACE_MS) shutdown("the window never opened"); return; }
+    if (closeAt && now - closeAt > CLOSE_GRACE_MS) return shutdown("the settings window was closed");
+    if (now - lastBeat > IDLE_GRACE_MS) shutdown("the settings window went away");
+  }, 1500);
+  watchdogTimer.unref();
+}
 
-server.listen(PORT, "127.0.0.1", () => {
-  // stdout is consumed by settings.sh, which opens this URL.
-  console.log(`http://127.0.0.1:${PORT}/?t=${TOKEN}`);
-});
+// Bind the server. Returns { url, token, port, close } — the Electron wrapper (settings/main.js)
+// awaits this and points a BrowserWindow at `url`. SETTINGS_PORT=0 gives an ephemeral port, so the
+// embedded instance never collides with a standalone one on 8765.
+function start({ watchdog = true } = {}) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(PORT, "127.0.0.1", () => {
+      if (watchdog) startWatchdog();
+      const boundPort = server.address().port;
+      resolve({
+        url: `http://127.0.0.1:${boundPort}/?t=${TOKEN}`,
+        token: TOKEN, port: boundPort, server,
+        close: () => new Promise((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+module.exports = { start };
+
+// Standalone (settings.sh, server.test.js): self-start and print the token URL on stdout — the only
+// way in, and what those callers read to open the window.
+if (require.main === module) {
+  start().then(({ url }) => console.log(url))
+         .catch((e) => { console.error(`[settings] failed to start: ${e.message}`); process.exit(1); });
+}

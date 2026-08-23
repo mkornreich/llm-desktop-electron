@@ -6,6 +6,11 @@
 # Resources/app.asar symlink, which run.sh recreates on launch)
 node_modules/
 
+# Shadow Electron dist for the settings window: a hard-linked copy of the binary plus symlinks,
+# with a clean resources/ (no app.asar) so `electron settings/` loads the settings app instead of
+# Anthropic's bundle. Rebuilt on demand by settings/build-runtime.sh — never commit it.
+settings/.electron-runtime/
+
 # Isolated app profile — session/login data, not source
 user-data/
 
