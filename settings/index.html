@@ -77,6 +77,12 @@
           border:1px solid var(--line);border-radius:9px;padding:8px 12px;font:13px inherit}
   .search:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:1px}
   .search::placeholder{color:var(--muted)}
+  /* Jump-to-section nav: a wrapping strip of chip buttons in the sticky header. */
+  .nav{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+  .navchip{background:var(--chip);border:1px solid var(--line);border-radius:999px;
+           padding:3px 11px;font:11.5px inherit;color:var(--muted);cursor:pointer;white-space:nowrap}
+  .navchip:hover{border-color:color-mix(in srgb,var(--ink) 30%,transparent);color:var(--ink)}
+  .navchip.active{background:var(--accent);color:var(--accent-ink);border-color:transparent}
   .no-results{padding:22px 4px;color:var(--muted)}
   /* Search hides non-matching rows and empty sections; an explicit rule is needed because .row sets
      its own display:grid, which would otherwise win over the [hidden] user-agent default. */
@@ -91,6 +97,7 @@
   <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
          aria-label="Search settings" placeholder="Search settings by name, key, or description…   ( press / )" />
   <div class="status" id="status"></div>
+  <nav id="secnav" class="nav" aria-label="Jump to a settings section"></nav>
 </header>
 
 <main id="form"><p class="msg">Loading…</p></main>
@@ -357,6 +364,7 @@ function render() {
   for (const g of groups) {
     const items = SCHEMA.filter((s) => s.group === g);
     const sec = document.createElement("section");
+    sec.id = slug(g);
     const head = document.createElement("div"); head.className = "sh";
     const h = document.createElement("h2"); h.textContent = g;
     const files = [...new Set(items.map((i) => i.file))];
@@ -413,9 +421,46 @@ function render() {
     }
     form.append(sec);
   }
+  buildNav(groups);
   refreshDirty();
   applySearch();   // re-apply the active filter to the freshly-rendered rows
 }
+
+// A stable DOM id for a group name ("Ollama Cloud model" -> "sec-ollama-cloud-model").
+const slug = (g) => "sec-" + String(g).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+// The jump-to-section nav: one chip button per group, rebuilt with the sections so it always matches.
+function buildNav(groups) {
+  const nav = $("#secnav"); nav.textContent = "";
+  for (const g of groups) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "navchip"; b.textContent = g; b.dataset.target = slug(g);
+    b.onclick = () => scrollToSection(slug(g));
+    nav.append(b);
+  }
+}
+
+// Scroll a section into view, offset by the sticky header's current height (which varies with the
+// status chips and the nav wrapping) so the section heading lands just below it, not under it.
+function scrollToSection(id) {
+  const sec = document.getElementById(id); if (!sec) return;
+  const header = document.querySelector("header");
+  const top = sec.getBoundingClientRect().top + window.scrollY - header.offsetHeight - 10;
+  window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+}
+
+// Scroll-spy: mark the nav chip for the section currently under the header. The active section is
+// the last visible one whose top has passed beneath the header edge.
+function updateActiveNav() {
+  const header = document.querySelector("header");
+  const edge = header.offsetHeight + 12;
+  const secs = [...document.querySelectorAll("#form section")].filter((s) => !s.hidden);
+  let active = secs[0] || null;
+  for (const s of secs) { if (s.getBoundingClientRect().top <= edge) active = s; else break; }
+  for (const chip of $("#secnav").querySelectorAll(".navchip"))
+    chip.classList.toggle("active", !!active && chip.dataset.target === active.id);
+}
+addEventListener("scroll", updateActiveNav, { passive: true });
 
 // Live filter. Shows a row when the query is a substring of its name / key / description / group /
 // file (all folded into row.dataset.search), hides sections with no visible row, and highlights the
@@ -444,6 +489,12 @@ function applySearch() {
     p.textContent = `No settings match “${SEARCH.trim()}”.`;
     form.append(p);
   }
+  // A filtered-out section's jump chip goes with it.
+  for (const chip of $("#secnav").querySelectorAll(".navchip")) {
+    const sec = document.getElementById(chip.dataset.target);
+    chip.hidden = !sec || sec.hidden;
+  }
+  updateActiveNav();
 }
 
 // Rebuild an element's text with <mark> around each occurrence of q. Built from DOM nodes (not
