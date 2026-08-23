@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check *)",
+      "Bash(git fetch)",
+      "Bash(git fetch *)",
+      "Bash(nvidia-smi)",
+      "Bash(nvidia-smi *)"
+    ]
+  }
+}
