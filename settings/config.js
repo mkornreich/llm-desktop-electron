@@ -220,6 +220,10 @@ const SCHEMA = [
     default: "0",
     label: "Record session",
     help: "When on, the proxy appends every Code-tab turn — the full request AND the full response it returns — to openai-proxy/session-recording.jsonl (one JSON line per turn). A per-machine record of your own session; it can contain private content, so it is gitignored. Changing it restarts the proxy." },
+  { group: "Diagnostics", file: ".diagnostics", key: "PROXY_LOG_CLASSIFIER", type: "bool",
+    default: "0",
+    label: "Log classifier calls",
+    help: "When on, the proxy appends every security-classifier call (the Auto-mode safety verdict and the Bash-prefix detector) to openai-proxy/classifier-calls.jsonl — route, model, how long it took to run, input size, and the verdict — for monitoring. The verdict latency is always logged to the proxy log; this adds the per-call record. Gitignored (can contain session context). Changing it restarts the proxy." },
 
   // Code-mode behaviour. Also persisted in .diagnostics (run.sh reads it and exports into the app's
   // launch env). There is no CLAUDE_CODE_* env hook for ultracode, so run.sh maps this to LLMD_ULTRACODE
@@ -283,7 +287,7 @@ const PATHS = {
   PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
   DISABLE_TELEMETRY: "privacy.disableTelemetry",
   SYNC_CLAUDE_SESSIONS: "sync.sessions", SYNC_CLAUDE_GROUPING: "sync.grouping",
-  DESKTOP_LOG_LEVEL: "diagnostics.logLevel", PROXY_DUMP_TOOLS: "diagnostics.dumpTools", PROXY_RECORD_SESSION: "diagnostics.recordSession", ULTRACODE_DEFAULT: "diagnostics.ultracode",
+  DESKTOP_LOG_LEVEL: "diagnostics.logLevel", PROXY_DUMP_TOOLS: "diagnostics.dumpTools", PROXY_RECORD_SESSION: "diagnostics.recordSession", PROXY_LOG_CLASSIFIER: "diagnostics.logClassifier", ULTRACODE_DEFAULT: "diagnostics.ultracode",
 };
 const getPath = (o, dot) => String(dot).split(".").reduce((x, k) => (x == null ? undefined : x[k]), o);
 const isArrayType = (t) => t === "composite";   // composite/compact/dropdown are JSON arrays; every other type is a scalar

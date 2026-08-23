@@ -31,7 +31,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
-        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses,
+        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses, classifierVerdictOf,
         approxTokens, kilo } =
   await import("./proxy.mjs");
 const { ToolRegistry } = await import("./tool-registry.mjs");
@@ -714,6 +714,18 @@ test("a note-only assistant turn drops out of history — never sent as an empty
   const a = toOpenAI(noteWithTool, "gpt-4.1-mini").payload.messages.find((m) => m.role === "assistant");
   assert.ok(a && (a.tool_calls || []).length === 1, "the tool call is preserved even though the note was the only text");
   assert.equal(a.content, null, "the note-only text became empty content, never the leaked note");
+});
+
+test("classifierVerdictOf parses the verdict out of a classifier response for the call log", () => {
+  const block = (t) => ({ content: [{ type: "text", text: t }] });
+  assert.equal(classifierVerdictOf(block("<block>no</block>")), "allow");
+  assert.equal(classifierVerdictOf(block("<block>yes</block><category>Irreversible Deletion</category><reason>[x] y</reason>")),
+    "block (Irreversible Deletion)");
+  assert.equal(classifierVerdictOf(block("<block>yes</block>")), "block");           // no category
+  assert.equal(classifierVerdictOf(block("<severity>3</severity>")), "severity=3");  // stage-1 prefix classifier
+  assert.equal(classifierVerdictOf(block("")), "empty");                             // an empty turn
+  assert.equal(classifierVerdictOf(block("I think this is fine")), "unparsed");       // no tag
+  assert.equal(classifierVerdictOf({ content: [{ type: "tool_use", name: "X" }] }), "empty"); // no text block
 });
 
 test("the Environment 'powered by the model' line is rewritten to the real model + provider", () => {
@@ -1665,11 +1677,16 @@ test("issue #6: the verdict is never fabricated by the proxy", () => {
   // where it is matched against the PROMPT, never emitted.
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   const code = src.replace(/^\s*\/\/.*$/gm, "");                    // drop whole-line comments
-  // Remove the detector needle lists, which is the one legitimate home for the tag.
-  const outside = code.replace(/new RegExp\(\[[\s\S]*?\]\.join\("\|"\), "i"\)/g, "«needles»");
+  // Two legitimate homes for the tag, both MATCHING it (never emitting): the detector needle lists
+  // (matched against the PROMPT to route), and classifierVerdictOf (matched against the model's own
+  // RESPONSE to record the verdict in the call log). Remove both, then require the tag is gone.
+  const outside = code
+    .replace(/new RegExp\(\[[\s\S]*?\]\.join\("\|"\), "i"\)/g, "«needles»")
+    .replace(/function classifierVerdictOf\(msg\) \{[\s\S]*?\n\}/, "«verdict-parser»");
   assert.ok(/«needles»/.test(outside), "needle lists not found — has the detector moved?");
+  assert.ok(/«verdict-parser»/.test(outside), "verdict parser not found — has classifierVerdictOf moved?");
   assert.ok(!/<block>/.test(outside),
-    "a verdict tag outside the detector means the proxy can emit one");
+    "a verdict tag outside the detector/parser means the proxy can emit one");
   // and nothing anywhere assigns a verdict into an outgoing text block
   assert.ok(!/text:\s*["'`]\s*<block>/.test(src));
 });

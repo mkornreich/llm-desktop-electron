@@ -2039,6 +2039,39 @@ const RECORDING_FILE = `${REPO}/openai-proxy/session-recording.jsonl`;
 const recordingOn = () => RECORD_SESSION || fs.existsSync(RECORDING_FLAG);
 function recordSessionTurn(entry) { try { fs.appendFileSync(RECORDING_FILE, JSON.stringify(entry) + "\n"); } catch { /* recording is best-effort */ } }
 
+// Optional per-call logging of the safety/prefix (security) classifier. The verdict LATENCY is always
+// logged (a verdict near the CLI's 60s budget produces "temporarily unavailable" and a denied action).
+// When the "Log classifier calls" setting is on (diagnostics.logClassifier -> PROXY_LOG_CLASSIFIER,
+// needs a restart), EVERY classifier call is also appended to classifier-calls.jsonl — route, model,
+// how long it took, input size, and the parsed verdict — for monitoring. Best-effort; never affects
+// the response.
+// Read from the resolved config, not process.env: config.jsonc is re-read on every proxy start, so
+// the toggle survives a standalone restart-proxy.sh (which forwards only OPENAI_*/LLMD_*/OLLAMA_*).
+const LOG_CLASSIFIER = CFG.PROXY_LOG_CLASSIFIER === true;
+const CLASSIFIER_LOG_FILE = `${REPO}/openai-proxy/classifier-calls.jsonl`;
+function classifierVerdictOf(msg) {
+  const text = (msg?.content || []).filter((c) => c.type === "text").map((c) => c.text || "").join("");
+  const b = text.match(/<block>\s*(yes|no)\s*<\/block>/i);
+  if (b) { const cat = (text.match(/<category>([^<]*)<\/category>/i) || [])[1]; return b[1].toLowerCase() === "yes" ? `block${cat ? " (" + cat.trim() + ")" : ""}` : "allow"; }
+  const s = text.match(/<severity>\s*(\d+)/i);
+  if (s) return `severity=${s[1]}`;
+  return text ? "unparsed" : "empty";
+}
+function logClassifierCall({ route, model, ms, inTokens, outTokens, msg, sessionId }) {
+  const label = routeLabel(route) || "classifier";
+  // Always: the verdict latency — how long the classifier took to run this call.
+  log(`  <- ${label} verdict in ${ms}ms` + (ms >= CLASSIFIER_SLOW_MS
+    ? ` — SLOW. The CLI aborts its classifier at 60s and then DENIES the action.` : ""));
+  if (!LOG_CLASSIFIER) return;
+  try {
+    fs.appendFileSync(CLASSIFIER_LOG_FILE, JSON.stringify({
+      at: new Date().toISOString(), route: label, model, ms,
+      in_tokens: inTokens ?? null, out_tokens: outTokens ?? null,
+      verdict: classifierVerdictOf(msg), session: sessionId || null,
+    }) + "\n");
+  } catch { /* best-effort */ }
+}
+
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
 function toAnthropic(oai, reqModel, registry, modelNote = null) {
   const choice = oai.choices?.[0] || {};
@@ -3766,15 +3799,8 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, r.status, r.body);
         }
         appendTaskEcho(msg, body, isCls);
-        if (isCls) {
-          // Measured, not inferred: a classifier verdict that approaches the CLI's budget is
-          // what produces "temporarily unavailable" and a denied action.
-          const ms = Date.now() - startedAt;
-          log(`  <- ${routeLabel(route) || "classifier"} verdict in ${ms}ms` +
-              (ms >= CLASSIFIER_SLOW_MS
-                ? ` — SLOW. The CLI aborts its classifier at 60s and then DENIES the action.`
-                : ""));
-        }
+        if (isCls) logClassifierCall({ route, model, ms: Date.now() - startedAt, inTokens: rj?.usage?.input_tokens,
+          outTokens: rj?.usage?.output_tokens, msg, sessionId: req.headers["x-claude-code-session-id"] || null });
         const toolNames = msg.content.filter((c) => c.type === "tool_use").map((c) => c.name);
         if (toolNames.length) log(`  model called tool(s): ${toolNames.join(", ")}`);
         logTurnEnd("responses", rj, msg.content.filter((c) => c.type === "tool_use").length,
@@ -3803,6 +3829,8 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, r.status, r.body);
       }
       appendTaskEcho(msg, body, isCls);
+      if (isCls) logClassifierCall({ route, model, ms: Date.now() - startedAt, inTokens: oai?.usage?.prompt_tokens,
+        outTokens: oai?.usage?.completion_tokens, msg, sessionId: req.headers["x-claude-code-session-id"] || null });
       return sendJSON(res, 200, msg); }
   }
 
@@ -3814,6 +3842,7 @@ const server = http.createServer(async (req, res) => {
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
          inTokensField, cacheWarning, recordUsage, usageSummary, recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
          rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses,
+         classifierVerdictOf,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          stripSystemBoilerplate,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,

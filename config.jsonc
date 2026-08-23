@@ -284,7 +284,12 @@
     "ultracode": true,
     // Record every Code-tab turn (request + response) to openai-proxy/session-recording.jsonl. A
     // per-machine, potentially-private capture of your own session (gitignored). Toggle in Settings.
-    "recordSession": false
+    "recordSession": false,
+    // Log every security-classifier call (Auto-mode safety verdict + Bash-prefix detector) to
+    // openai-proxy/classifier-calls.jsonl: route, model, latency (how long the verdict took), input
+    // size, and the verdict. The latency is always logged to the proxy log; this adds the per-call
+    // record for monitoring. Gitignored (can carry session context). Toggle in Settings.
+    "logClassifier": true
   },
 
   "privacy": { "disableTelemetry": true },

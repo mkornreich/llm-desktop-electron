@@ -273,6 +273,7 @@ export const SETTINGS = [
   // user-visible depends on them.
   { name: "PROXY_DUMP_TOOLS", env: "PROXY_DUMP_TOOLS", type: "flag1" },
   { name: "PROXY_RECORD_SESSION", env: "PROXY_RECORD_SESSION", type: "flag1" },
+  { name: "PROXY_LOG_CLASSIFIER", env: "PROXY_LOG_CLASSIFIER", type: "flag1" },
 ];
 
 const BY_NAME = new Map(SETTINGS.map((s) => [s.name, s]));
@@ -405,6 +406,7 @@ const PATHS = {
   PORT: "advanced.port", OPENAI_MAX_TOOLS: "advanced.maxTools", OPENAI_MAX_TOOLS_RESPONSES: "advanced.maxToolsResponses",
   PROXY_DUMP_TOOLS: "diagnostics.dumpTools",
   PROXY_RECORD_SESSION: "diagnostics.recordSession",
+  PROXY_LOG_CLASSIFIER: "diagnostics.logClassifier",
 };
 
 // A config.jsonc value (native JSON type) rendered back into the KV-string form the TYPES coercions
@@ -735,6 +737,7 @@ export function emitEnv({ env = process.env } = {}) {
   putIf("DESKTOP_LOG_LEVEL", getPath(C, "diagnostics.logLevel"));
   if (getPath(C, "diagnostics.dumpTools")) put("PROXY_DUMP_TOOLS", "1");
   if (getPath(C, "diagnostics.recordSession")) put("PROXY_RECORD_SESSION", "1");
+  if (getPath(C, "diagnostics.logClassifier")) put("PROXY_LOG_CLASSIFIER", "1");
   if (getPath(C, "diagnostics.ultracode")) put("LLMD_ULTRACODE", "1");
   let dd = getPath(C, "picker.dropdownModels");
   if (Array.isArray(dd) && dd.length) {

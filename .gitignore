@@ -46,3 +46,6 @@ openai-proxy/websearch-debug.txt
 # Session recordings (per-machine capture of your own agent session; may contain private content)
 openai-proxy/session-recording.jsonl
 docs/session-recording-transcript.md
+
+# Classifier-call log (per-machine; diagnostics.logClassifier) — may carry session context
+openai-proxy/classifier-calls.jsonl
