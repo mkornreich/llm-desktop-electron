@@ -31,7 +31,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
-        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic,
+        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses,
         approxTokens, kilo } =
   await import("./proxy.mjs");
 const { ToolRegistry } = await import("./tool-registry.mjs");
@@ -586,18 +586,37 @@ test("the signature store is bounded (evicts oldest past the cap)", () => {
 
 // ---------- composite member surfaced in the thinking panel ----------
 
-test("a composite turn leads with a thinking line naming the member; a normal turn does not", () => {
+test("every response leads with the model note; the label is rendered verbatim", () => {
   const registry = ToolRegistry.from([]);
   const oai = { choices: [{ message: { content: "hello there", tool_calls: [] }, finish_reason: "stop" }], usage: {} };
-  const composite = toAnthropic(oai, "composite", registry, "gemini:gemini-3-flash-preview");
-  assert.equal(composite.content[0].type, "thinking", "thinking block leads");
-  assert.match(composite.content[0].thinking, /composite → gemini:gemini-3-flash-preview/);
-  assert.equal(composite.content[1].type, "text");
-  assert.match(composite.content[1].text, /hello there/);
-  // no note (direct pick) -> no injected thinking block
+  // The handler builds the whole label ("composite → …", "compaction → …", "model → …") and the
+  // render surfaces it verbatim, so the note is provider-agnostic and route-agnostic.
+  for (const note of ["composite → gemini:gemini-3-flash-preview", "compaction → cloudflare:@cf/qwen/qwen3.8-27b", "model → freetoken:qwen3:1.7b"]) {
+    const msg = toAnthropic(oai, "x", registry, note);
+    assert.equal(msg.content[0].type, "thinking", "thinking block leads");
+    assert.equal(msg.content[0].thinking, note, "the label is shown exactly as given");
+    assert.equal(msg.content[1].type, "text");
+  }
+  // A null note (e.g. a classifier verdict) injects nothing.
   const plain = toAnthropic(oai, "gemini:gemini-3-flash-preview", registry, null);
   assert.notEqual(plain.content[0]?.type, "thinking");
   assert.equal(plain.content[0].type, "text");
+});
+
+test("fromResponses leads with the model note but never masks an empty turn", () => {
+  const registry = ToolRegistry.from([]);
+  const withText = { output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }], usage: {} };
+  const note = "model → openai:gpt-5.6-sol";
+  const msg = fromResponses(withText, "x", registry, note);
+  assert.equal(msg.content[0].type, "thinking");
+  assert.equal(msg.content[0].thinking, note);
+  assert.equal(msg.content[1].type, "text");
+  // An empty upstream turn still gets its diagnostic notice — the note is prepended AFTER that check,
+  // so content is [thinking, text(notice)], never just [thinking].
+  const empty = fromResponses({ output: [], usage: {} }, "x", registry, note);
+  assert.equal(empty.content[0].type, "thinking");
+  assert.equal(empty.content[1].type, "text", "the empty-turn notice survives");
+  assert.ok(empty.content.length >= 2);
 });
 
 // ---------- auto-continue trigger ----------

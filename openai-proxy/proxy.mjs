@@ -1978,12 +1978,14 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
 }
 
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
-function toAnthropic(oai, reqModel, registry, compositeNote = null) {
+function toAnthropic(oai, reqModel, registry, modelNote = null) {
   const choice = oai.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
-  // Composite turns: lead with a thinking line naming the member that actually answered.
-  if (compositeNote) content.push({ type: "thinking", thinking: `composite → ${compositeNote}`, signature: "" });
+  // Every visible turn leads with a one-line thinking block naming the model that actually answered
+  // (the handler builds the label: "model → …", "composite → …", or "compaction → …"), rendered
+  // verbatim here so the Code tab always shows the real upstream.
+  if (modelNote) content.push({ type: "thinking", thinking: modelNote, signature: "" });
   if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
   {
@@ -2100,7 +2102,7 @@ function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.string
 // `model` is the OpenAI model that actually answered, which is what the usage ledger must be
 // keyed on. They differ on every request (claude-opus-4-8 vs gpt-5.6-sol), and this path used
 // to file its usage under the client's name — the only one of the four that did.
-async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel, route = ROUTE.MAIN, compositeNote = null) {
+async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel, route = ROUTE.MAIN, modelNote = null) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -2113,12 +2115,12 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
                                  // otherwise a tool-only turn leaves a hole at index 0
   let finish = null, usage = null;
 
-  // Composite turns: surface which member actually answered as a one-line thinking block, so every
-  // use of the fallback chain shows the real model in the Code tab's thinking panel.
-  if (compositeNote) {
+  // Every visible turn opens with a one-line thinking block naming the model that actually answered
+  // (label built by the handler), so the Code tab's thinking panel always shows the real upstream.
+  if (modelNote) {
     const nIdx = nextIndex++;
     sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "thinking", thinking: "" } });
-    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: `composite → ${compositeNote}` } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: modelNote } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
   }
 
@@ -2671,7 +2673,7 @@ function respStopReason(resp, hasTool) {
 }
 
 // Responses (non-streaming) -> Anthropic message
-function fromResponses(resp, reqModel, registry) {
+function fromResponses(resp, reqModel, registry, modelNote = null) {
   const content = [];
   let hasTool = false;
   // filled in below if nothing else is
@@ -2692,6 +2694,9 @@ function fromResponses(resp, reqModel, registry) {
     content.push({ type: "text", text: emptyTurnNotice(resp) });
     log("  ! empty turn — substituted a diagnostic notice instead of blank output");
   }
+  // Prepend the model note AFTER the empty check (so it never masks an empty turn) — it leads the
+  // response so the Code tab shows which upstream answered.
+  if (modelNote) content.unshift({ type: "thinking", thinking: modelNote, signature: "" });
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel, content,
     stop_reason: respStopReason(resp, hasTool), stop_sequence: null,
@@ -2704,7 +2709,7 @@ function fromResponses(resp, reqModel, registry) {
 // makes (transport retry, truncation continuation, auto-continue, context recovery, empty retry)
 // must keep using the classifier's reserved connection pool, or a verdict can queue behind agent
 // traffic and miss the CLI's fail-closed 60s deadline.
-async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false, sessionId = null, fallover = []) {
+async function streamResponses(res, upstream, reqModel, registry, payload = null, allowContinue = false, taskState = null, isClassifierPayload = false, sessionId = null, fallover = [], modelNote = null) {
   // Measured, not inferred. Pairing a request line with a completion line in this log is
   // unreliable because turns overlap — two earlier attempts to answer "how slow is a turn"
   // from the log produced confidently wrong medians (34s, then 483s) before that was noticed.
@@ -2715,6 +2720,14 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
   sse(res, "ping", { type: "ping" });
   const items = new Map(); // Responses item_id -> {aIndex, opened, closed}
   let nextIndex = 0, hasTool = false, usage = null, incomplete = false;
+  // Every visible turn opens with a one-line thinking block naming the model that actually answered,
+  // so the Code tab's thinking panel always shows the real upstream (label built by the handler).
+  if (modelNote) {
+    const nIdx = nextIndex++;
+    sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "thinking", thinking: "" } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: modelNote } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
+  }
   let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic
   let taskChanged = false;                       // a task tool ran this turn (issue #7)
   let sawTerminal = null;                        // "completed"|"incomplete"|"failed"|"error", or null if the stream just stopped
@@ -3589,9 +3602,14 @@ const server = http.createServer(async (req, res) => {
     // Announce which member of a chain actually answered (throttled — on change, else <=1/s). `members` is
     // set for a composite MAIN turn or a chained COMPACTION turn; label the line accordingly.
     if (members) noteCompositeModel(`${got.provider.id}:${got.model}`, Date.now(), log, route === ROUTE.COMPACTION ? "compaction" : "composite");
-    // The member label to surface in the thinking panel — only for a VISIBLE composite MAIN turn,
-    // never the invisible compaction summariser (also composite-chained).
-    const compositeNote = (members && route !== ROUTE.COMPACTION) ? `${got.provider.id}:${model}` : null;
+    // The thinking line that leads EVERY visible response, naming the model that ACTUALLY answered —
+    // a composite winner, the compaction summariser's own model/chain, or a single-provider turn.
+    // Classifier verdicts are excluded: their body is parsed for a <block> answer, not read by a human.
+    const answeredBy = `${got.provider.id}:${got.model}`;
+    const modelNote = isCls ? null
+      : route === ROUTE.COMPACTION ? `compaction → ${answeredBy}`
+      : members ? `composite → ${answeredBy}`
+      : `model → ${answeredBy}`;
 
     if (useResp) {
       if (payload.stream) {
@@ -3601,7 +3619,7 @@ const server = http.createServer(async (req, res) => {
         // actually fire (images stripped, effort lowered, context compacted), so a later transport
         // retry inside the stream must not resurrect the pre-fallback request.
         const accepted = upstream.effectivePayload || payload;
-        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool, sessionId, got.fallover || []); }
+        try { await streamResponses(res, upstream, reqModel, registry, accepted, mayContinue, taskState, policy.reservedPool, sessionId, got.fallover || [], modelNote); }
         catch (e) { log("stream error:", e.message); try { res.end(); } catch {} }
         return;
       }
@@ -3628,7 +3646,7 @@ const server = http.createServer(async (req, res) => {
         // sent yet on this path, so the failure becomes a clean error response rather than a
         // tool_use block the agent would execute with empty input.
         let msg;
-        try { msg = fromResponses(rj, reqModel, registry); }
+        try { msg = fromResponses(rj, reqModel, registry, modelNote); }
         catch (e) {
           const r = errorResponse(e);
           log(`  ! ${r.body.error.message}`);
@@ -3653,7 +3671,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Chat post-ok — the winning member's upstream/payload/registry/model come from `got` above.
-    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model, route, compositeNote); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model, route, modelNote); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
                 oai?.usage?.completion_tokens_details?.reasoning_tokens,
@@ -3665,7 +3683,7 @@ const server = http.createServer(async (req, res) => {
                (oai?.choices?.[0]?.message?.tool_calls || []).length,
                (oai?.choices?.[0]?.message?.content || "").length);
     { let msg;
-      try { msg = toAnthropic(oai, reqModel, registry, compositeNote); }
+      try { msg = toAnthropic(oai, reqModel, registry, modelNote); }
       catch (e) {
         const r = errorResponse(e);
         log(`  ! ${r.body.error.message}`);
@@ -3682,7 +3700,7 @@ const server = http.createServer(async (req, res) => {
 // this module without binding the port.
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
          inTokensField, cacheWarning, recordUsage, usageSummary, recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
-         rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic,
+         rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          stripSystemBoilerplate,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,

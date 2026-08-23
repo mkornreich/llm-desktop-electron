@@ -257,7 +257,11 @@ test("a non-streaming turn with good arguments is unaffected", async () => {
   };
   const r = await post("/v1/messages", ask({ stream: false }));
   assert.equal(r.status, 200);
-  assert.equal(r.json.content[0].type, "tool_use");
-  assert.deepEqual(r.json.content[0].input, { command: "ls" });
+  // Every visible turn now leads with a "model → …" thinking block naming the upstream that answered,
+  // so the tool_use follows it rather than sitting at index 0.
+  assert.equal(r.json.content[0].type, "thinking");
+  const tu = r.json.content.find((c) => c.type === "tool_use");
+  assert.ok(tu, "the good tool call still passes through unaffected");
+  assert.deepEqual(tu.input, { command: "ls" });
   assert.equal(r.json.stop_reason, "tool_use");
 });
