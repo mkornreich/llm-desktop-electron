@@ -984,6 +984,19 @@ function emptyTurnNotice(resp) {
          `No tool was called, so nothing ran.${hint}`;
 }
 
+// The chat surface has no responses-style status object — only a finish_reason and chat usage. Map
+// those onto the shape emptyTurnNotice reads, so an empty CHAT turn gets the same honest diagnostic
+// the responses path already gives. Without this the chat path rendered an empty turn as a blank (or,
+// with the model note prepended, as a note-only turn) — and a note-only turn becomes an empty assistant
+// message in the next request, which every upstream 400s, taking a whole composite chain down with it.
+function chatEmptyNotice(finish, usage) {
+  const status = finish === "length" || finish === "content_filter" ? "incomplete"
+    : finish ? "completed" : "no terminal event";
+  const incomplete_details = finish === "length" ? { reason: "max_output_tokens" }
+    : finish === "content_filter" ? { reason: "content_filter" } : undefined;
+  return emptyTurnNotice({ status, incomplete_details, usage: { output_tokens: usage?.completion_tokens } });
+}
+
 // ---- automatic compaction (github issue #4) ----
 // The app showed "Your context window is full ... Prompt is too long". Claude Code has its
 // own auto-compaction, but it sizes the window from the model it THINKS it is talking to
@@ -1910,7 +1923,12 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
         .filter((p) => p.text !== "");
       const msg = { role: "assistant", content: textOnly.map((p) => p.text).join("\n") || null };
       if (toolCalls.length) msg.tool_calls = toolCalls;
-      messages.push(msg);
+      // Drop an assistant message left with NEITHER content NOR tool_calls — the upstream rejects it
+      // ("Assistant message must have either content or tool_calls"), and because every composite
+      // member gets the same history, the whole chain 400s and the turn produces no output. This
+      // happens when a prior turn was only the model note (an empty model turn) and the note was
+      // stripped above.
+      if (msg.content || msg.tool_calls) messages.push(msg);
     } else {
       for (const tr of toolResults) messages.push({ role: "tool", tool_call_id: tr.tool_call_id, content: tr.content });
       if (parts.length) {
@@ -2008,12 +2026,6 @@ function toAnthropic(oai, reqModel, registry, modelNote = null) {
   const choice = oai.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
-  // Every visible turn leads with a one-line TEXT block naming the model that actually answered (the
-  // handler builds the label: "model → …", "composite → …", or "compaction → …"). It is text, not a
-  // thinking block, because the Code-tab client runs in summarized-thinking mode and drops a proxy-
-  // injected thinking block (it wants a real server-signed summary we cannot forge); text always
-  // renders. toOpenAI strips this line back off on the next turn so the model never echoes it.
-  if (modelNote) content.push({ type: "text", text: modelNote });
   if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
   {
@@ -2026,6 +2038,17 @@ function toAnthropic(oai, reqModel, registry, modelNote = null) {
                    input: toolArgs(registry, nm, tc.function?.arguments) });
     recordToolUse(nm);
   }
+  // An empty turn (no text, no tool call) must not render blank — nor, once the note is prepended,
+  // as a note-only turn that the NEXT request would send as an empty assistant message (which every
+  // upstream 400s, killing a composite chain). Emit an honest diagnostic instead, exactly as the
+  // responses path does. This runs BEFORE the note is prepended, so content becomes [note, notice].
+  if (!content.length) content.push({ type: "text", text: chatEmptyNotice(choice.finish_reason, oai.usage) });
+  // Every visible turn leads with a one-line TEXT block naming the model that actually answered (the
+  // handler builds the label: "model → …", "composite → …", or "compaction → …"). It is text, not a
+  // thinking block, because the Code-tab client runs in summarized-thinking mode and drops a proxy-
+  // injected thinking block (it wants a real server-signed summary we cannot forge); text always
+  // renders. toOpenAI strips this line back off on the next turn so the model never echoes it.
+  if (modelNote) content.unshift({ type: "text", text: modelNote });
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel,
     content,
@@ -2231,6 +2254,16 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     recordToolUse(tb.toolName);
     emittedTools++;
   }
+  // Empty turn: the stream ended with no text and no usable tool call. Emit an honest diagnostic (after
+  // the note block, if any) rather than a blank / note-only turn — mirrors the non-stream path and the
+  // responses path, and keeps a note-only turn from becoming an empty assistant message next request.
+  if (textIndex === null && emittedTools === 0 && !withheld) {
+    const nIdx = nextIndex++;
+    const notice = chatEmptyNotice(finish, usage);
+    sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "text", text: "" } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: notice } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
+  }
   recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
               usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
   // input_tokens goes in the FINAL delta, not message_start: at message_start the upstream has
@@ -2294,7 +2327,11 @@ function toResponses(body, model, route = routeForRequest(body)) {
       }
     }
     if (m.role === "assistant") {
-      const textOnly = parts.filter((p) => p.kind === "text" || p.kind === "note");
+      // Strip the proxy's own leading model note (same as the chat path) and drop parts left empty, so
+      // a note-only turn contributes no assistant message rather than an empty one the upstream rejects.
+      const textOnly = parts.filter((p) => p.kind === "text" || p.kind === "note")
+        .map((p) => ({ ...p, text: stripLeadingModelNote(p.text || "") }))
+        .filter((p) => p.text !== "");
       if (textOnly.length)
         input.push({ role: "assistant", content: [{ type: "output_text", text: textOnly.map((p) => p.text).join("\n") }] });
       for (const tc of toolCalls) input.push(tc);

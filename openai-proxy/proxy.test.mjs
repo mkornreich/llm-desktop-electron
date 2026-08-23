@@ -605,6 +605,28 @@ test("every response leads with the model note; the label is rendered verbatim",
   assert.equal(plain.content[0].type, "text");
 });
 
+test("toAnthropic (chat) leads with the model note but never masks an empty turn", () => {
+  const registry = ToolRegistry.from([]);
+  const note = "composite → cohere:command-a-plus-05-2026";
+  // A normal turn: [note, text].
+  const withText = { choices: [{ message: { content: "hi", tool_calls: [] }, finish_reason: "stop" }], usage: {} };
+  const ok = toAnthropic(withText, "x", registry, note);
+  assert.equal(ok.content[0].text, note);
+  assert.equal(ok.content[1].text, "hi");
+  // An EMPTY chat turn (no content, no tool call — the composite failure) gets the honest diagnostic,
+  // and the note is prepended AFTER, so content is [note, notice] — never just [note], which would
+  // become an empty assistant message in the next request and 400 every composite member.
+  const empty = toAnthropic({ choices: [{ message: { content: "", tool_calls: [] }, finish_reason: "stop" }], usage: {} },
+    "x", registry, note);
+  assert.equal(empty.content[0].text, note, "the note still leads");
+  assert.equal(empty.content.length, 2, "an empty turn is [note, notice], not note-only");
+  assert.match(empty.content[1].text, /\[proxy\] The model returned no content/, "the empty-turn notice survives");
+  // A budget-exhausted empty turn reports the reason rather than assuming.
+  const starved = toAnthropic({ choices: [{ message: { content: null }, finish_reason: "length" }], usage: { completion_tokens: 0 } },
+    "x", registry, null);
+  assert.match(starved.content[0].text, /max_output_tokens|token budget/, "finish_reason=length surfaces as a budget notice");
+});
+
 test("fromResponses leads with the model note but never masks an empty turn", () => {
   const registry = ToolRegistry.from([]);
   const withText = { output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }], usage: {} };
@@ -656,6 +678,42 @@ test("a note embedded in tool_result content is stripped, keeping the surroundin
   assert.doesNotMatch(tool.content, /composite → /, "the embedded note token is removed");
   assert.match(tool.content, /Search results:/, "surrounding text before the note survives");
   assert.match(tool.content, /\*\*Summary\*\* three hiring companies\./, "text after the note token survives");
+});
+
+test("a note-only assistant turn drops out of history — never sent as an empty upstream message", () => {
+  // The composite no-output bug: an empty MODEL turn renders as just the note (content [note]); stripping
+  // the note on the way back would leave an assistant message with NO content and NO tool_calls, which
+  // every upstream rejects ("Assistant message must have either content or tool_calls"). Because a
+  // composite hands all members the same history, the whole chain 400s and the turn produces no output —
+  // the user has to ask again. The empty turn must vanish from history instead.
+  const noteOnly = { messages: [
+    { role: "user", content: "hello" },
+    { role: "assistant", content: [{ type: "text", text: "composite → cohere:command-a-plus-05-2026" }] },
+    { role: "user", content: "still there?" },
+  ], max_tokens: 100 };
+  // chat surface
+  const chat = toOpenAI(noteOnly, "gpt-4.1-mini").payload.messages;
+  assert.ok(!chat.some((m) => m.role === "assistant" && !m.content && !(m.tool_calls || []).length),
+    "no empty assistant message survives the chat translation");
+  assert.deepEqual(chat.filter((m) => m.role === "user" || m.role === "assistant").map((m) => m.role),
+    ["user", "user"], "the note-only assistant turn is gone, leaving the two user turns");
+  // responses surface
+  const resp = toResponses(noteOnly, "gpt-5.3-codex").payload.input;
+  assert.ok(!resp.some((it) => it.role === "assistant" && !(it.content || []).some((c) => (c.text || "") !== "")),
+    "no empty assistant item survives the responses translation");
+
+  // BUT a note-only turn that ALSO made a tool call keeps the call — dropping it would orphan the tool_result.
+  const noteWithTool = { messages: [
+    { role: "user", content: "search" },
+    { role: "assistant", content: [
+      { type: "text", text: "model → cloudflare:@cf/qwen/qwen3.8-27b" },
+      { type: "tool_use", id: "t1", name: "WebSearch", input: { q: "x" } },
+    ] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "results" }] },
+  ], max_tokens: 100 };
+  const a = toOpenAI(noteWithTool, "gpt-4.1-mini").payload.messages.find((m) => m.role === "assistant");
+  assert.ok(a && (a.tool_calls || []).length === 1, "the tool call is preserved even though the note was the only text");
+  assert.equal(a.content, null, "the note-only text became empty content, never the leaked note");
 });
 
 // ---------- auto-continue trigger ----------
@@ -1072,6 +1130,13 @@ test("issue #1: both response paths substitute the notice", () => {
   // non-streaming
   assert.match(src, /if \(!content\.length\) \{\s*\n\s*content\.push\(\{ type: "text", text: emptyTurnNotice\(resp\) \}\)/,
     "non-streaming path must guard empty turns");
+  // The CHAT surface (where cohere/command-a and most providers land) must guard empty turns too — an
+  // unguarded empty chat turn renders as note-only, which becomes an empty assistant message next
+  // request and 400s every composite member. Non-stream toAnthropic and stream streamAnthropic both guard.
+  assert.match(src, /if \(!content\.length\) content\.push\(\{ type: "text", text: chatEmptyNotice\(/,
+    "chat non-stream path must guard empty turns");
+  assert.match(src, /if \(textIndex === null && emittedTools === 0 && !withheld\) \{/,
+    "chat streaming path must guard empty turns");
   // ACCOUNTING MOVED, and the invariant with it. It used to be "record once per stream, at a
   // terminating path" — which was the wrong shape: one record per stream is exactly what lost every
   // attempt but the last on a retried turn. It is now one record per UPSTREAM RESPONSE, taken where
