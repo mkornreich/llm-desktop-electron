@@ -311,6 +311,9 @@ ensure_freetoken() {
     ${FREETOKEN_SERVED_MODEL:+--served-model-name "$FREETOKEN_SERVED_MODEL"} \
     ${FREETOKEN_TOOL_PARSER:+--tool-call-parser "$FREETOKEN_TOOL_PARSER"} \
     ${FREETOKEN_REASONING_PARSER:+--reasoning-parser "$FREETOKEN_REASONING_PARSER"} \
+    ${FREETOKEN_MAX_RUNNING_REQ:+--max-running-requests "$FREETOKEN_MAX_RUNNING_REQ"} \
+    ${FREETOKEN_CUDA_GRAPH_MAX_BS:+--cuda-graph-max-bs "$FREETOKEN_CUDA_GRAPH_MAX_BS"} \
+    ${FREETOKEN_MEMORY_RATIO:+--memory-ratio "$FREETOKEN_MEMORY_RATIO"} \
     > "$logfile" 2>&1 &
   pid=$!
   echo "$pid" > user-data/freetoken-managed
@@ -324,7 +327,13 @@ ensure_freetoken() {
 stop_managed_freetoken() {
   [ -r user-data/freetoken-managed ] || return 0
   local pid; pid="$(cat user-data/freetoken-managed 2>/dev/null || true)"
-  [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null || true
+  if [ -n "${pid:-}" ]; then
+    # Kill the whole process GROUP, not just the parent. FreeToken forks worker subprocesses that
+    # share the parent's pgid; a plain kill of the parent orphans them holding ~7GB of VRAM, which
+    # OOMs the next model load. Mirrors the group-kill in ensure_freetoken's reload path above.
+    local pg; pg="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    { [ -n "$pg" ] && kill -TERM "-$pg" 2>/dev/null; } || kill -TERM "$pid" 2>/dev/null || true
+  fi
   rm -f user-data/freetoken-managed
 }
 # One EXIT trap for BOTH managed servers — each is a no-op when its server isn't ours.

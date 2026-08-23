@@ -810,6 +810,11 @@ export function emitEnv({ env = process.env } = {}) {
       putIf("FREETOKEN_SERVED_MODEL", mg.servedModelName);
       putIf("FREETOKEN_TOOL_PARSER", mg.toolCallParser);
       putIf("FREETOKEN_REASONING_PARSER", mg.reasoningParser);
+      // GPU-fit knobs (a bigger model on the 8GB card needs them): cap concurrency to 1 so prefill
+      // activation stays small, capture only the bs=1 CUDA graph, and reserve runtime headroom.
+      putIf("FREETOKEN_MAX_RUNNING_REQ", mg.maxRunningRequests);
+      putIf("FREETOKEN_CUDA_GRAPH_MAX_BS", mg.cudaGraphMaxBs);
+      putIf("FREETOKEN_MEMORY_RATIO", mg.memoryRatio);
       putIf("FREETOKEN_LAUNCH", mg.launch);
       putIf("FREETOKEN_HEALTH_PATH", mg.healthPath);
       putIf("FREETOKEN_ENDPOINT", prov.endpoint);

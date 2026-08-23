@@ -56,13 +56,16 @@
     "freetoken": {
       "endpoint": "http://127.0.0.1:1919/v1",
       "api": "chat",
-      "model": "qwen3:1.7b",
+      "model": "gemma-4-e2b",
       "claudeCodeModel": "claude-opus-4-8[1m]",
       // FreeToken on-device engine (OpenAI-compatible, loopback). engine="freetoken" -> the generic
-      // managed bring-up. modelPath is the weights dir; served model name defaults to its basename.
-      // Serves the small qwen3:1.7b so it fits the GPU alongside nothing else (the 8GB card can't hold
-      // both FreeToken and a managed Ollama — see onDeviceEngine below, which runs exactly one).
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3:1.7b", "toolCallParser": "qwen25", "reasoningParser": "qwen3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      // managed bring-up. modelPath is the GGUF weights file (a dir with two .gguf files is ambiguous).
+      // Serves gemma-4-E2B (q4_0 GGUF): its sliding-window attention gives a ~131k-token window that FITS
+      // the 8GB card, so the Auto-mode classifier stops overflowing (qwen3:1.7b capped at ~30.5k and
+      // failed closed). GPU-fit knobs are REQUIRED for a model this size on 8GB: maxRunningRequests=1
+      // (one verdict at a time; keeps prefill activation small), cudaGraphMaxBs=1, memoryRatio=0.82
+      // (leaves ~1.3GB runtime headroom — 0.9 OOM'd on the 27k-token rulebook prefill).
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/gemma-4-E2B-it-q4gguf/gemma-4-E2B_q4_0-it.gguf", "servedModelName": "gemma-4-e2b", "toolCallParser": "gemma4", "reasoningParser": "gemma4", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.82, "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
@@ -152,7 +155,7 @@
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
   // failing over on transport/HTTP errors and honouring Retry-After on 429s. First in the Code-tab
   // dropdown and the default for new sessions. "maxWaitMs" bounds the wait when EVERY member is 429'd.
-  "composite": ["cohere:command-a-plus-05-2026","mistral:mistral-large-latest","llm7:gpt-oss:20b","cloudflare:@cf/qwen/qwen3.8-27b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:qwen3:1.7b"],
+  "composite": ["cohere:command-a-plus-05-2026","mistral:mistral-large-latest","llm7:gpt-oss:20b","cloudflare:@cf/qwen/qwen3.8-27b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:gemma-4-e2b"],
   "compositeMaxWaitMs": 30000,
 
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
@@ -162,9 +165,9 @@
   // safety="" means "use the main model" (measured: 57% unparseable verdicts -> avoid). prefix is the
   // low-stakes Bash-prefix detector. background is the CLI's own hint (may not reach the in-app agent).
   "classifier": {
-    "prefix": "freetoken:qwen3:1.7b",
-    "safety": "freetoken:qwen3:1.7b",
-    "background": "freetoken:qwen3:1.7b",
+    "prefix": "freetoken:gemma-4-e2b",
+    "safety": "freetoken:gemma-4-e2b",
+    "background": "freetoken:gemma-4-e2b",
     "maxTools": 4,
     "slowMs": 20000
   },
@@ -264,7 +267,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b","cloudflare:@cf/qwen/qwen3.8-27b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:gemma-4-e2b","cloudflare:@cf/qwen/qwen3.8-27b"],
     "gatewayModelDiscovery": true
   },
 
