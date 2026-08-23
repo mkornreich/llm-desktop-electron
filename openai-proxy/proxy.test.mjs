@@ -557,6 +557,27 @@ test("a remembered Gemini thought-signature is echoed back to Gemini and to no o
   assert.equal(asst.tool_calls[0].extra_content?.google?.thought_signature, "SIGVALUE");
 });
 
+test("Cloudflare gets string message content, never OpenAI's array-of-parts", () => {
+  // Cloudflare Workers AI's chat schema is a oneOf of a string-content branch and an array-content
+  // branch, so the MIX this translation emits (string for a single-text turn, array for a multi-part
+  // one) matches neither and 400s. For cloudflare every content must collapse to a string.
+  const body = { messages: [
+    { role: "user", content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] }, // -> array normally
+    { role: "assistant", content: "ok" },                                                       // string
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "18C" }] },
+  ], max_tokens: 64 };
+  // Default provider keeps the array shape for the multi-part user message.
+  const plain = toOpenAI(body, "gpt-4.1-mini").payload;
+  assert.ok(Array.isArray(plain.messages.find((m) => m.role === "user" && Array.isArray(m.content))?.content),
+    "a non-Cloudflare provider still receives the array-of-parts shape");
+  // Cloudflare context: EVERY message content is a plain string.
+  const cf = providerALS.run({ id: "cloudflare", baseURL: "https://x/ai/v1", isOpenAI: false },
+    () => toOpenAI(body, "@cf/meta/llama-3.3-70b-instruct-fp8-fast")).payload;
+  for (const m of cf.messages)
+    assert.equal(typeof m.content, "string", `content of the ${m.role} message must be a string, got ${typeof m.content}`);
+  assert.equal(cf.messages.find((m) => m.role === "user").content, "one\ntwo", "text parts are joined");
+});
+
 test("the signature store is bounded (evicts oldest past the cap)", () => {
   for (let i = 0; i < 4100; i++) rememberSignature("bulk_" + i, "s" + i);
   assert.equal(recallSignature("bulk_0"), undefined, "oldest evicted past the 4000 cap");

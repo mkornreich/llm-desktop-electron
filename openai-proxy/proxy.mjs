@@ -1841,6 +1841,14 @@ function imageUrl(blk) {
 const IMAGE_REJECTED_RE = /image|vision|multimodal|input_image|image_url/i;
 
 // ---------- request translation: Anthropic -> OpenAI ----------
+// Providers whose /chat/completions schema accepts a message `content` only as a plain STRING, not
+// as OpenAI's array-of-parts. Cloudflare Workers AI's OpenAI-compatible endpoint is one: its request
+// schema is a oneOf of a string-content branch and an array-content branch, so the MIX this
+// translation naturally emits (a string for a single-text turn, an array for a multi-part one)
+// matches neither branch and 400s with "Type mismatch … 'array' not in 'string'". For these
+// providers every message's content is flattened to its text.
+const STRING_CONTENT_PROVIDERS = new Set(["cloudflare"]);
+
 function toOpenAI(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
   const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no system, no tools
@@ -1914,6 +1922,16 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
         imagesSent += countImages(media);
         messages.push({ role: "user", content: partsToChat(media) });
       }
+    }
+  }
+  // Flatten content to a plain string for providers whose schema demands it (Cloudflare). Non-text
+  // parts (images) are dropped — its text models cannot use them anyway — and a null content (an
+  // assistant turn that is only tool_calls) becomes "" so the schema's string type is satisfied.
+  if (STRING_CONTENT_PROVIDERS.has(curProvider().id)) {
+    for (const msg of messages) {
+      if (Array.isArray(msg.content))
+        msg.content = msg.content.filter((p) => p.type === "text").map((p) => p.text).join("\n");
+      if (msg.content == null) msg.content = "";
     }
   }
   // outputCeilingForRoute floors classifier routes so a THINKING model has room to reason AND emit its
