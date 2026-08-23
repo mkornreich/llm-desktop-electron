@@ -716,6 +716,36 @@ test("a note-only assistant turn drops out of history — never sent as an empty
   assert.equal(a.content, null, "the note-only text became empty content, never the leaked note");
 });
 
+test("the Environment 'powered by the model' line is rewritten to the real model + provider", () => {
+  // The client's system prompt hardcodes "- You are powered by the model <id>." from the id it THINKS
+  // it is using — for a composite turn the opaque "composite". The proxy rewrites it to the model AND
+  // provider actually serving the turn (from the model arg + the provider pinned in providerALS), so
+  // the model identifies itself honestly instead of claiming to be "composite".
+  const sys = "# Environment\n - Platform: linux\n - You are powered by the model composite.\n - Claude Code is available as a CLI.";
+  // A COMPOSITE turn (client model = "composite"): the sentence names the real member AND says it came
+  // via the composite model, so the member is not mistaken for a direct pick.
+  const composite = { model: "composite", system: sys, messages: [{ role: "user", content: "hi" }], max_tokens: 100 };
+  const chat = providerALS.run({ id: "cohere", baseURL: "https://x/v1", isOpenAI: false },
+    () => toOpenAI(composite, "command-a-plus-05-2026"));
+  const sysMsg = chat.payload.messages.find((m) => m.role === "system").content;
+  assert.match(sysMsg, /powered by the model command-a-plus-05-2026, served by the cohere provider via the composite model/,
+    "names the real member, provider, and the composite model");
+  assert.doesNotMatch(sysMsg, /powered by the model composite\./, "the opaque 'composite' id is gone");
+  // Responses surface, a directly-picked model (NOT composite) and an id that itself contains a dot:
+  // real model + provider, but NO 'via the composite model' clause.
+  const picked = { model: "cloudflare:@cf/qwen/qwen3.8-27b", system: sys, messages: [{ role: "user", content: "hi" }], max_tokens: 100 };
+  const resp = providerALS.run({ id: "cloudflare", baseURL: "https://y/v1", isOpenAI: false },
+    () => toResponses(picked, "@cf/qwen/qwen3.8-27b"));
+  assert.match(resp.payload.instructions, /powered by the model @cf\/qwen\/qwen3\.8-27b, served by the cloudflare provider \(routed/,
+    "a dotted model id matches to the sentence's final period, not the first dot");
+  assert.doesNotMatch(resp.payload.instructions, /via the composite model/, "a direct pick is not labelled composite");
+  // A system prompt without the line (e.g. a classifier's rulebook) is left untouched.
+  const plain = providerALS.run({ id: "cohere", baseURL: "https://x/v1", isOpenAI: false },
+    () => toOpenAI({ system: "You are a security monitor.", messages: [{ role: "user", content: "x" }], max_tokens: 100 }, "m"));
+  const psys = plain.payload.messages.find((m) => m.role === "system").content;
+  assert.doesNotMatch(psys, /served by the .* provider/, "no 'powered by' line -> nothing injected");
+});
+
 // ---------- auto-continue trigger ----------
 
 test("auto-continue fires on announcements the model did not act on", () => {

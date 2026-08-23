@@ -1461,6 +1461,24 @@ function stripSystemBoilerplate(sys, tools = null, shaping = PROMPT_SHAPING) {
   return out.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
 }
 
+// The client's Environment block hardcodes "- You are powered by the model <id>." from the model id it
+// THINKS it is talking to — for a composite turn that is the opaque "composite", otherwise the picked
+// id. Rewrite it to name the model AND provider that are ACTUALLY serving this turn (the model arg plus
+// the provider pinned in providerALS at translation time — correct per composite member, since each
+// member re-encodes under its own provider), so the model can identify itself honestly instead of
+// claiming to be "composite". The id can itself contain a dot (e.g. cloudflare:@cf/qwen/qwen3.8-27b),
+// so the match runs greedily to the sentence's final period. No such line (e.g. a classifier's rulebook
+// prompt) -> returned unchanged.
+const POWERED_BY_RE = /- You are powered by the model [^\n]*\./;
+function nameRealModel(sys, provider, model, viaComposite = false) {
+  if (typeof sys !== "string" || !provider || !model) return sys;
+  // When the turn is a composite pick, name the composite model too — otherwise the sentence would
+  // hide that this member was chosen by the fallback chain rather than requested directly.
+  const via = viaComposite ? " via the composite model" : "";
+  return sys.replace(POWERED_BY_RE,
+    `- You are powered by the model ${model}, served by the ${provider} provider${via} (routed by the local proxy).`);
+}
+
 // enable=false for the safety-classifier call: it is a separate LLM with its own
 // expected output shape, and appending these rules to its prompt is off-task. The
 // boilerplate strip runs first, so it applies even when the hints are skipped.
@@ -1886,7 +1904,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
     // Hints are built from the EXPOSED tools, not from the client's full list. Naming a tool the
     // model cannot see is an instruction it cannot follow — latent until a policy hides something,
     // which is exactly what the exposure policy now does.
-    if (sys) messages.push({ role: "system", content: withFormatHint(sys, policy.hints, exposedTools) });
+    if (sys) messages.push({ role: "system", content: withFormatHint(nameRealModel(sys, curProvider().id, model, body.model === COMPOSITE_ID), policy.hints, exposedTools) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -2369,7 +2387,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   // an OpenAI-proprietary Responses field — other OpenAI-compatible /responses upstreams reject it (Groq
   // 400s: `unknown field verbosity`), so gate it on the same isOpenAI flag as prompt_cache_key.
   if (VERBOSITY && policy.verbosity && curProvider().isOpenAI) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
-  if (!bare && body.system) out.instructions = withFormatHint(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, policy.hints, exposedTools);
+  if (!bare && body.system) out.instructions = withFormatHint(nameRealModel(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, curProvider().id, model, body.model === COMPOSITE_ID), policy.hints, exposedTools);
   // Responses tools are flat: {type,name,description,parameters}
   if (exposedTools.length) {
     out.tools = exposedTools.map((t) => ({
