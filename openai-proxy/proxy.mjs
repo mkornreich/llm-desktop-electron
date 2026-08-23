@@ -1977,6 +1977,14 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   return { payload: out, registry, imagesSent, filesSent, notesEmitted };
 }
 
+// A signature for a proxy-injected thinking block. Anthropic's real thinking blocks always carry a
+// cryptographic signature, and the claude.ai renderer will not display a thinking block without one —
+// an unsigned block (signature "") is silently dropped, which is why the model-name note never appeared
+// in the GUI. The value is opaque to the client (only Anthropic's servers ever validate it) and
+// decodeBlocks drops the whole block when the client sends it back, so a random base64 blob is both
+// sufficient to render and free of any round-trip consequence.
+const thinkingSignature = () => crypto.randomBytes(96).toString("base64");
+
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
 function toAnthropic(oai, reqModel, registry, modelNote = null) {
   const choice = oai.choices?.[0] || {};
@@ -1985,7 +1993,7 @@ function toAnthropic(oai, reqModel, registry, modelNote = null) {
   // Every visible turn leads with a one-line thinking block naming the model that actually answered
   // (the handler builds the label: "model → …", "composite → …", or "compaction → …"), rendered
   // verbatim here so the Code tab always shows the real upstream.
-  if (modelNote) content.push({ type: "thinking", thinking: modelNote, signature: "" });
+  if (modelNote) content.push({ type: "thinking", thinking: modelNote, signature: thinkingSignature() });
   if (msg.content) content.push({ type: "text", text: fixMath(msg.content) });
   for (const tc of msg.tool_calls || [])
   {
@@ -2121,6 +2129,7 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     const nIdx = nextIndex++;
     sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "thinking", thinking: "" } });
     sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: modelNote } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "signature_delta", signature: thinkingSignature() } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
   }
 
@@ -2696,7 +2705,7 @@ function fromResponses(resp, reqModel, registry, modelNote = null) {
   }
   // Prepend the model note AFTER the empty check (so it never masks an empty turn) — it leads the
   // response so the Code tab shows which upstream answered.
-  if (modelNote) content.unshift({ type: "thinking", thinking: modelNote, signature: "" });
+  if (modelNote) content.unshift({ type: "thinking", thinking: modelNote, signature: thinkingSignature() });
   return {
     id: rid("msg_"), type: "message", role: "assistant", model: reqModel, content,
     stop_reason: respStopReason(resp, hasTool), stop_sequence: null,
@@ -2726,6 +2735,7 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
     const nIdx = nextIndex++;
     sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "thinking", thinking: "" } });
     sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "thinking_delta", thinking: modelNote } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "signature_delta", signature: thinkingSignature() } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
   }
   let toolCount = 0, textLen = 0, thinkLen = 0;   // for the turn-end diagnostic

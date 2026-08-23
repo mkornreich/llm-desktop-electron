@@ -595,6 +595,8 @@ test("every response leads with the model note; the label is rendered verbatim",
     const msg = toAnthropic(oai, "x", registry, note);
     assert.equal(msg.content[0].type, "thinking", "thinking block leads");
     assert.equal(msg.content[0].thinking, note, "the label is shown exactly as given");
+    // claude.ai drops an unsigned thinking block, so it must carry a (non-empty) signature to render.
+    assert.ok(msg.content[0].signature && msg.content[0].signature.length > 0, "the thinking block is signed");
     assert.equal(msg.content[1].type, "text");
   }
   // A null note (e.g. a classifier verdict) injects nothing.
@@ -610,6 +612,7 @@ test("fromResponses leads with the model note but never masks an empty turn", ()
   const msg = fromResponses(withText, "x", registry, note);
   assert.equal(msg.content[0].type, "thinking");
   assert.equal(msg.content[0].thinking, note);
+  assert.ok(msg.content[0].signature && msg.content[0].signature.length > 0, "the thinking block is signed");
   assert.equal(msg.content[1].type, "text");
   // An empty upstream turn still gets its diagnostic notice — the note is prepended AFTER that check,
   // so content is [thinking, text(notice)], never just [thinking].
