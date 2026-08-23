@@ -818,6 +818,10 @@ export function emitEnv({ env = process.env } = {}) {
       putIf("FREETOKEN_MAX_RUNNING_REQ", mg.maxRunningRequests);
       putIf("FREETOKEN_CUDA_GRAPH_MAX_BS", mg.cudaGraphMaxBs);
       putIf("FREETOKEN_MEMORY_RATIO", mg.memoryRatio);
+      // Post-start SWA radix-cache resize (a runtime /v1/cache/rebuild) so the window pool clears the
+      // classifier rulebook and prefixes are reused across calls. numPages caps the full pool (context).
+      putIf("FREETOKEN_NUM_PAGES", mg.numPages);
+      putIf("FREETOKEN_NUM_SWA_PAGES", mg.numSwaPages);
       putIf("FREETOKEN_LAUNCH", mg.launch);
       putIf("FREETOKEN_HEALTH_PATH", mg.healthPath);
       putIf("FREETOKEN_ENDPOINT", prov.endpoint);

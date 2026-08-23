@@ -274,6 +274,21 @@ unload_managed_ollama() {
 # Managed FreeToken (on-device engine, OpenAI-compatible). Brought up INDEPENDENTLY of the default
 # provider so a picked freetoken:<model> resolves even when the default is Ollama. Reuse a live server;
 # non-fatal if it cannot start. FREETOKEN_* come from config.jsonc providers.<id>.managed via config.mjs.
+# Enlarge FreeToken's SWA (sliding-window) radix-cache window pool past the fixed auto-mode classifier
+# rulebook (~27k tokens). gemma's default window pool (~26k) is SMALLER than the rulebook, so its KV
+# can't be retained between calls and every verdict re-prefills all ~55k tokens (~50s). A window pool
+# that clears the rulebook lets a repeated / near-identical prefix (multi-action turns, retries, a
+# growing transcript) reuse instead — ~50s collapses to sub-second. num_pages caps the full pool
+# (context) so the bigger window still fits the 8GB budget; both come from config.jsonc managed.
+# Runtime-only (resets on restart) so it is re-applied on every managed start. Best-effort + idle-only:
+# a reject just leaves FreeToken's default (still correct, only slower).
+freetoken_resize_swa_cache() {
+  [ -n "${FREETOKEN_NUM_SWA_PAGES:-}${FREETOKEN_NUM_PAGES:-}" ] || return 0
+  local base="$1" body rr
+  body="{\"mode\":\"if_idle\"${FREETOKEN_NUM_PAGES:+,\"num_pages\":${FREETOKEN_NUM_PAGES}}${FREETOKEN_NUM_SWA_PAGES:+,\"num_swa_pages\":${FREETOKEN_NUM_SWA_PAGES}}}"
+  rr="$(curl -s --max-time 120 -X POST "${base}/v1/cache/rebuild" -H 'Content-Type: application/json' -d "$body" 2>/dev/null)"
+  echo "[run] managed FreeToken: SWA cache resize ${body} -> ${rr:-<no response>}"
+}
 ensure_freetoken() {
   local base="http://127.0.0.1:${FREETOKEN_PORT:-1919}"
   local ready="${base}${FREETOKEN_HEALTH_PATH:-/v1/models}"
@@ -318,7 +333,11 @@ ensure_freetoken() {
   pid=$!
   echo "$pid" > user-data/freetoken-managed
   for i in $(seq 1 60); do
-    if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then echo "[run] managed FreeToken: ready after ${i}s (pid ${pid})"; return 0; fi
+    if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then
+      echo "[run] managed FreeToken: ready after ${i}s (pid ${pid})"
+      freetoken_resize_swa_cache "$base"
+      return 0
+    fi
     if ! kill -0 "$pid" 2>/dev/null; then echo "[run] managed FreeToken: FAILED to start — see ${logfile}"; return 1; fi
     sleep 1
   done
