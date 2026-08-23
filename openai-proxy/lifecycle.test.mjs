@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import {
   newInstanceId, writeManifest, readManifest, clearManifest, pidIsOurProxy, probe, stopOwned,
   waitForPortFree, PROXY_ARGV, MANIFEST, runsOurProxy, processCwd, listenerPid,
+  SUPERVISOR_ARGV, runsOurSupervisor, pidIsOurSupervisor, stopSupervisor, parentPid,
 } from "../scripts/lib/proxy-runtime.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -489,6 +490,73 @@ test("a proxy stopped with SIGTERM clears its own manifest", async () => {
   const after = readManifest();
   assert.ok(after === null || after.instance !== h.instance,
     "the manifest must not still claim the instance that just exited");
+});
+
+// ---------- restarting via the supervisor ----------
+
+test("the supervisor is identified by the same absolute-argv rule as the proxy", () => {
+  assert.ok(SUPERVISOR_ARGV.endsWith("openai-proxy/supervise.mjs"));
+  const ourDir = path.dirname(SUPERVISOR_ARGV);
+  assert.equal(runsOurSupervisor(1, `node ${SUPERVISOR_ARGV}`, () => null), true, "absolute argv");
+  assert.equal(runsOurSupervisor(1, "node supervise.mjs", () => ourDir), true, "relative + cwd");
+  assert.equal(runsOurSupervisor(1, "node proxy.mjs", () => ourDir), false, "the proxy is not the supervisor");
+  assert.equal(runsOurSupervisor(1, "node supervise.mjs", () => "/somewhere/else/openai-proxy"), false,
+    "another checkout's supervisor is not ours");
+  assert.equal(runsOurSupervisor(1, `grep -r supervise.mjs .`, () => ourDir), false,
+    "mentioning the filename is not running it");
+  // A live pid that is not our supervisor is never adopted (pid 1 is alive everywhere).
+  assert.equal(pidIsOurSupervisor(1), false);
+  assert.equal(pidIsOurSupervisor(process.pid), false);
+});
+
+test("stopSupervisor refuses to signal a pid that is not our supervisor", async () => {
+  const killed = [];
+  const kill = (pid, sig) => killed.push([pid, sig]);
+  const r = await stopSupervisor(1, { kill });         // alive, but not our supervisor
+  assert.equal(r.stopped, false);
+  assert.deepEqual(killed, [], "nothing foreign may be signalled");
+});
+
+test("--restart replaces the supervisor instead of dueling with it", async () => {
+  // THE REGRESSION THIS GUARDS. A naive restart that kills only the proxy CHILD leaves the old
+  // supervisor alive to respawn a competitor, which then races the freshly-started proxy for the
+  // port — EADDRINUSE thrash, and on a config change the old-config proxy can win. The fix stops the
+  // SUPERVISOR (the child's parent), so it forwards the stop and does not respawn.
+  const port = await freePort();
+  const manifest = path.join(scratch, "restart-manifest.json");
+  const env = { ...process.env, OPENAI_API_KEY: "test-not-real", PROXY_MANIFEST_FILE: manifest,
+                PROXY_RESTART_BASE_MS: "50", PROXY_HEALTH_EVERY_MS: "0" };
+  const sup1 = spawn(process.execPath, [path.join(HERE, "supervise.mjs")],
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...env, PORT: String(port) } });
+  let sup1exited = false; sup1.on("exit", () => { sup1exited = true; });
+  let log = ""; sup1.stdout.on("data", (d) => (log += d)); sup1.stderr.on("data", (d) => (log += d));
+  try {
+    const first = await waitFor(() => health(port));
+    assert.ok(first, `the initial proxy should come up. Log:\n${log}`);
+    assert.equal(pidIsOurSupervisor(sup1.pid), true, "sanity: sup1 is recognised as our supervisor");
+    assert.equal(parentPid(first.pid), sup1.pid, "the proxy's parent is its supervisor");
+
+    const run = await new Promise((resolve) => {
+      const p = spawn(process.execPath,
+        [path.join(HERE, "..", "scripts", "ensure-proxy.mjs"), "--port", String(port), "--restart"],
+        { stdio: ["ignore", "pipe", "pipe"], env: { ...env } });
+      let out = ""; p.stdout.on("data", (d) => (out += d)); p.stderr.on("data", (d) => (out += d));
+      p.on("exit", (code) => resolve({ code, out }));
+    });
+    assert.equal(run.code, 0, `--restart must converge, not stall in an EADDRINUSE duel. Output:\n${run.out}`);
+    assert.match(run.out, /restarting the running proxy/);
+    assert.match(run.out, /proxy healthy/, "it must reach a fresh 'ours' proxy");
+
+    const second = await waitFor(() => health(port));
+    assert.ok(second);
+    assert.notEqual(second.instance, first.instance, "a genuinely fresh instance, not the old one respawned");
+    assert.equal(sup1exited, true, "the old supervisor must have been stopped, not left to duel for the port");
+  } finally {
+    const owner = listenerPid(port); const sup2 = owner ? parentPid(owner) : null;
+    for (const pid of [sup2, sup1.pid]) { try { if (pid) process.kill(pid, "SIGTERM"); } catch {} }
+    await waitFor(async () => !(await health(port)), { timeoutMs: 10000 });
+    for (const pid of [sup2, sup1.pid]) { try { if (pid) process.kill(pid, "SIGKILL"); } catch {} }
+  }
 });
 
 test.after(() => {

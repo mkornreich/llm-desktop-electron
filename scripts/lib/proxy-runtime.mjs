@@ -44,6 +44,10 @@ export const MANIFEST = path.join(REPO, "openai-proxy", "proxy-runtime.json");
 // A process running THIS repository's proxy. Matched on the absolute script path so a proxy
 // from another checkout — or a same-named file anywhere else — is never mistaken for ours.
 export const PROXY_ARGV = path.join(REPO, "openai-proxy", "proxy.mjs");
+// The supervisor that owns the proxy child (run.sh starts this, not proxy.mjs directly). A restart
+// must stop the SUPERVISOR, not just the child — killing only the child leaves the supervisor to
+// respawn a competitor. Same absolute-path identity rule as the proxy.
+export const SUPERVISOR_ARGV = path.join(REPO, "openai-proxy", "supervise.mjs");
 
 export function newInstanceId() {
   return crypto.randomBytes(8).toString("hex");
@@ -107,7 +111,10 @@ export function listenerPid(port) {
 //
 // Fails closed throughout: anything unparseable or unprovable is not ours, because the answer
 // authorises sending a signal.
-export function runsOurProxy(pid, argv, cwdOf = processCwd) {
+// Shared by runsOurProxy and runsOurSupervisor: is `argv` a `node <wantAbs>` command line? The
+// script may be absolute (how the supervisor spawns the proxy) or relative (`cd openai-proxy && node
+// proxy.mjs`), so a relative one is resolved against the process's cwd.
+function runsScriptAt(pid, argv, wantAbs, cwdOf) {
   const tokens = String(argv || "").trim().split(/\s+/);
   if (!tokens.length) return false;
   // The executable. `node`, `/usr/local/bin/node`, `node22` — but not `grep`, and not `sh -c`.
@@ -115,10 +122,18 @@ export function runsOurProxy(pid, argv, cwdOf = processCwd) {
   // The first non-flag argument after the executable is the script. Stopping at the first one is
   // what makes a later mention of the filename irrelevant.
   const script = tokens.slice(1).find((t) => !t.startsWith("-"));
-  if (!script || !script.endsWith("proxy.mjs")) return false;
-  if (path.isAbsolute(script)) return script === PROXY_ARGV;
+  const base = wantAbs.slice(wantAbs.lastIndexOf(path.sep) + 1);
+  if (!script || !script.endsWith(base)) return false;
+  if (path.isAbsolute(script)) return script === wantAbs;
   const cwd = cwdOf(pid);
-  return !!cwd && path.resolve(cwd, script) === PROXY_ARGV;
+  return !!cwd && path.resolve(cwd, script) === wantAbs;
+}
+export function runsOurProxy(pid, argv, cwdOf = processCwd) {
+  return runsScriptAt(pid, argv, PROXY_ARGV, cwdOf);
+}
+// Does this process run THIS repository's supervisor? Same fail-closed identity rule as the proxy.
+export function runsOurSupervisor(pid, argv, cwdOf = processCwd) {
+  return runsScriptAt(pid, argv, SUPERVISOR_ARGV, cwdOf);
 }
 
 // Is a PID both alive AND running our proxy? Liveness alone is not enough: PIDs are recycled, and
@@ -127,6 +142,27 @@ export function pidIsOurProxy(pid, ps = null, cwdOf = processCwd) {
   if (!pid) return false;
   try { process.kill(pid, 0); } catch { return false; }     // gone, or not ours to signal
   return processList(ps).some(([p, argv]) => p === pid && runsOurProxy(p, argv, cwdOf));
+}
+
+// Is a PID both alive AND running our supervisor? Used to stop the supervisor on a restart instead
+// of the proxy child it would otherwise respawn.
+export function pidIsOurSupervisor(pid, ps = null, cwdOf = processCwd) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); } catch { return false; }
+  return processList(ps).some(([p, argv]) => p === pid && runsOurSupervisor(p, argv, cwdOf));
+}
+
+// The parent pid of a process, or null. A managed proxy's parent IS its supervisor (supervise.mjs
+// spawns proxy.mjs directly), which is how a restart finds the supervisor from the proxy's manifest
+// pid. Portable across macOS and Linux; returns null for an orphan (ppid 1) or when ps has no answer.
+export function parentPid(pid) {
+  if (!pid) return null;
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const ppid = parseInt(out.trim(), 10);
+    return Number.isFinite(ppid) && ppid > 1 ? ppid : null;
+  } catch { return null; }
 }
 
 // What is on the port, and may we act on it?
@@ -208,21 +244,29 @@ export async function probe({ port, configHash, codeVersion, file = defaultManif
 // holds client connections, and dropping them is the very failure this project spent a phase
 // fixing, so it gets a chance to finish.
 export async function stopOwned(manifest, { sigtermGraceMs = 4000, pollMs = 100, ps = null,
-                                            cwdOf = processCwd,
+                                            cwdOf = processCwd, isOurs = pidIsOurProxy,
                                             kill = process.kill.bind(process) } = {}) {
   if (!manifest?.pid) return { stopped: false, reason: "no manifest pid" };
-  if (!pidIsOurProxy(manifest.pid, ps, cwdOf))
+  if (!isOurs(manifest.pid, ps, cwdOf))
     return { stopped: false, reason: "pid is not running our proxy — refusing to signal it" };
   try { kill(manifest.pid, "SIGTERM"); } catch { return { stopped: true, reason: "already gone" }; }
 
   const deadline = Date.now() + sigtermGraceMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs));
-    if (!pidIsOurProxy(manifest.pid, null, cwdOf)) return { stopped: true, reason: "exited on SIGTERM" };
+    if (!isOurs(manifest.pid, null, cwdOf)) return { stopped: true, reason: "exited on SIGTERM" };
   }
   try { kill(manifest.pid, "SIGKILL"); } catch { /* raced us to it */ }
   await new Promise((r) => setTimeout(r, pollMs));
-  return { stopped: !pidIsOurProxy(manifest.pid, null, cwdOf), reason: "SIGKILL after grace period" };
+  return { stopped: !isOurs(manifest.pid, null, cwdOf), reason: "SIGKILL after grace period" };
+}
+
+// Stop the SUPERVISOR (which stops its proxy child and does NOT respawn — its own SIGTERM handler
+// sets `stopping` and forwards the signal). This is the correct way to restart: stopping only the
+// proxy child would leave the supervisor to bring up a replacement that races the new one. The grace
+// is a touch longer than stopOwned's because the supervisor waits on its child before exiting.
+export function stopSupervisor(pid, opts = {}) {
+  return stopOwned({ pid }, { sigtermGraceMs: 7000, isOurs: pidIsOurSupervisor, ...opts });
 }
 
 // Wait for a port to stop accepting. Starting a replacement before the old listener releases

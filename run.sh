@@ -568,7 +568,12 @@ if [ "$PROVIDER" = "proxy" ]; then
     if ensure_freetoken; then trap cleanup_managed EXIT; fi
   fi
 
-  if ! node scripts/ensure-proxy.mjs --port "$PORT"; then
+  # --restart: every launch stops the proxy that is on the port (when it is provably ours — a tracked
+  # instance, or an untracked one whose manifest was lost/overwritten) and starts a fresh one, so the
+  # running proxy always reflects the current code and config. A genuinely foreign listener is still
+  # left alone and reported. Override with LLMD_PROXY_REUSE=1 to keep a current proxy instead.
+  RESTART_FLAG="--restart"; [ "${LLMD_PROXY_REUSE:-0}" = "1" ] && RESTART_FLAG=""
+  if ! node scripts/ensure-proxy.mjs --port "$PORT" $RESTART_FLAG; then
     echo "[run] the translation proxy is not serving the configured settings — see the lines above"
     exit 1
   fi
