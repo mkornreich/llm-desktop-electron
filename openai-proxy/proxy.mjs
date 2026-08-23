@@ -1987,6 +1987,16 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
 const MODEL_NOTE_RE = /^(?:model|composite|compaction) → \S/;
 const stripLeadingModelNote = (s) => String(s).replace(/^(?:model|composite|compaction) → [^\n]*(?:\n+|$)/, "");
 
+// Optional session recording. Every client /v1/messages turn's request + full raw response is
+// appended to session-recording.jsonl (one JSON line per turn) while recording is on. Turned on by
+// the "Record session" setting (diagnostics.recordSession -> PROXY_RECORD_SESSION, needs a restart)
+// OR live by creating the flag file openai-proxy/.recording. Best-effort; never affects the response.
+const RECORD_SESSION = process.env.PROXY_RECORD_SESSION === "1";
+const RECORDING_FLAG = `${REPO}/openai-proxy/.recording`;
+const RECORDING_FILE = `${REPO}/openai-proxy/session-recording.jsonl`;
+const recordingOn = () => RECORD_SESSION || fs.existsSync(RECORDING_FLAG);
+function recordSessionTurn(entry) { try { fs.appendFileSync(RECORDING_FILE, JSON.stringify(entry) + "\n"); } catch { /* recording is best-effort */ } }
+
 // ---------- response translation: OpenAI -> Anthropic (non-streaming) ----------
 function toAnthropic(oai, reqModel, registry, modelNote = null) {
   const choice = oai.choices?.[0] || {};
@@ -3547,6 +3557,24 @@ const server = http.createServer(async (req, res) => {
       const r = errorResponse(e);
       log(`/v1/messages rejected: ${r.body.error.message}`);
       return sendJSON(res, r.status, r.body);
+    }
+    // Session recording: tee everything written to `res` (the client-facing Anthropic response,
+    // streaming or JSON) and record it with this turn's request when the recording flag is set.
+    if (recordingOn()) {
+      const outChunks = [];
+      const ow = res.write.bind(res), oe = res.end.bind(res);
+      const grab = (c) => { if (c && typeof c !== "function") { try { outChunks.push(Buffer.from(c)); } catch { /* non-buffer */ } } };
+      res.write = (...a) => { grab(a[0]); return ow(...a); };
+      res.end = (...a) => {
+        grab(a[0]); const ret = oe(...a);
+        recordSessionTurn({
+          ts: new Date().toISOString(), model: body.model,
+          betas: req.headers["anthropic-beta"] || null, thinking: body.thinking ?? null,
+          tools: (body.tools || []).map((t) => t.name), system: body.system,
+          messages: body.messages, responseRaw: Buffer.concat(outChunks).toString("utf8"),
+        });
+        return ret;
+      };
     }
     const reqModel = body.model || OPENAI_MODEL;
     // Decided once per request: it drives the model choice, hint injection, reasoning and

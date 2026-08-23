@@ -42,3 +42,7 @@ openai-proxy/proxy-runtime.json
 # about this machine's sessions, and they name session ids — not source, and not shareable.
 provenance/
 openai-proxy/websearch-debug.txt
+
+# Session recordings (per-machine capture of your own agent session; may contain private content)
+openai-proxy/session-recording.jsonl
+docs/session-recording-transcript.md

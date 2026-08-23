@@ -272,6 +272,7 @@ export const SETTINGS = [
   // Diagnostics. In the hash because they change what the process does, even though nothing
   // user-visible depends on them.
   { name: "PROXY_DUMP_TOOLS", env: "PROXY_DUMP_TOOLS", type: "flag1" },
+  { name: "PROXY_RECORD_SESSION", env: "PROXY_RECORD_SESSION", type: "flag1" },
 ];
 
 const BY_NAME = new Map(SETTINGS.map((s) => [s.name, s]));
@@ -403,6 +404,7 @@ const PATHS = {
   PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
   PORT: "advanced.port", OPENAI_MAX_TOOLS: "advanced.maxTools", OPENAI_MAX_TOOLS_RESPONSES: "advanced.maxToolsResponses",
   PROXY_DUMP_TOOLS: "diagnostics.dumpTools",
+  PROXY_RECORD_SESSION: "diagnostics.recordSession",
 };
 
 // A config.jsonc value (native JSON type) rendered back into the KV-string form the TYPES coercions
@@ -732,6 +734,7 @@ export function emitEnv({ env = process.env } = {}) {
   put("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT || "1");
   putIf("DESKTOP_LOG_LEVEL", getPath(C, "diagnostics.logLevel"));
   if (getPath(C, "diagnostics.dumpTools")) put("PROXY_DUMP_TOOLS", "1");
+  if (getPath(C, "diagnostics.recordSession")) put("PROXY_RECORD_SESSION", "1");
   if (getPath(C, "diagnostics.ultracode")) put("LLMD_ULTRACODE", "1");
   let dd = getPath(C, "picker.dropdownModels");
   if (Array.isArray(dd) && dd.length) {

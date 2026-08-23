@@ -152,7 +152,7 @@
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
   // failing over on transport/HTTP errors and honouring Retry-After on 429s. First in the Code-tab
   // dropdown and the default for new sessions. "maxWaitMs" bounds the wait when EVERY member is 429'd.
-  "composite": ["cloudflare:@cf/qwen/qwen3.8-27b","mistral:mistral-large-latest","cohere:command-a-plus-05-2026","llm7:gpt-oss:20b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:qwen3:1.7b"],
+  "composite": ["cohere:command-a-plus-05-2026","mistral:mistral-large-latest","llm7:gpt-oss:20b","cloudflare:@cf/qwen/qwen3.8-27b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:qwen3:1.7b"],
   "compositeMaxWaitMs": 30000,
 
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
@@ -278,7 +278,10 @@
   "diagnostics": {
     "logLevel": "warn",
     "dumpTools": false,
-    "ultracode": true
+    "ultracode": true,
+    // Record every Code-tab turn (request + response) to openai-proxy/session-recording.jsonl. A
+    // per-machine, potentially-private capture of your own session (gitignored). Toggle in Settings.
+    "recordSession": false
   },
 
   "privacy": { "disableTelemetry": true },
