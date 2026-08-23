@@ -303,20 +303,32 @@ export function servesOpenAiDefaults(url) {
 //   loopback   keyless on-device (local): matches any loopback host, base rediscovered at launch (LLMD_LOCAL_BASE)
 //   match      OPTIONAL regex string overriding the endpoint-host matcher (rarely needed)
 const LOOPBACK_RE = /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)(:|\/|$)/i;
+// Substitute {name} tokens in a provider endpoint with values from the key file. Cloudflare's account id
+// belongs in the URL path but is account-specific, so it lives in .openai-key (gitignored) beside the
+// token rather than in the PUBLIC config.jsonc; `endpoint: ".../accounts/{cloudflareAccountId}/ai/v1"`
+// resolves it at build/resolve time. An unknown token is left verbatim, so a missing value fails loudly
+// against the literal URL rather than silently pointing somewhere wrong.
+export function fillEndpoint(url, keys = {}) {
+  return String(url || "").replace(/\{([A-Za-z0-9_]+)\}/g, (m, name) => keys[name] ?? m);
+}
 function hostMatcher(endpoint) {
   let host = "";
   try { host = new URL(endpoint).host; } catch { /* unparseable -> never matches */ }
   return host ? new RegExp(host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") : /(?!)/;
 }
-export function buildProviders(config = loadConfig()) {
+export function buildProviders(config = loadConfig(), keys) {
   const out = {};
+  // Only touch the key file when a provider actually templates its endpoint (Cloudflare), so the common
+  // case still builds the registry without reading .openai-key.
+  const K = keys ?? (Object.values(config.providers || {}).some((p) => /\{[^}]+\}/.test(p.endpoint || ""))
+    ? providerKeys() : {});
   for (const [id, p] of Object.entries(config.providers || {})) {
     // The managed on-device Ollama rediscovers its base at launch (run.sh's ensure_ollama serves on a
     // DIFFERENT port than the endpoint), so LLMD_LOCAL_BASE overrides it. Keyed off the managed engine,
     // NOT the id, and NEVER applied to freetoken (whose fixed port is already its endpoint).
-    const baseURL = p.managed?.engine === "ollama"
+    const baseURL = fillEndpoint(p.managed?.engine === "ollama"
       ? (process.env.LLMD_LOCAL_BASE || p.endpoint || "http://127.0.0.1:11434/v1")
-      : (p.endpoint || "");
+      : (p.endpoint || ""), K);
     out[id] = {
       id, label: p.label || id, baseURL,
       api: p.api || "chat",
@@ -455,7 +467,9 @@ export function resolve({ env = process.env, config, project, home, keyfile } = 
   // had no fallback either, so PORT=abc yields NaN and the listen fails loudly. Silently
   // serving on 8123 when asked for something else is worse — that is how you end up with two
   // proxies and a launcher that trusts the wrong one.
-  values.OPENAI_BASE_URL = values.OPENAI_BASE_URL.replace(/\/$/, "");
+  // Fill any {name} tokens (e.g. Cloudflare's {cloudflareAccountId}) from the key file before anything
+  // downstream — providerForBase below, the config hash, and the proxy — sees the base URL.
+  values.OPENAI_BASE_URL = fillEndpoint(values.OPENAI_BASE_URL, K).replace(/\/$/, "");
 
   // The key file may hold provider-named keys (googleApiKey, cohereApiKey, …) rather than the generic
   // `apiKey`. If OPENAI_API_KEY did not resolve above, fill it from the DEFAULT provider's keyName —

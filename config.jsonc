@@ -136,8 +136,14 @@
   "keyNames": ["nvidiaApiKey","apiKey"],
   "isOpenAI": false,
   "responses": false},
-    "llm7": {"label":"LLM7","endpoint":"https://api.llm7.io/v1","api":"chat","keyNames":["llm7ApiKey","apiKey"],"isOpenAI":false,"responses":false,"model":"gpt-oss:20b","claudeCodeModel":"claude-opus-4-8[1m]"}
-    
+    "llm7": {"label":"LLM7","endpoint":"https://api.llm7.io/v1","api":"chat","keyNames":["llm7ApiKey","apiKey"],"isOpenAI":false,"responses":false,"model":"gpt-oss:20b","claudeCodeModel":"claude-opus-4-8[1m]"},
+    // Cloudflare Workers AI. Uses the OpenAI-COMPATIBLE base (.../ai/v1, which serves /chat/completions) —
+    // NOT the native .../ai/run, whose request/response shape this proxy doesn't speak. {cloudflareAccountId}
+    // and the API token both live in .openai-key: the account id is account-specific and kept out of this
+    // PUBLIC file, and fillEndpoint() substitutes it at resolve time. Model must be tool-capable (the agent
+    // always sends tools) — Llama 3.3 70B is.
+    "cloudflare": {"label":"Cloudflare","endpoint":"https://api.cloudflare.com/client/v4/accounts/{cloudflareAccountId}/ai/v1","api":"chat","keyNames":["cloudflareApiKey","apiKey"],"isOpenAI":false,"responses":false,"model":"@cf/meta/llama-3.3-70b-instruct-fp8-fast","claudeCodeModel":"claude-opus-4-8[1m]"}
+
   },
 
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
@@ -255,7 +261,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3:1.7b","cloudflare:@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
     "gatewayModelDiscovery": true
   },
 
