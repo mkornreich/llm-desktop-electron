@@ -327,12 +327,18 @@ ensure_freetoken() {
   # local build has the flag — cleaner, and keeps more full-pool capacity than a post-start rebuild.
   # Detect support by grepping the installed args.py (instant; no ft spawn). If absent, swa_load_flag
   # stays empty and freetoken_resize_swa_cache does the runtime /v1/cache/rebuild fallback instead.
-  local swa_load_flag="" _va
+  local swa_load_flag="" kv_dtype_flag="" _va
   if [ -n "${FREETOKEN_SWA_RATIO:-}" ]; then
     _va="$(ls "$(dirname "$launch")"/.venv/lib/python*/site-packages/freetoken/server/args.py 2>/dev/null | head -1)"
     [ -n "$_va" ] && grep -q -- '--swa-full-tokens-ratio' "$_va" 2>/dev/null && swa_load_flag="--swa-full-tokens-ratio $FREETOKEN_SWA_RATIO"
   fi
-  echo "[run] managed FreeToken: starting on ${base} (model ${FREETOKEN_SERVED_MODEL:-$(basename "$FREETOKEN_MODEL_PATH")})${swa_load_flag:+ [swa window sized at load: ${FREETOKEN_SWA_RATIO}]}"
+  # fp8 KV cache (--kv-dtype) doubles the token budget for FULL-attention models; skip on "auto"
+  # (bf16) and on stock builds without the flag. Detect support the same way as the swa flag.
+  if [ -n "${FREETOKEN_KV_DTYPE:-}" ] && [ "${FREETOKEN_KV_DTYPE}" != "auto" ]; then
+    [ -z "$_va" ] && _va="$(ls "$(dirname "$launch")"/.venv/lib/python*/site-packages/freetoken/server/args.py 2>/dev/null | head -1)"
+    [ -n "$_va" ] && grep -q -- '--kv-dtype' "$_va" 2>/dev/null && kv_dtype_flag="--kv-dtype $FREETOKEN_KV_DTYPE"
+  fi
+  echo "[run] managed FreeToken: starting on ${base} (model ${FREETOKEN_SERVED_MODEL:-$(basename "$FREETOKEN_MODEL_PATH")})${swa_load_flag:+ [swa window sized at load: ${FREETOKEN_SWA_RATIO}]}${kv_dtype_flag:+ [kv-dtype: ${FREETOKEN_KV_DTYPE}]}"
   nohup "$launch" serve \
     --model-path "$FREETOKEN_MODEL_PATH" \
     --port "${FREETOKEN_PORT:-1919}" \
@@ -343,6 +349,7 @@ ensure_freetoken() {
     ${FREETOKEN_CUDA_GRAPH_MAX_BS:+--cuda-graph-max-bs "$FREETOKEN_CUDA_GRAPH_MAX_BS"} \
     ${FREETOKEN_MEMORY_RATIO:+--memory-ratio "$FREETOKEN_MEMORY_RATIO"} \
     ${swa_load_flag} \
+    ${kv_dtype_flag} \
     > "$logfile" 2>&1 &
   pid=$!
   echo "$pid" > user-data/freetoken-managed

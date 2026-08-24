@@ -56,22 +56,21 @@
     "freetoken": {
       "endpoint": "http://127.0.0.1:1919/v1",
       "api": "chat",
-      "model": "gemma-4-e2b",
+      "model": "qwen3-1.7b",
       "claudeCodeModel": "claude-opus-4-8[1m]",
       // FreeToken on-device engine (OpenAI-compatible, loopback). engine="freetoken" -> the generic
-      // managed bring-up. modelPath is the GGUF weights file (a dir with two .gguf files is ambiguous).
-      // Serves gemma-4-E2B (q4_0 GGUF): its sliding-window attention gives a ~131k-token window that FITS
-      // the 8GB card, so the Auto-mode classifier stops overflowing (qwen3:1.7b capped at ~30.5k and
-      // failed closed). GPU-fit knobs are REQUIRED for a model this size on 8GB: maxRunningRequests=1
-      // (one verdict at a time; keeps prefill activation small), cudaGraphMaxBs=1, memoryRatio=0.82
-      // (leaves ~1.3GB runtime headroom — 0.9 OOM'd on the 27k-token rulebook prefill).
-      // SWA window pool must CLEAR the ~27k rulebook or its KV isn't retained and every verdict
-      // re-prefills all ~55k tokens (~50s); clearing it lets a repeated/near-identical prefix reuse
-      // (multi-action turns, retries, growing transcript) → sub-second. swaFullTokensRatio sizes it at
-      // LOAD via --swa-full-tokens-ratio (FreeToken PR #109): ratio 0.3 → window ~34k, full pool ~113k.
-      // numPages/numSwaPages are the fallback for a stock build without the flag: run.sh does a
-      // post-start /v1/cache/rebuild instead (full pool 100k, window 33k). run.sh picks one automatically.
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/gemma-4-E2B-it-q4gguf/gemma-4-E2B_q4_0-it.gguf", "servedModelName": "gemma-4-e2b", "toolCallParser": "gemma4", "reasoningParser": "gemma4", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.82, "swaFullTokensRatio": 0.3, "numPages": 100000, "numSwaPages": 33000, "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      // managed bring-up. modelPath is the HF weights dir (Qwen3 loads natively, no GGUF needed).
+      // Serves Qwen3-1.7B (bf16 safetensors, ~3.9GB): FULL attention, so the ~24k classifier rulebook is
+      // retained in the KV cache and REUSED across calls (0.2-1s warm vs ~9s cold) — the caching that
+      // gemma's sliding-window attention could not give. Qwen3's reasoning at 1.7B is far stronger than
+      // Llama-3.2-3B: 0 false-negatives on dangerous commands, ~83% benign-correct (WITH a forced-reasoning
+      // nudge the proxy adds to safety requests — its snap verdicts over-block, its reasoned ones are right).
+      // kvDtype=fp8_e4m3 halves KV bytes/token (--kv-dtype; needs the local FreeToken build's flag),
+      // doubling the token budget to ~54k so the full ~55k transcript fits on the 8GB card. GPU-fit knobs:
+      // maxRunningRequests=1 (one verdict at a time), cudaGraphMaxBs=1, memoryRatio=0.85. reasoningParser
+      // qwen3 separates the <think> reasoning from the <block> verdict. Full attention => no SWA pool, so
+      // the swaFullTokensRatio/numPages/numSwaPages knobs are gone.
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3-1.7b", "reasoningParser": "qwen3", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.85, "kvDtype": "fp8_e4m3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
@@ -161,7 +160,7 @@
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
   // failing over on transport/HTTP errors and honouring Retry-After on 429s. First in the Code-tab
   // dropdown and the default for new sessions. "maxWaitMs" bounds the wait when EVERY member is 429'd.
-  "composite": ["cohere:command-a-plus-05-2026","mistral:mistral-large-latest","llm7:gpt-oss:20b","cloudflare:@cf/qwen/qwen3.8-27b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:gemma-4-e2b"],
+  "composite": ["cohere:command-a-plus-05-2026","mistral:mistral-large-latest","llm7:gpt-oss:20b","cloudflare:@cf/qwen/qwen3.8-27b","gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","freetoken:qwen3-1.7b"],
   "compositeMaxWaitMs": 30000,
 
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
@@ -177,9 +176,9 @@
   // model when gemma overflows or errors (instead of failing closed to manual approval). Put a cloud
   // model FIRST instead if you want speed on every verdict (each verdict then egresses the transcript).
   "classifier": {
-    "prefix": "freetoken:gemma-4-e2b",
-    "safety": ["freetoken:gemma-4-e2b", "gemini:gemini-3-flash-preview"],
-    "background": "freetoken:gemma-4-e2b",
+    "prefix": "freetoken:qwen3-1.7b",
+    "safety": ["freetoken:qwen3-1.7b", "gemini:gemini-3-flash-preview"],
+    "background": "freetoken:qwen3-1.7b",
     "maxTools": 4,
     "slowMs": 20000
   },
@@ -279,7 +278,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:gemma-4-e2b","cloudflare:@cf/qwen/qwen3.8-27b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b"],
     "gatewayModelDiscovery": true
   },
 

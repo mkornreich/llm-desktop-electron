@@ -823,6 +823,11 @@ export function emitEnv({ env = process.env } = {}) {
       putIf("FREETOKEN_MAX_RUNNING_REQ", mg.maxRunningRequests);
       putIf("FREETOKEN_CUDA_GRAPH_MAX_BS", mg.cudaGraphMaxBs);
       putIf("FREETOKEN_MEMORY_RATIO", mg.memoryRatio);
+      // KV-cache storage dtype (--kv-dtype). fp8_e4m3/fp8_e5m2 halve KV bytes/token (~2x the token
+      // budget that fits), letting a long classifier transcript clear the bf16 ceiling. run.sh passes
+      // it only when the local build has the flag. fp8 is FULL-attention only for now (the SWA store
+      // path is still bf16), so a SWA model like gemma must stay "auto"; a llama classifier can use fp8.
+      putIf("FREETOKEN_KV_DTYPE", mg.kvDtype);
       // SWA window-pool sizing so the pool clears the classifier rulebook and prefixes are reused
       // across calls. Preferred: swaFullTokensRatio -> --swa-full-tokens-ratio at LOAD (PR #109; run.sh
       // uses it when the local build supports the flag). Fallback: numPages/numSwaPages -> a post-start

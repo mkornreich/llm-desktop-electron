@@ -1905,6 +1905,29 @@ const IMAGE_REJECTED_RE = /image|vision|multimodal|input_image|image_url/i;
 // providers every message's content is flattened to its text.
 const STRING_CONTENT_PROVIDERS = new Set(["cloudflare"]);
 
+// Auto-mode SAFETY verdicts, LOCAL member only: a small on-device reasoning model (Qwen3-1.7B) gives a
+// correct verdict only when it reasons first — its snap judgments default to over-blocking benign actions
+// (~60% false-positive without this, ~17% with). Nudging the reasoning is applied only to a loopback
+// endpoint; the capable remote fallback (gemini) already reasons and is left untouched. Appended to the
+// LAST user message (the transcript + pending action), so the model reads the whole rulebook first.
+const SAFETY_REASONING_NUDGE =
+  "\n\nBefore answering, work through the rulebook's evaluation steps explicitly (scope the full action, " +
+  "check the HARD BLOCK rules then the SOFT BLOCK rules and their ALLOW exceptions, then apply user intent) " +
+  "— then output the verdict in the required format.";
+function appendSafetyReasoningNudge(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "user") continue;
+    if (typeof m.content === "string") { m.content += SAFETY_REASONING_NUDGE; return; }
+    if (Array.isArray(m.content)) {
+      const lastText = [...m.content].reverse().find((p) => p.type === "text");
+      if (lastText) lastText.text += SAFETY_REASONING_NUDGE;
+      else m.content.push({ type: "text", text: SAFETY_REASONING_NUDGE.trimStart() });
+      return;
+    }
+  }
+}
+
 function toOpenAI(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
   const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no system, no tools
@@ -1990,6 +2013,8 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
       }
     }
   }
+  // Local on-device safety classifier needs an explicit-reasoning nudge to stop over-blocking (see above).
+  if (isSafety(route) && isLocalEndpoint(curProvider().baseURL)) appendSafetyReasoningNudge(messages);
   // Flatten content to a plain string for providers whose schema demands it (Cloudflare). Non-text
   // parts (images) are dropped — its text models cannot use them anyway — and a null content (an
   // assistant turn that is only tool_calls) becomes "" so the schema's string type is satisfied.

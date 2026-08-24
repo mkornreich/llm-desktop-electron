@@ -759,6 +759,25 @@ test("the Environment 'powered by the model' line is rewritten to the real model
   assert.doesNotMatch(psys, /served by the .* provider/, "no 'powered by' line -> nothing injected");
 });
 
+test("a local on-device safety classifier is nudged to reason first; remote/non-safety are not", () => {
+  const lastUser = (r) => r.payload.messages.filter((m) => m.role === "user").at(-1).content;
+  const safetyBody = { system: AUTO_MODE_SYS, messages: [{ role: "user", content: "Bash: rm -rf /home" }], max_tokens: 100 };
+  // A loopback safety member (Qwen3-1.7B): its snap verdicts over-block, so force explicit reasoning.
+  const local = providerALS.run({ id: "freetoken", baseURL: "http://127.0.0.1:1919/v1", isOpenAI: false },
+    () => toOpenAI(safetyBody, "qwen3-1.7b"));
+  assert.match(lastUser(local), /work through the rulebook's evaluation steps explicitly/,
+    "a safety request to a loopback member is nudged to reason first");
+  // The capable remote fallback already reasons -> untouched.
+  const remote = providerALS.run({ id: "gemini", baseURL: "https://x/v1", isOpenAI: false },
+    () => toOpenAI(safetyBody, "gemini-3-flash-preview"));
+  assert.doesNotMatch(lastUser(remote), /work through the rulebook's evaluation steps/,
+    "a remote safety member is not nudged");
+  // A normal (non-safety) turn to the same local endpoint is not nudged.
+  const mainLocal = providerALS.run({ id: "freetoken", baseURL: "http://127.0.0.1:1919/v1", isOpenAI: false },
+    () => toOpenAI({ system: "You are a helpful assistant.", messages: [{ role: "user", content: "hi" }], max_tokens: 100 }, "qwen3-1.7b"));
+  assert.doesNotMatch(lastUser(mainLocal), /work through the rulebook's evaluation steps/, "only safety routes are nudged");
+});
+
 // ---------- auto-continue trigger ----------
 
 test("auto-continue fires on announcements the model did not act on", () => {
