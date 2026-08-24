@@ -244,7 +244,13 @@ function control(s) {
     // choice (a <select> of the fetched catalog, or a text field when the catalog is empty) plus
     // move-up / move-down / remove, followed by an "Add model" button. Every edit rejoins the rows and
     // re-renders. A member set but absent from the catalog is kept (so a valid id is never dropped).
-    const CH = s.responsesOnly ? COMPACT_CHOICES : COMPOSITE_CHOICES;   // responsesOnly -> only /responses providers
+    // responsesOnly -> only /responses providers. classifierChain -> a classifier fallover chain: also
+    // offer LOCAL models (freetoken via suggestions + every Ollama local) and don't require tool-calling.
+    const CH = s.classifierChain
+      ? [...(s.suggestions || []).filter(Boolean).map((id) => ({ id, label: id })), ...COMPOSITE_CHOICES,
+         ...OLLAMA_MODELS.map((m) => ({ id: "local:" + m, label: "local:" + m }))]
+          .filter((c, i, a) => a.findIndex((x) => x.id === c.id) === i)      // dedupe by id, keep first
+      : s.responsesOnly ? COMPACT_CHOICES : COMPOSITE_CHOICES;
     const members = (DRAFT[s.key] || "").split(",").map((x) => x.trim()).filter(Boolean);
     const choiceIds = CH.map((c) => c.id);
     const labelOf = Object.fromEntries(CH.map((c) => [c.id, c.label]));
@@ -282,7 +288,9 @@ function control(s) {
     wrap.append(add);
     if (!members.length) {
       const hint = document.createElement("div"); hint.className = "help";
-      hint.textContent = "No members yet — the Composite entry stays hidden until you add at least one.";
+      hint.textContent = s.classifierChain
+        ? "No members — verdicts run on the main model (accept the latency)."
+        : "No members yet — the Composite entry stays hidden until you add at least one.";
       wrap.append(hint);
     }
     return wrap;
