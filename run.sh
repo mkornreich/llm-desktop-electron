@@ -327,7 +327,7 @@ ensure_freetoken() {
   # local build has the flag — cleaner, and keeps more full-pool capacity than a post-start rebuild.
   # Detect support by grepping the installed args.py (instant; no ft spawn). If absent, swa_load_flag
   # stays empty and freetoken_resize_swa_cache does the runtime /v1/cache/rebuild fallback instead.
-  local swa_load_flag="" kv_dtype_flag="" _va
+  local swa_load_flag="" kv_dtype_flag="" _va=""
   if [ -n "${FREETOKEN_SWA_RATIO:-}" ]; then
     _va="$(ls "$(dirname "$launch")"/.venv/lib/python*/site-packages/freetoken/server/args.py 2>/dev/null | head -1)"
     [ -n "$_va" ] && grep -q -- '--swa-full-tokens-ratio' "$_va" 2>/dev/null && swa_load_flag="--swa-full-tokens-ratio $FREETOKEN_SWA_RATIO"
