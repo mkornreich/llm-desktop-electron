@@ -93,6 +93,39 @@ Sweet spot: `nemotron-3.5-lightning` (fast + solid); `nemotron-3-ultra` for maxi
   sharing enabled at [openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy). A
   burst of concurrent requests 429-storms; space them out.
 
+### Rate limits observed (429s)
+
+The 429s are **cumulative quota exhaustion, not a per-model trait** — the same model 429'd in one
+run and answered in another. In the *earliest* clean test (the max-reasoning battery) **all 11
+answered with zero 429s**; the throttling only set in after a day of probing (the 400-model catalog
+sweep, the both-surface test, the quality/speed benchmarks) drained the free-tier allowance. What the
+two later benchmark runs recorded:
+
+| model | concurrent run (earlier) | sequential run (later, 429s logged) |
+|---|---|---|
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | all errors | all 429 |
+| `nvidia/nemotron-3-super-120b-a12b:free` | all errors | all 429 |
+| `nvidia/nemotron-3.5-lightning:free` | all errors | all 429 |
+| `cohere/north-mini-code:free` | all errors | all 429 |
+| `liquid/lfm-2.5-2.6b:free` | all errors | all 429 |
+| `poolside/laguna-xs-2.1:free` | speed only (quality errored) | all 429 |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 3/3 + speed | all 429 |
+| `poolside/laguna-s-2.1:free` | 1/1 + speed | all 429 |
+| `dots-studio/dots-3-note-preview:free` | 5/5 + speed | all 429 |
+| `openrouter/free` | 4/5 + speed | all 429 |
+| `stealth/ox-alpha` | 4/4 + speed | broke through (2×429, then succeeded) |
+
+- In the final sequential run (429s explicitly tracked), **all 11 hit 429s**; the only one to push a
+  request through was **`stealth/ox-alpha`** — and it isn't a `:free` model, so it's on a looser
+  limit than the ten `:free` ones.
+- In the earlier concurrent run, **5 got nothing through** (`nemotron-3-ultra`, `nemotron-3-super`,
+  `nemotron-3.5-lightning`, `cohere/north-mini-code`, `liquid/lfm-2.5`); the other 6 got partial data.
+- Caveats: the concurrent run labelled failures generically ("ERR"), so not every one there is
+  provably a 429 vs a timeout (the two big NVIDIA MoEs are slow at max reasoning); the sequential
+  run's are confirmed 429. None of this reflects the models' real reliability — it's shared-quota
+  exhaustion from testing. A clean re-run after the quota resets (or with a small credit balance)
+  gets all 11 through.
+
 ## How the allowlist is enforced
 
 `providers.<id>.suggestions` (non-empty) is the **exclusive** set of that provider's models the UI
