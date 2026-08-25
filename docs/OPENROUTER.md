@@ -126,6 +126,32 @@ two later benchmark runs recorded:
   exhaustion from testing. A clean re-run after the quota resets (or with a small credit balance)
   gets all 11 through.
 
+### Two distinct 429 limits (they are not the same throttle)
+
+`stealth/ox-alpha` looked like "the one that still works", but under a real Code-tab turn it 429s too
+— for a **different reason**. There are two separate limits, and `ox-alpha` being the lone non-`:free`
+id is why it lands on the second one:
+
+| limit | applies to | `metadata`/message | shape |
+|---|---|---|---|
+| **`free-models-per-day`** | the ten `:free` models | *"Rate limit exceeded: free-models-per-day. Add 10 credits…"* | a **single shared daily counter** across ALL `:free` models; pre-flight reject (~0.05 s, before inference). ≥ $10 credits raises it (~50/day → ~1000/day). Resets daily. |
+| **`upstream_provider_shared_pool`** | `stealth/ox-alpha` (cloaked; served by the "Stealth" provider) | *"stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly."* · `provider_name:"Stealth"` · `is_byok:false` | the upstream provider's **shared free capacity** — intermittent, not a daily counter, and heavier on big requests. Remedy: retry shortly, add credits (raises shared-pool priority), or BYOK (your own provider key). |
+
+**Routing is correct** — this is NOT a proxy/config bug. The live proxy log shows the pick resolving
+and dispatching exactly as intended, then the upstream 429:
+
+```
+/v1/messages [responses] model=openrouter:stealth/ox-alpha->stealth/ox-alpha … tools=63 session=…
+  routed to provider openrouter (https://openrouter.ai/api/v1)
+OpenAI(responses) 429: "stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly."
+  limit_source:"upstream_provider_shared_pool"  provider_name:"Stealth"  is_byok:false
+```
+
+A direct retest isolates it to load, not surface: `chat`-tiny, `responses`-tiny, and
+`responses`+reasoning all returned 200, but `responses`+tools **429'd** — matching the real turn
+(31.6k tokens, 63 tool schemas). And because a single-model pick has **no fallover** (unlike
+Composite), an `ox-alpha` 429 just fails the turn; the proxy retries it a few times and gives up.
+
 ## How the allowlist is enforced
 
 `providers.<id>.suggestions` (non-empty) is the **exclusive** set of that provider's models the UI
