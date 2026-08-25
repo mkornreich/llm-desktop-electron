@@ -1353,6 +1353,19 @@ test("composite: the CHAT stream falls over to the next member on an empty turn,
     "the chat handler must hand streamAnthropic the composite fallover list");
 });
 
+test("empty ExitPlanMode is dropped on the chat stream (falls over / notice, never a Server error)", () => {
+  // A weak model in plan mode can emit ExitPlanMode with a blank plan. On the streaming CHAT path we drop
+  // it so the composite fallover (or the honest empty-turn notice) handles it — rather than withholding it
+  // as a mid-stream error the app renders as "Server error mid-response". A real plan is never dropped.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("async function streamAnthropic"),
+                       src.indexOf("// ================= OpenAI Responses API path"));
+  assert.match(fn, /const dropEmptyPlan = \(\) => \{/, "streamAnthropic defines the empty-plan drop");
+  assert.match(fn, /planIsEmpty\(tb\.toolName, a\)/, "it uses planIsEmpty to detect a blank ExitPlanMode");
+  // Runs after the INITIAL drain and after EACH fallover drain, so an empty plan re-triggers fallover.
+  assert.ok((fn.match(/dropEmptyPlan\(\);/g) || []).length >= 2, "dropEmptyPlan runs after every drain");
+});
+
 test("issue #1: verbosity is sent and configurable", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /OPENAI_VERBOSITY/);

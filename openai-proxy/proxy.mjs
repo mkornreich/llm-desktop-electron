@@ -2452,9 +2452,21 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     }
   }
   }
+  // A blank ExitPlanMode ("empty plan") is not a usable answer — drop it so this turn falls over to the
+  // next composite member (for a real plan) or ends with an honest empty-turn notice, rather than a
+  // mid-stream error the app renders as "Server error mid-response". planIsEmpty tolerates schema variants,
+  // so a real plan is never dropped. (The non-streaming + responses paths still hard-withhold via toolArgs.)
+  const dropEmptyPlan = () => {
+    for (const [k, tb] of toolBlocks) {
+      if (!tb.toolName) continue;
+      let a; try { a = JSON.parse(tb.argBuf || "{}"); } catch { a = {}; }
+      if (planIsEmpty(tb.toolName, a)) { toolBlocks.delete(k); log(`  ! empty ExitPlanMode dropped — treating as no answer (fall over / notice, not an error)`); }
+    }
+  };
   await drain(upstream);
   recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
               usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
+  dropEmptyPlan();
   // Composite MID-STREAM fallover on the CHAT surface: mirrors the responses path. If the member
   // produced NO answer (no text, no tool call) and same-surface composite members remain, try them in
   // order into this same open message until one answers. Inert (loop skipped) for a non-composite turn
@@ -2477,6 +2489,7 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     await drain(up);
     recordUsage(next.model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
                 usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
+    dropEmptyPlan();
   }
   if (textIndex !== null) {
     const tail = mathFix.flush(); // emit any held-back partial delimiter
