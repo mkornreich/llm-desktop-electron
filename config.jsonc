@@ -134,12 +134,12 @@
     "openrouter": {
       "endpoint": "https://openrouter.ai/api/v1",
       "api": "responses",
-      "model": "google/gemma-4-31b-it:free",
+      "model": "deepseek/deepseek-v3.2",
       "claudeCodeModel": "claude-opus-4-8[1m]",
       "label": "OpenRouter",
       "keyNames": ["openrouterApiKey","apiKey"],
       "isOpenAI": false,
-      "responses": false
+      "responses": true
     },
     "nvidia": {"endpoint":"https://integrate.api.nvidia.com/v1","api":"chat","model":"nvidia/llama-3.3-nemotron-super-49b-v1.5","claudeCodeModel":"claude-opus-4-8[1m]",
   "label": "NVIDIA",
@@ -288,7 +288,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","openrouter:deepseek/deepseek-v3.2","openrouter:qwen/qwen3-coder-flash","openrouter:moonshotai/kimi-k2.7-code","openrouter:x-ai/grok-4.6"],
     "gatewayModelDiscovery": true
   },
 
