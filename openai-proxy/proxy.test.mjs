@@ -33,7 +33,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
         rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses, classifierVerdictOf, classifierActionAutoAllowed,
-        approxTokens, kilo } =
+        approxTokens, kilo,
+        fitPayloadToWindow, contextWindowFor, payloadInputTokens, contentChars, PROACTIVE_OUTPUT_RESERVE } =
   await import("./proxy.mjs");
 const { ToolRegistry } = await import("./tool-registry.mjs");
 
@@ -1518,6 +1519,121 @@ test("issue #4: both call paths retry on the context error", () => {
   // the Responses path goes through the summarising wrapper; chat uses the plain one
   assert.match(src, /await compactResponsesInputSummarised\(body\.input, keep\)/);
   assert.match(src, /compactChatMessages\(body\.messages, keep\)/);
+});
+
+// ---------- proactive, size-triggered compaction (per model) ----------
+test("contextWindowFor: registry id, per-model map, scalar, and unknown window", async () => {
+  const { PROVIDERS } = await import("./config.mjs");
+  // Looked up BY ID from the real registry, so the trimmed member-provider object need not carry it.
+  assert.equal(contextWindowFor({ id: "gemini" }, "gemini-3-flash-preview"), PROVIDERS.gemini.contextWindow);
+  // A per-model map (the managed Ollama's `context`) is model-specific and wins over any scalar.
+  assert.equal(contextWindowFor({ id: "ollama" }, "gemma4:latest"), 131072);
+  // An id absent from the registry falls back to the passed object's own fields.
+  assert.equal(contextWindowFor({ id: "__x__", contextWindow: 50000 }, "m"), 50000);
+  assert.equal(contextWindowFor({ id: "__x__", contextWindows: { m: 10 }, contextWindow: 50000 }, "m"), 10);
+  // Unknown window -> 0 (proactive compaction disabled for that provider).
+  assert.equal(contextWindowFor({ id: "__x__" }, "m"), 0);
+  assert.equal(contextWindowFor(null, "m"), 0);
+});
+
+const bigChatPayload = () => {
+  const messages = [{ role: "system", content: "sys" }, { role: "user", content: "go" }];
+  for (let i = 0; i < 12; i++) {
+    messages.push({ role: "assistant", content: null, tool_calls: [{ id: `c${i}`, type: "function", function: { name: "Read", arguments: "{}" } }] });
+    messages.push({ role: "tool", tool_call_id: `c${i}`, content: "Y".repeat(20000) }); // ~5k tokens each -> ~60k total
+  }
+  return { messages, tools: [] };
+};
+
+test("fitPayloadToWindow: chat payload over the window is trimmed to fit; small/0 is left alone", () => {
+  const p = bigChatPayload();
+  const before = payloadInputTokens(p, "chat");
+  assert.ok(before > 40000, "fixture should exceed the test window");
+  const r = fitPayloadToWindow(p, "chat", 40000);
+  assert.ok(r.trimmed > 0, "should trim");
+  assert.ok(r.after < before, "shrunk");
+  assert.ok(r.after <= 40000 - PROACTIVE_OUTPUT_RESERVE, "fits within window minus the output reserve");
+  assert.equal(p.messages[0].content, "sys", "system prompt untouched");
+  assert.equal(p.messages[1].content, "go", "first user message untouched");
+  // A generous window leaves it entirely alone.
+  assert.equal(fitPayloadToWindow(bigChatPayload(), "chat", 1_000_000).trimmed, 0);
+  // window 0 (unknown) => no-op even when huge.
+  assert.equal(fitPayloadToWindow(bigChatPayload(), "chat", 0).trimmed, 0);
+});
+
+test("fitPayloadToWindow: responses payload trims function_call_output items the same way", () => {
+  const input = [{ role: "user", content: [{ type: "input_text", text: "go" }] }];
+  for (let i = 0; i < 12; i++) {
+    input.push({ type: "function_call", call_id: `c${i}`, name: "Read", arguments: "{}" });
+    input.push({ type: "function_call_output", call_id: `c${i}`, output: "Y".repeat(20000) });
+  }
+  const p = { input, tools: [] };
+  const before = payloadInputTokens(p, "responses");
+  const r = fitPayloadToWindow(p, "responses", 40000);
+  assert.ok(r.trimmed > 0 && r.after < before && r.after <= 40000 - PROACTIVE_OUTPUT_RESERVE);
+});
+
+test("proactive fit runs in obtainUpstream before the call, gated on classifier/compaction turns", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(!isCls && !compacting\) \{/);
+  assert.match(src, /const fit = fitPayloadToWindow\(payload, surface, contextWindowFor\(m\.provider, m\.model\)\)/);
+});
+
+test("contentChars/payloadInputTokens credit images at a fixed cost, not their base64 length", () => {
+  const bigDataUrl = "data:image/png;base64," + "A".repeat(600_000); // ~600KB -> ~150k phantom tokens if counted raw
+  const chat = { messages: [{ role: "user", content: [{ type: "text", text: "look" }, { type: "image_url", image_url: { url: bigDataUrl } }] }], tools: [] };
+  assert.ok(payloadInputTokens(chat, "chat") < 2000, "a chat image must not inflate the estimate");
+  const resp = { input: [{ role: "user", content: [{ type: "input_text", text: "look" }, { type: "input_image", image_url: bigDataUrl }] }], tools: [] };
+  assert.ok(payloadInputTokens(resp, "responses") < 2000, "a responses image must not inflate the estimate");
+  // A huge image must NOT force fitPayloadToWindow to over-trim a payload whose real content fits 128k.
+  const withImage = { messages: [{ role: "system", content: "s" },
+    { role: "user", content: [{ type: "image_url", image_url: { url: bigDataUrl } }] },
+    { role: "tool", tool_call_id: "c1", content: "Z".repeat(4000) }], tools: [] };
+  assert.equal(fitPayloadToWindow(withImage, "chat", 128000).trimmed, 0, "must not trim: real content fits 128k");
+});
+
+test("payloadInputTokens counts the responses system prompt (instructions), matching chat's in-messages system", () => {
+  const sys = "S".repeat(40000); // ~10k tokens of rulebook
+  const resp = { input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }], instructions: sys, tools: [] };
+  assert.ok(payloadInputTokens(resp, "responses") >= 10000, "responses system prompt (instructions) must be counted");
+  const chat = { messages: [{ role: "system", content: sys }, { role: "user", content: "hi" }], tools: [] };
+  assert.ok(payloadInputTokens(chat, "chat") >= 10000, "chat system message is counted");
+});
+
+test("contentChars counts an assistant message's tool_calls even alongside narration text", () => {
+  const args = JSON.stringify({ file_path: "/x", content: "Q".repeat(8000) });
+  const narrated = { role: "assistant", content: "Let me write that file", tool_calls: [{ id: "c1", type: "function", function: { name: "Write", arguments: args } }] };
+  assert.ok(contentChars(narrated) > 8000, "the tool_call arguments must be counted, not just the narration");
+});
+
+test("reactive context-overflow loops escalate (continue) past a zero-trim rung instead of breaking", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // All three loops (chat, responses non-stream, responses stream) must `continue`, not `break`, when a
+  // rung trims nothing — else a proactively pre-trimmed payload whose real BPE count still overflows
+  // would defeat the reactive backstop and hard-fail a turn that used to succeed.
+  const escalations = src.match(/no trimmable tool results older than keep=\$\{keep\}; escalating`\); continue; \}/g) || [];
+  assert.equal(escalations.length, 3, `expected all 3 reactive loops to escalate; found ${escalations.length}`);
+  assert.doesNotMatch(src, /nothing left to compact \(keep=\$\{keep\}\)`\); break;/, "the give-up-early break must be gone");
+});
+
+// ---------- upstream headers-timeout -> automatic fall-over ----------
+test("upstream headers-timeout knob defaults to 30s and 0 disables it", () => {
+  assert.equal(DEFAULTS.OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS, 30000);
+  const off = resolveConfig({ config: {}, env: { OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS: "0" }, project: {}, home: {}, keyfile: {} }).values;
+  assert.equal(off.OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS, 0);
+});
+
+test("a headers-timeout is a transport error, so the composite cascade falls over on it", () => {
+  // undici throws these codes when an upstream connects but never sends response headers in time.
+  assert.ok(isTransportError(Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" })));
+  assert.ok(isTransportError(Object.assign(new Error("connect timeout"), { code: "UND_ERR_CONNECT_TIMEOUT" })));
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // The knob is wired into BOTH connection pools' headersTimeout (0 -> undici default).
+  assert.match(src, /const ht = UPSTREAM_HEADERS_TIMEOUT_MS > 0 \? \{ headersTimeout: UPSTREAM_HEADERS_TIMEOUT_MS \} : \{\}/);
+  assert.match(src, /setGlobalDispatcher\(new Agent\(\{[^)]*\.\.\.ht[^)]*\}\)\)/);
+  assert.match(src, /classifierAgent = new Agent\(\{[^)]*\.\.\.ht[^)]*\}\)/);
+  // tryMember's catch turns any thrown upstream error (a timeout included) into a composite skip -> next member.
+  assert.match(src, /catch \(e\) \{\s*\n\s*bestErr = worseOf\(bestErr, \{ kind: "transport"/);
 });
 
 // ---------- summarising compaction ----------

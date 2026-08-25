@@ -128,6 +128,10 @@ const PICKER_MODELS = CFG.OPENAI_PICKER_MODELS
 const COMPOSITE_ID = "composite";
 const OPENAI_COMPOSITE_MODELS = CFG.OPENAI_COMPOSITE_MODELS;
 const OPENAI_COMPOSITE_MAX_WAIT_MS = CFG.OPENAI_COMPOSITE_MAX_WAIT_MS;
+// Time-to-response-headers cap per upstream member (0 = undici default). A member that connects but
+// never sends headers throws UND_ERR_HEADERS_TIMEOUT at this bound, which the composite cascade treats
+// as a fall-over — so a hung model auto-tries the next instead of the client hitting its own timeout.
+const UPSTREAM_HEADERS_TIMEOUT_MS = CFG.OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS;
 const OPENAI_BASE = CFG.OPENAI_BASE_URL;
 // A loopback OPENAI_BASE_URL means an on-device server (Ollama, llama.cpp, LM Studio, vLLM):
 // those serve the OpenAI API without authenticating, so the key is OPTIONAL there. An off-box
@@ -928,8 +932,13 @@ try {
   // for curl; autoSelectFamily can't help because the stall is in DNS, before connection racing).
   // connect.family=4 queries A only. Set PROXY_FORCE_IPV4=0 to disable on an IPv6-only network.
   const v4 = process.env.PROXY_FORCE_IPV4 === "0" ? {} : { connect: { family: 4 } };
-  setGlobalDispatcher(new Agent({ connections: 64, pipelining: 0, keepAliveTimeout: 30_000, ...v4 }));
-  const classifierAgent = new Agent({ connections: 8, pipelining: 0, keepAliveTimeout: 30_000, ...v4 });
+  // headersTimeout caps time-to-response-headers so a member that connects but never responds throws
+  // UND_ERR_HEADERS_TIMEOUT (already in TRANSPORT_ERROR_CODES) instead of hanging to undici's 300s
+  // default — the composite then falls over to the next model. It is cleared the instant headers
+  // arrive, so a slow STREAM is untouched. 0 keeps undici's default. Applied to both pools.
+  const ht = UPSTREAM_HEADERS_TIMEOUT_MS > 0 ? { headersTimeout: UPSTREAM_HEADERS_TIMEOUT_MS } : {};
+  setGlobalDispatcher(new Agent({ connections: 64, pipelining: 0, keepAliveTimeout: 30_000, ...ht, ...v4 }));
+  const classifierAgent = new Agent({ connections: 8, pipelining: 0, keepAliveTimeout: 30_000, ...ht, ...v4 });
   classifierFetch = (url, opts) => undiciFetch(url, { ...opts, dispatcher: classifierAgent });
   log(`connection pools: 64 shared, 8 reserved for classifier verdicts${v4.connect ? " (IPv4-forced)" : ""}`);
 } catch (e) {
@@ -2384,7 +2393,11 @@ async function callOpenAI(payload, isClassifier = false, sessionId = null) {
             ({ messages, trimmed, reclaimed } = compactOversizedChatText(body.messages));
             if (trimmed) log(`  ! no tool results left to trim — truncated an oversized message by ~${Math.round(reclaimed / 4000)}k tokens`);
           }
-          if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
+          // Nothing trimmable at THIS keep does not mean nothing trimmable at all: a smaller keep trims
+          // newer tool results this one left whole (and proactive compaction may already have trimmed the
+          // older region). So escalate to the next rung instead of giving up — else a proactively pre-
+          // trimmed payload whose real BPE count still overflows would hard-fail here. The for-loop bounds it.
+          if (!trimmed) { log(`  ! context exceeded — no trimmable tool results older than keep=${keep}; escalating`); continue; }
           log(`  ! context exceeded — compacted ${trimmed} tool result(s), reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} messages); retrying`);
           body = { ...body, messages };
           res = await doFetch(body);
@@ -2754,7 +2767,9 @@ async function callResponses(payload, isClassifier = false, sessionId = null) {
           ({ input, trimmed, reclaimed } = compactOversizedResponsesText(body.input));
           if (trimmed) log(`  ! no tool results left to trim — truncated an oversized message by ~${Math.round(reclaimed / 4000)}k tokens`);
         }
-        if (!trimmed) { log(`  ! context exceeded and nothing left to compact (keep=${keep})`); break; }
+        // Escalate rather than give up (see the chat-surface twin above): a smaller keep trims newer
+        // items, and proactive compaction may already have trimmed the older region flat.
+        if (!trimmed) { log(`  ! context exceeded — no trimmable tool results older than keep=${keep}; escalating`); continue; }
         log(`  ! context exceeded — compacted ${trimmed} tool result(s)${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens (keeping last ${keep} items); retrying`);
         body = { ...body, input };
         res = await doFetch(body);
@@ -2796,6 +2811,79 @@ async function callResponses(payload, isClassifier = false, sessionId = null) {
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 const approxTokens = (chars) => Math.round(chars / CHARS_PER_TOKEN_ESTIMATE);
 const kilo = (n) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
+
+// ---- proactive, size-triggered compaction (per model) ----
+// Reactive compaction only fires AFTER an upstream reports a context overflow (a 413 / "context
+// exceeded"). But many providers report an over-window turn as a generic 400/429 or an empty
+// completion — never a clean 413 — and on a composite that silently burns the whole fallover chain
+// (and can outlast the client's request timeout). So before a member's call, estimate the encoded
+// payload against THAT model's context window and mechanically trim tool results to fit up front.
+// Tokens are always the ~chars/4 estimate (no tokenizer); it undercounts, so the fit stays safe.
+const PROACTIVE_OUTPUT_RESERVE = 16384;   // headroom left below the window for tools + the reply itself
+// A rough per-image vision cost (~1k tokens) credited in place of an image part's base64 data URL.
+// A screenshot's data URL is hundreds of KB of characters with NO relation to its (small, roughly
+// fixed) vision-token cost, so counting it verbatim would inflate the estimate ~100x — and an image
+// is not trimmable, so that over-count would never clear and would trigger spurious maximal compaction.
+const IMAGE_TOKEN_CREDIT_CHARS = 4000;
+// Recursively count the CHARACTERS of text content in an encoded chat/responses payload fragment —
+// message content, nested content parts, and tool-call argument strings. Keys/punctuation are ignored
+// (bar the small constant field labels an object sum picks up), matching the ~chars/4 convention.
+function contentChars(v) {
+  if (v == null) return 0;
+  if (typeof v === "string") return v.length;
+  if (typeof v === "number" || typeof v === "boolean") return String(v).length;
+  if (Array.isArray(v)) return v.reduce((n, x) => n + contentChars(x), 0);
+  if (typeof v === "object") {
+    // Image parts ({type:"image_url",image_url:{url:"data:…"}} on chat, {type:"input_image",…} on
+    // responses): credit a fixed cost instead of their base64 length. Checked FIRST, before the
+    // generic object sum would recurse into the data URL.
+    if (v.type === "image_url" || v.type === "input_image" || v.type === "image") return IMAGE_TOKEN_CREDIT_CHARS;
+    if (typeof v.text === "string") return v.text.length;
+    // Sum EVERY field rather than early-returning on `content`: an encoded assistant message carries
+    // BOTH a `content` narration string AND a `tool_calls` array (with the large argument JSON) in the
+    // same object, and both cost tokens — the old `content`-only return dropped the tool_calls.
+    return Object.values(v).reduce((n, x) => n + contentChars(x), 0);
+  }
+  return 0;
+}
+// Estimated INPUT tokens of an encoded payload (messages/input + tool definitions + the system prompt).
+// On the chat surface the system prompt is a role:"system" message already inside `messages`; on the
+// responses surface it lives in the separate `instructions` field — count it there too, or the responses
+// estimate under-reads by the large (~24k-token) Claude Code rulebook and proactive fit under-triggers.
+function payloadInputTokens(payload, surface) {
+  const core = surface === "responses" ? payload?.input : payload?.messages;
+  const system = surface === "responses" ? contentChars(payload?.instructions) : 0;
+  return approxTokens(contentChars(core) + contentChars(payload?.tools) + system);
+}
+// The context window (tokens) for a resolved member, looked up BY ID from the registry so it works
+// even for the trimmed member-provider objects resolvePickedProvider builds. Per-model maps
+// (`context`/`contextWindows`) win over the per-provider `contextWindow` scalar. 0 => window unknown.
+function contextWindowFor(provider, model) {
+  const reg = PROVIDERS[provider?.id] || provider || {};
+  return Number(reg.contextWindows?.[model] ?? reg.context?.[model] ?? reg.contextWindow) || 0;
+}
+// If the encoded payload is estimated to overflow `window` (minus the output reserve), walk the
+// COMPACT_STEPS ladder trimming tool results in place until it fits (or nothing is left to trim).
+// Mechanical only — no summariser LLM call — so it adds no latency of its own. Returns before/after
+// token estimates and how many tool results were trimmed. window 0 => no-op.
+function fitPayloadToWindow(payload, surface, window) {
+  const before = payloadInputTokens(payload, surface);
+  if (!window) return { trimmed: 0, before, after: before, window };
+  const budget = Math.max(4096, window - PROACTIVE_OUTPUT_RESERVE);
+  if (before <= budget) return { trimmed: 0, before, after: before, window };
+  let trimmed = 0;
+  for (const keep of COMPACT_STEPS) {
+    if (surface === "responses") {
+      const r = compactResponsesInput(payload.input, keep);
+      payload.input = r.input; trimmed += r.trimmed || 0;
+    } else {
+      const r = compactChatMessages(payload.messages, keep);
+      payload.messages = r.messages; trimmed += r.trimmed || 0;
+    }
+    if (payloadInputTokens(payload, surface) <= budget) break;
+  }
+  return { trimmed, before, after: payloadInputTokens(payload, surface), window };
+}
 
 // ---- cache routing ----
 //
@@ -3520,7 +3608,10 @@ async function streamResponses(res, upstream, reqModel, registry, payload = null
       ({ input, trimmed, reclaimed } = compactOversizedResponsesText(payload.input));
       if (trimmed) log(`  ! no tool results left to trim — truncated an oversized message by ~${Math.round(reclaimed / 4000)}k tokens`);
     }
-    if (!trimmed) { log(`  ! context exceeded mid-stream and nothing left to compact (keep=${keep})`); break; }
+    // Escalate rather than give up: ctxCompacted already advanced, so `continue` re-enters the while at
+    // the next (smaller) keep, which trims newer items this keep left whole (and that proactive
+    // compaction may have skipped). The while's ctxCompacted < COMPACT_STEPS.length guard bounds it.
+    if (!trimmed) { log(`  ! context exceeded mid-stream — no trimmable tool results older than keep=${keep}; escalating`); continue; }
     log(`  -> context exceeded mid-stream — compacted ${trimmed} tool result(s)` +
         `${summarised ? " (summarised)" : ""}, reclaimed ~${Math.round(reclaimed / 4000)}k tokens` +
         ` (keeping last ${keep}); retrying`);
@@ -3780,6 +3871,15 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
         `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}`);
     }
     if (compacting) log(compactionWarning(compacting, shape, reqModel, m.model));
+    // Proactive, size-triggered compaction (per model): fit the encoded payload to THIS member's
+    // context window before the call. Skipped for classifier turns (their transcript is already
+    // trimmed) and for compaction system turns (their input is pre-capped), and inert when the
+    // member's window is unknown (contextWindow 0). Reactive 413-compaction still backstops it.
+    if (!isCls && !compacting) {
+      const fit = fitPayloadToWindow(payload, surface, contextWindowFor(m.provider, m.model));
+      if (fit.trimmed) log(`  ~ proactive fit for ${m.model} (window ~${kilo(fit.window)}tok): ` +
+        `~${kilo(fit.before)}tok -> ~${kilo(fit.after)}tok (trimmed ${fit.trimmed} tool result(s))`);
+    }
     const startedAt = Date.now();
     let upstream;
     try { upstream = useResp ? await callResponses(payload, policy.reservedPool, sessionId)
@@ -4106,6 +4206,7 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          pruneToolArgs, emptyTurnNotice, toolArgs, pruneByName,
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
          compactStartFor, rememberCompact,
+         fitPayloadToWindow, contextWindowFor, payloadInputTokens, contentChars, PROACTIVE_OUTPUT_RESERVE,
          compactResponsesInputSummarised, summariseDropped,
          compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,

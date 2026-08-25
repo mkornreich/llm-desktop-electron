@@ -177,6 +177,16 @@ export const SETTINGS = [
   { name: "OPENAI_COMPOSITE_MAX_WAIT_MS", env: "OPENAI_COMPOSITE_MAX_WAIT_MS",
     project: ["OPENAI_COMPOSITE_MAX_WAIT_MS"], type: "int", default: "30000", zero: 30000 },
 
+  // Upper bound (ms) on how long ONE upstream member may take to send RESPONSE HEADERS (the HTTP status
+  // + headers, which arrive before any streamed token). A member that connects but never responds — the
+  // classic "API Error: The operation timed out" — otherwise stalls the whole turn to undici's 300s
+  // default, long past the client's own timeout. This bounds it: undici throws UND_ERR_HEADERS_TIMEOUT,
+  // which the composite treats as a fall-over to the NEXT model. It is time-to-HEADERS only (undici
+  // clears it the instant headers arrive), so a healthy-but-slow STREAM — a reasoning model emitting for
+  // minutes — is never cut; only the connect / first-response phase is capped. 0 disables it.
+  { name: "OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS", env: "OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS",
+    project: ["OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS"], type: "int", default: "30000", zero: 0 },
+
   { name: "OPENAI_BASE_URL", env: "OPENAI_BASE_URL", type: "str",
     default: "https://api.openai.com/v1" },
   // Extra headers sent to the upstream, as comma-separated `Key:Value` pairs. Used for OpenRouter's
@@ -338,6 +348,14 @@ export function buildProviders(config = loadConfig(), keys) {
       keyNames: Array.isArray(p.keyNames) ? p.keyNames : [],
       isOpenAI: !!p.isOpenAI,
       responses: !!p.responses,   // /responses CAPABILITY (explicit) — distinct from the default `api` surface
+      // Context window (tokens), for PROACTIVE size-triggered compaction. `contextWindow` is the per-provider
+      // scalar; `context`/`contextWindows` are optional model->window maps (the managed Ollama already uses
+      // `context`). 0 / absent => the proxy does NOT proactively compact for this provider (reactive 413
+      // compaction still backstops). Looked up by id from this registry, so it need not be threaded through
+      // the trimmed member-provider objects resolvePickedProvider builds.
+      contextWindow: Number(p.contextWindow) || 0,
+      context: p.context || null,
+      contextWindows: p.contextWindows || null,
       loopback: !!p.loopback,     // keyless on-device server — exposed so callers key off the flag, not the id
       managed: p.managed || null, // the launcher's autostart block (engine/port/launch/...), or null
       // Curated model allowlist. When non-empty it is the ONLY set of this provider's models offered to
@@ -395,6 +413,7 @@ const PATHS = {
   OPENAI_CLASSIFIER_MAX_TOOLS: "classifier.maxTools", OPENAI_CLASSIFIER_SLOW_MS: "classifier.slowMs",
   OPENAI_PICKER_MODELS: "picker.models",
   OPENAI_COMPOSITE_MODELS: "composite", OPENAI_COMPOSITE_MAX_WAIT_MS: "compositeMaxWaitMs",
+  OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS: "upstreamHeadersTimeoutMs",
   OPENAI_COMPACT_MODELS: "compact", OPENAI_COMPACT_MODEL: "compaction.model",
   OPENAI_COMPACT_SUMMARY: "compaction.summary", OPENAI_MAX_TEXT_CHARS: "compaction.maxTextChars",
   CLAUDE_CODE_AUTO_COMPACT_WINDOW: "compaction.autoCompactWindow",

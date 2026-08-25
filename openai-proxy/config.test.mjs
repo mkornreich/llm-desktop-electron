@@ -377,6 +377,7 @@ test("every behaviour-affecting setting is part of the hash", () => {
     PROXY_SEND_CHROME_TOOLS: "0", PROXY_SEND_IOS_TOOLS: "0", PROXY_WEB_SEARCH: "0",
     PROXY_WEB_SEARCH_PROXY: "http://p:1",
     OPENAI_COMPOSITE_MODELS: "openai:gpt-5.6-sol,local:qwen3:8b", OPENAI_COMPOSITE_MAX_WAIT_MS: "9999",
+    OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS: "9999",
     OPENAI_COMPACT_MODELS: "groq:openai/gpt-oss-20b,local:qwen3:8b",
   };
   const baseline = configHash({ resolved: resolve({ config: {}, env: {}, project: {}, home: {} }) });
