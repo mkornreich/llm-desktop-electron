@@ -76,7 +76,11 @@
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
-      "responses": false,
+      // Serves BOTH /chat (its default surface) and /responses — the FreeToken engine implements
+      // /responses too (probed live), so it is responses-CAPABLE and thus eligible for the compaction
+      // chain / responses-only pickers. NB: its ~36k-token KV budget only fits SMALL compactions; a big
+      // one overflows and the chain falls over to a cloud member.
+      "responses": true,
       "loopback": true,
       "match": ":1919(/|$)"
     },

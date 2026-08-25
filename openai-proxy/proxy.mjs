@@ -1991,8 +1991,9 @@ function nudgeDeniedToolResult(text, route) {
 // regardless of session length — under freetoken's ~54k budget and fast on every provider. MAIN turns are
 // never touched. Tunable constants; token≈chars/4.
 const CLS_TRANSCRIPT_TRIGGER = 10000;   // tokens: only trim a transcript bigger than this (short ones pass through)
-const CLS_TRANSCRIPT_HEAD    = 3000;    // tokens of the head to keep — the original intent
-const CLS_TRANSCRIPT_TAIL    = 4000;    // tokens of the tail to keep — recent turns + the action being judged
+const CLS_TRANSCRIPT_HEAD    = 2000;    // tokens of the head to keep — the original intent
+const CLS_TRANSCRIPT_TAIL    = 3000;    // tokens of the tail to keep — recent turns + the action being judged
+// head+tail ≈ 5k transcript + ~27k rulebook ≈ 32k total, ~4k under freetoken's ~36k KV budget (memoryRatio 0.72)
 const T2C = (t) => t * 4;
 function trimTranscriptText(text) {
   if (typeof text !== "string") return text;
