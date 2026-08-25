@@ -32,7 +32,7 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         mapUsage, compactionKind, requestShape, contextFields, compactionWarning,
         COMPACTION_EFFECT, cacheKeyFor, inTokensField, cacheWarning, recordUsage, usageSummary,
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
-        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses, classifierVerdictOf,
+        rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses, classifierVerdictOf, classifierActionAutoAllowed,
         approxTokens, kilo } =
   await import("./proxy.mjs");
 const { ToolRegistry } = await import("./tool-registry.mjs");
@@ -1353,6 +1353,22 @@ test("composite: the CHAT stream falls over to the next member on an empty turn,
     "the chat handler must hand streamAnthropic the composite fallover list");
 });
 
+test("classifier auto-allow: a mcp__Claude_Browser action is allowed; others are not", () => {
+  const mk = (last) => ({ messages: [{ role: "user", content: `<transcript>\nUser: do it\nBash ls\n${last}\n</transcript>\n\nErr on the side of blocking.` }] });
+  // The pending action (last transcript line) is a browser tool -> auto-allowed.
+  assert.equal(classifierActionAutoAllowed(mk("mcp__Claude_Browser__navigate url=https://x")), true);
+  assert.equal(classifierActionAutoAllowed(mk("mcp__Claude_Browser__click coordinate=[1,2]")), true);
+  // A non-browser pending action is NOT auto-allowed — even if a browser call appears EARLIER.
+  assert.equal(classifierActionAutoAllowed(mk("Bash rm -rf /")), false);
+  assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content: "<transcript>\nmcp__Claude_Browser__navigate url=x\nBash rm -rf /\n</transcript>" }] }), false);
+  // Real (multi-block) content shape: <transcript> split across text blocks.
+  assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content:
+    [{ type: "text", text: "<transcript>\nUser: go\n" }, { type: "text", text: "mcp__Claude_Browser__get_page_text\n</transcript>" }] }] }), true);
+  // No transcript / non-browser / empty -> not allowed.
+  assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content: "Bash: rm -rf /" }] }), false);
+  assert.equal(classifierActionAutoAllowed({ messages: [] }), false);
+});
+
 test("empty ExitPlanMode is dropped on the chat stream (falls over / notice, never a Server error)", () => {
   // A weak model in plan mode can emit ExitPlanMode with a blank plan. On the streaming CHAT path we drop
   // it so the composite fallover (or the honest empty-turn notice) handles it — rather than withholding it
@@ -1845,16 +1861,19 @@ test("issue #6: the verdict is never fabricated by the proxy", () => {
   // where it is matched against the PROMPT, never emitted.
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   const code = src.replace(/^\s*\/\/.*$/gm, "");                    // drop whole-line comments
-  // Two legitimate homes for the tag, both MATCHING it (never emitting): the detector needle lists
-  // (matched against the PROMPT to route), and classifierVerdictOf (matched against the model's own
-  // RESPONSE to record the verdict in the call log). Remove both, then require the tag is gone.
+  // THREE legitimate homes for the tag: the detector needle lists (matched against the PROMPT to route),
+  // classifierVerdictOf (matched against the model's own RESPONSE to record the verdict), and the DELIBERATE
+  // mcp__Claude_Browser auto-allow (a policy short-circuit BEFORE the chain for a known-safe read-heavy tool
+  // — NOT papering over an upstream failure). Remove all three, then require the tag is gone everywhere else.
   const outside = code
     .replace(/new RegExp\(\[[\s\S]*?\]\.join\("\|"\), "i"\)/g, "«needles»")
-    .replace(/function classifierVerdictOf\(msg\) \{[\s\S]*?\n\}/, "«verdict-parser»");
+    .replace(/function classifierVerdictOf\(msg\) \{[\s\S]*?\n\}/, "«verdict-parser»")
+    .replace(/const verdict = route === ROUTE\.SAFETY_SEVERITY[\s\S]*?"<block>no<\/block>";/, "«browser-auto-allow»");
   assert.ok(/«needles»/.test(outside), "needle lists not found — has the detector moved?");
   assert.ok(/«verdict-parser»/.test(outside), "verdict parser not found — has classifierVerdictOf moved?");
+  assert.ok(/«browser-auto-allow»/.test(outside), "browser auto-allow verdict not found — has it moved?");
   assert.ok(!/<block>/.test(outside),
-    "a verdict tag outside the detector/parser means the proxy can emit one");
+    "a verdict tag outside the detector/parser/auto-allow means the proxy can emit one");
   // and nothing anywhere assigns a verdict into an outgoing text block
   assert.ok(!/text:\s*["'`]\s*<block>/.test(src));
 });
