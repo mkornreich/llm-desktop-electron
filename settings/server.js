@@ -384,30 +384,10 @@ async function handle(req, res) {
       return send(res, 200, { choices });
     }
 
-    // Tool-capable OpenRouter models, for the openrouter picker. Fetches the public models catalog
-    // (no auth), keeps models whose supported_parameters include "tools" (the agent is tool calls
-    // end to end), and flags the free ones (pricing.prompt and .completion both "0"). Free models
-    // are heavily rate-limited and need data-sharing enabled at openrouter.ai/settings/privacy — the
-    // picker help says so. On any network error it returns empty and the field falls back to text.
-    if (url.pathname === "/api/openrouter-models" && req.method === "GET") {
-      let models = [];
-      try {
-        const r = await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(6000) });
-        if (r.ok) {
-          models = ((await r.json()).data || [])
-            .filter((m) => Array.isArray(m.supported_parameters) && m.supported_parameters.includes("tools"))
-            .map((m) => ({
-              id: m.id,
-              name: m.name || m.id,
-              free: !!(m.pricing && m.pricing.prompt === "0" && m.pricing.completion === "0"),
-              context: m.context_length || null,
-            }))
-            // Free first, then alphabetical — the free ones are what the picker is mostly for.
-            .sort((a, b) => (a.free === b.free ? a.id.localeCompare(b.id) : a.free ? -1 : 1));
-        }
-      } catch { /* OpenRouter unreachable -> empty; the field falls back to a text input */ }
-      return send(res, 200, { models });
-    }
+    // (The OpenRouter model picker draws from the providers.openrouter.suggestions allowlist in
+    // config.jsonc — surfaced through the generated OPENROUTER_MODEL field and /api/composite-choices —
+    // NOT a live catalog fetch. The old /api/openrouter-models endpoint dumped the whole ~400-model
+    // catalog and was removed so the allowlist is the single source of truth.)
 
     if (url.pathname === "/api/status" && req.method === "GET")
       return send(res, 200, await status());

@@ -237,9 +237,14 @@ async function fetchProviderCatalog(reg) {
     const r = await fetch(`${reg.baseURL}/models`, { headers: { Authorization: `Bearer ${auth}` }, signal: AbortSignal.timeout(6000) });
     if (!r.ok) { log(`  /v1/models: ${reg.id} catalog HTTP ${r.status}`); return []; }
     const data = (await r.json())?.data || [];
+    // A provider may pin a curated allowlist (config.jsonc providers.<id>.suggestions). When set, it is
+    // the ONLY set of its models we advertise — OpenRouter's ~400-model catalog is otherwise dumped into
+    // the Code-tab picker wholesale, most of it unusable on the key. Empty allowlist -> whole catalog.
+    const allow = Array.isArray(reg.suggestions) && reg.suggestions.length ? new Set(reg.suggestions) : null;
     return data
       .map((m) => String(m.id || "").replace(/^models\//, ""))    // Gemini ids arrive as "models/gemini-…"
-      .filter((id) => id && !NON_CHAT_MODEL_RE.test(id) && !isNonToolModel(id))   // agent needs tools: drop compound et al.
+      .filter((id) => id && !NON_CHAT_MODEL_RE.test(id) && !isNonToolModel(id)   // agent needs tools: drop compound et al.
+        && (!allow || allow.has(id)))                                            // and honor the provider's allowlist
       .map((id) => ({ id: `${reg.id}:${id}`, name: `${reg.label}: ${id}` }));
   } catch (e) { log(`  /v1/models: ${reg.id} catalog fetch failed (${e.message})`); return []; }
 }

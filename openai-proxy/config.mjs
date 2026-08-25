@@ -340,6 +340,11 @@ export function buildProviders(config = loadConfig(), keys) {
       responses: !!p.responses,   // /responses CAPABILITY (explicit) — distinct from the default `api` surface
       loopback: !!p.loopback,     // keyless on-device server — exposed so callers key off the flag, not the id
       managed: p.managed || null, // the launcher's autostart block (engine/port/launch/...), or null
+      // Curated model allowlist. When non-empty it is the ONLY set of this provider's models offered to
+      // the UI — both the Settings pickers (settings/*) and gateway model discovery (GET /v1/models),
+      // which otherwise advertises the provider's WHOLE live catalog. Set for openrouter (its catalog is
+      // ~400 models, most unusable on the key); empty for everyone else, so they still expose everything.
+      suggestions: Array.isArray(p.suggestions) ? p.suggestions : [],
       match: p.match ? new RegExp(p.match, "i") : (p.loopback ? LOOPBACK_RE : hostMatcher(baseURL)),
     };
   }

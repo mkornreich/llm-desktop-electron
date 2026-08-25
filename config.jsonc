@@ -134,12 +134,20 @@
     "openrouter": {
       "endpoint": "https://openrouter.ai/api/v1",
       "api": "responses",
-      "model": "deepseek/deepseek-v3.2",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
       "claudeCodeModel": "claude-opus-4-8[1m]",
       "label": "OpenRouter",
       "keyNames": ["openrouterApiKey","apiKey"],
       "isOpenAI": false,
-      "responses": true
+      "responses": true,
+      // The ONLY OpenRouter models the Settings pickers offer (the "OpenRouter model" field + the
+      // dropdown/composite member pickers, via /api/composite-choices which reads this list). These are
+      // the free models verified usable on this key — tool-calling AND max reasoning, on BOTH the chat
+      // and responses surfaces (2026-xx probe). Paid OpenRouter models are omitted deliberately: this is
+      // a no-credit account, so a real (multi-thousand-token) turn on them 402s. To use paid models, add
+      // credits at openrouter.ai/credits and list them here. Free tier is rate-limited + needs data-
+      // sharing enabled at openrouter.ai/settings/privacy. Ordered best-first.
+      "suggestions": ["nvidia/nemotron-3-ultra-550b-a55b:free","nvidia/nemotron-3-super-120b-a12b:free","nvidia/nemotron-3.5-lightning:free","nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free","cohere/north-mini-code:free","poolside/laguna-xs-2.1:free","poolside/laguna-s-2.1:free","dots-studio/dots-3-note-preview:free","liquid/lfm-2.5-2.6b:free","stealth/ox-alpha","openrouter/free"]
     },
     "nvidia": {"endpoint":"https://integrate.api.nvidia.com/v1","api":"chat","model":"nvidia/llama-3.3-nemotron-super-49b-v1.5","claudeCodeModel":"claude-opus-4-8[1m]",
   "label": "NVIDIA",
@@ -288,7 +296,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","openrouter:deepseek/deepseek-v3.2","openrouter:qwen/qwen3-coder-flash","openrouter:moonshotai/kimi-k2.7-code","openrouter:x-ai/grok-4.6"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b"],
     "gatewayModelDiscovery": true
   },
 

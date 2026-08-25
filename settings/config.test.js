@@ -131,7 +131,7 @@ test("provider groups + DEFAULT_PROVIDER options are generated from config.jsonc
 test("every schema entry is well formed", () => {
   for (const s of SCHEMA) {
     assert.ok(s.file && s.key && s.type && s.label, `incomplete entry: ${s.key}`);
-    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context", "openrouter", "composite", "modelpicker", "classifiermodel"].includes(s.type), `bad type on ${s.key}`);
+    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context", "composite", "modelpicker", "classifiermodel"].includes(s.type), `bad type on ${s.key}`);
     if (s.type === "enum") assert.ok(Array.isArray(s.options) && s.options.length, `enum ${s.key} needs options`);
     assert.ok(s.default !== undefined, `${s.key} needs a default`);
   }

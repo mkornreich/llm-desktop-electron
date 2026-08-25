@@ -126,7 +126,6 @@ window.settings = {
   provenance: ()      => api("/api/provenance?limit=200"),
   relaunch: ()        => api("/api/relaunch", { method: "POST" }),
   ollamaModels: ()    => api("/api/ollama-models"),
-  openrouterModels: () => api("/api/openrouter-models"),
   compositeChoices: () => api("/api/composite-choices"),
   compactChoices: () => api("/api/composite-choices?responses=1"),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
@@ -134,7 +133,7 @@ window.settings = {
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
 let SEARCH = "";   // current search query; filters rows/sections in applySearch(), re-applied after every render
-let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OPENROUTER_MODELS = [], OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [], COMPACT_CHOICES = [];
+let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [], COMPACT_CHOICES = [];
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 // The model's MAXIMUM supported context (from Ollama's model_info) — what the picker snaps the
@@ -216,28 +215,6 @@ function control(s) {
     i.value = DRAFT[s.key] ?? modelCtx(DRAFT.LOCAL_MODEL);
     i.oninput = () => { DRAFT[s.key] = i.value.trim(); refreshDirty(); };
     return i;
-  }
-  if (s.type === "openrouter") {
-    // Model picker: a dropdown of tool-capable OpenRouter models (free ones flagged), plus the
-    // current value so a set-but-unlisted model is not dropped. Falls back to a text field when the
-    // catalog can't be fetched (offline).
-    const cur = DRAFT[s.key] || "";
-    const meta = Object.fromEntries(OPENROUTER_MODELS.map((m) => [m.id, m]));
-    const opts = [...new Set([...(cur ? [cur] : []), ...OPENROUTER_MODELS.map((m) => m.id)])];
-    if (!opts.length) {
-      const i = document.createElement("input"); i.type = "text";
-      i.value = cur; if (s.placeholder) i.placeholder = s.placeholder;
-      i.onchange = () => { DRAFT[s.key] = i.value.trim(); refreshDirty(); };
-      return i;
-    }
-    const sel = document.createElement("select");
-    for (const o of opts) {
-      const op = document.createElement("option"); op.value = o;
-      op.textContent = meta[o]?.free ? `${o}  · free` : o;
-      if (o === cur) op.selected = true; sel.append(op);
-    }
-    sel.onchange = () => { DRAFT[s.key] = sel.value; refreshDirty(); };
-    return sel;
   }
   if (s.type === "composite") {
     // Reorderable member picker. DRAFT[key] is a comma-separated ordered string; each row is a model
@@ -620,10 +597,9 @@ async function load() {
     OLLAMA_MAX_CONTEXT = om.maxContext || {};
     render();
   } catch { /* no Ollama */ }
-  // OpenRouter model catalog — also best-effort; offline just falls the picker back to a text field.
-  try { OPENROUTER_MODELS = (await window.settings.openrouterModels()).models || []; render(); } catch { /* offline */ }
-  // Composite editor choices — model ids aggregated across providers (openai/gemini/cohere suggestions +
-  // live OpenRouter + live Ollama). Best-effort; the picker falls back to free-text rows when it is empty.
+  // Composite editor choices — model ids aggregated across providers (each provider's config.jsonc
+  // suggestions + configured model, incl. OpenRouter's allowlist + live Ollama). Best-effort; the picker
+  // falls back to free-text rows when it is empty.
   try { COMPOSITE_CHOICES = (await window.settings.compositeChoices()).choices || []; render(); } catch { /* offline */ }
   // Responses-only subset, for the compaction chain picker (the summariser calls /responses).
   try { COMPACT_CHOICES = (await window.settings.compactChoices()).choices || []; render(); } catch { /* offline */ }
