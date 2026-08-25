@@ -74,3 +74,15 @@ export function dropRedundantPlanTool(body, { log = () => {} } = {}) {
   log(`  plan mode active — withholding ${PLAN_ENTER} (prevents re-entry loop)`);
   return body;
 }
+
+// Is this a plan-EXIT call carrying no actual plan? An ExitPlanMode with a blank `plan` renders as an
+// EMPTY plan proposal in the app — the caller withholds it (like any unusable tool call) so the turn fails
+// into a real plan instead of proposing nothing. The plan lives in the `plan` arg (a markdown string).
+// Tolerant of schema variants: flag empty only when there is NO meaningful string content in the args, so
+// a real plan is never suppressed. `args` is the parsed, schema-pruned argument object.
+export function planIsEmpty(name, args) {
+  if (name !== PLAN_EXIT) return false;
+  if (!args || typeof args !== "object") return true;
+  if (typeof args.plan === "string") return args.plan.trim().length === 0;   // the canonical field
+  return !Object.values(args).some((v) => typeof v === "string" && v.trim().length > 0);
+}

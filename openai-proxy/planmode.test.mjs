@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planModeActive, dropRedundantPlanTool } from "./planmode.mjs";
+import { planModeActive, dropRedundantPlanTool, planIsEmpty } from "./planmode.mjs";
 
 const TOOLS = () => [
   { name: "Bash" },
@@ -98,4 +98,21 @@ test("logs once when it drops the tool", () => {
   dropRedundantPlanTool(body, { log: (m) => lines.push(m) });
   assert.equal(lines.length, 1);
   assert.match(lines[0], /withholding EnterPlanMode/);
+});
+
+test("planIsEmpty: an ExitPlanMode with a blank plan is empty; a real plan is not", () => {
+  // Empty forms — all should be withheld.
+  assert.equal(planIsEmpty("ExitPlanMode", { plan: "" }), true);
+  assert.equal(planIsEmpty("ExitPlanMode", { plan: "   \n  " }), true);
+  assert.equal(planIsEmpty("ExitPlanMode", {}), true);
+  assert.equal(planIsEmpty("ExitPlanMode", null), true);
+  assert.equal(planIsEmpty("ExitPlanMode", { plan: "" , other: "" }), true);
+  // A real plan of any length passes — never suppress a genuine plan.
+  assert.equal(planIsEmpty("ExitPlanMode", { plan: "1. do the thing" }), false);
+  assert.equal(planIsEmpty("ExitPlanMode", { plan: "x" }), false);
+  // Schema-variant tolerance: no `plan` field but some other non-empty text -> not flagged.
+  assert.equal(planIsEmpty("ExitPlanMode", { content: "the plan" }), false);
+  // Only applies to the plan-exit tool — every other tool passes through untouched.
+  assert.equal(planIsEmpty("Bash", { command: "" }), false);
+  assert.equal(planIsEmpty("Write", {}), false);
 });

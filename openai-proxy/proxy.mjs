@@ -49,7 +49,7 @@ import {
 } from "./content.mjs";
 import { localizePdfsInBody, makePdfExtractor } from "./pdf.mjs";
 import { handleWebSearch } from "./websearch.mjs";
-import { dropRedundantPlanTool } from "./planmode.mjs";
+import { dropRedundantPlanTool, planIsEmpty } from "./planmode.mjs";
 import {
   makeAttempt, Turn, KIND, emptyLedger, applyAttempt, loadLedger, saveLedger, ledgerPath,
   newId as newTurnId,
@@ -1312,7 +1312,12 @@ function pruneByName(registry, name, args) {
 // could not fail, so it always produced something runnable.
 function toolArgs(registry, name, raw) {
   const args = parseToolArguments(raw, { toolName: name, schema: registry?.schema?.(name) });
-  return pruneByName(registry, name, args);
+  const pruned = pruneByName(registry, name, args);
+  // Never emit an EMPTY plan: an ExitPlanMode with a blank plan renders as an empty plan proposal in the
+  // app. Withhold it like any unusable call — the turn fails/retries into a real plan rather than proposing
+  // nothing. (A real plan of any length passes; only a blank/whitespace plan is refused.)
+  if (planIsEmpty(name, pruned)) throw new TranslationError(`${name} was called with an empty plan — refusing to propose an empty plan`);
+  return pruned;
 }
 
 // ---- tool selection ----
