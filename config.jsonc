@@ -174,20 +174,21 @@
   "compositeMaxWaitMs": 30000,
 
   // Compaction summariser chain (responses-capable members only). Empty -> the single "compaction.model".
-  "compact": ["groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "groq:qwen/qwen3.6-27b", "ollama-cloud:deepseek-v4-pro:preview", "ollama-cloud:gpt-oss:120b", "ollama-cloud:gpt-oss:20b", "ollama:gemma4:latest"],
+  "compact": ["groq:openai/gpt-oss-120b","groq:openai/gpt-oss-20b","groq:qwen/qwen3.6-27b","ollama-cloud:gpt-oss:120b","ollama-cloud:gpt-oss:20b"],
 
   // Classifier models. Each runs on the DEFAULT provider unless the value is a routable "<provider>:<model>".
   // safety="" means "use the main model" (measured: 57% unparseable verdicts -> avoid). prefix is the
   // low-stakes Bash-prefix detector. background is the CLI's own hint (may not reach the in-app agent).
   // Each may be a single id OR an ordered FALLOVER CHAIN (an array): the proxy tries members in turn,
-  // falling over on a member's overflow / error to the next — every member judges the FULL transcript
-  // (never shortened), and the verdict fails closed only if ALL members fail. safety below tries the
-  // on-device gemma FIRST (private; ~50s but usually succeeds) and falls over to a big-window cloud
-  // model when gemma overflows or errors (instead of failing closed to manual approval). Put a cloud
-  // model FIRST instead if you want speed on every verdict (each verdict then egresses the transcript).
+  // falling over on a member's overflow / error to the next, and the verdict fails closed only if ALL
+  // members fail. On a classifier route the proxy TRIMS the <transcript> (keeps the rulebook, the original
+  // intent, and the recent turns + the action being judged; elides the middle) so a long session's request
+  // stays ~34k instead of ballooning to ~100k and blowing the CLI's 60s deadline. That trim is what makes
+  // the on-device freetoken (qwen3-1.7b, ~54k budget, ~0.2-1s warm, private) viable FIRST — most verdicts
+  // then never egress the transcript; the cloud models are the fallback when freetoken errors/overflows.
   "classifier": {
     "prefix": "freetoken:qwen3-1.7b",
-    "safety": ["gemini:gemini-3-flash-preview","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","mistral:mistral-large-latest","freetoken:qwen3-1.7b"],
+    "safety": ["freetoken:qwen3-1.7b","gemini:gemini-3-flash-preview","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","mistral:mistral-large-latest","cloudflare:@cf/qwen/qwen3.8-27b"],
     "background": "freetoken:qwen3-1.7b",
     "maxTools": 4,
     "slowMs": 20000,
@@ -296,7 +297,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","openrouter:stealth/ox-alpha","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"],
     "gatewayModelDiscovery": true
   },
 
@@ -318,7 +319,7 @@
     // openai-proxy/classifier-calls.jsonl: route, model, latency (how long the verdict took), input
     // size, and the verdict. The latency is always logged to the proxy log; this adds the per-call
     // record for monitoring. Gitignored (can carry session context). Toggle in Settings.
-    "logClassifier": true
+    "logClassifier": false
   },
 
   "privacy": { "disableTelemetry": true },

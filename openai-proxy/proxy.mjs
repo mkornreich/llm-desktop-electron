@@ -1980,7 +1980,66 @@ function nudgeDeniedToolResult(text, route) {
   return text + ASK_ON_DENIAL_NUDGE;
 }
 
+// --- classifier transcript trim ---
+// The auto-mode SAFETY classifier request is a ~27k-token rulebook (system) + a single user message that
+// flattens the ENTIRE conversation into one <transcript>…</transcript> blob. That blob grows without bound,
+// so on a long session the request hits ~100k tokens and the verdict misses the CLI's 60s deadline — the
+// action is then fail-closed DENIED ("… auto mode cannot determine the safety of <tool>"). The classifier
+// only judges the LAST action in the transcript; it does not need the full history. So on a classifier route
+// we keep the rulebook untouched, keep the HEAD of the transcript (the original user intent) and its TAIL
+// (recent turns + the action being judged — always the last line), and elide the middle. Result: ~34k
+// regardless of session length — under freetoken's ~54k budget and fast on every provider. MAIN turns are
+// never touched. Tunable constants; token≈chars/4.
+const CLS_TRANSCRIPT_TRIGGER = 10000;   // tokens: only trim a transcript bigger than this (short ones pass through)
+const CLS_TRANSCRIPT_HEAD    = 3000;    // tokens of the head to keep — the original intent
+const CLS_TRANSCRIPT_TAIL    = 4000;    // tokens of the tail to keep — recent turns + the action being judged
+const T2C = (t) => t * 4;
+function trimTranscriptText(text) {
+  if (typeof text !== "string") return text;
+  const open = text.indexOf("<transcript>");
+  const close = text.lastIndexOf("</transcript>");
+  if (open === -1 || close === -1 || close <= open) return text;        // no transcript block — leave it
+  const inner = text.slice(open + "<transcript>".length, close);
+  if (inner.length <= T2C(CLS_TRANSCRIPT_TRIGGER)) return text;         // small enough — leave it
+  // Snap both cuts to line boundaries so an action is never sliced in half.
+  let head = inner.slice(0, T2C(CLS_TRANSCRIPT_HEAD));
+  const hEnd = head.lastIndexOf("\n"); if (hEnd > 0) head = head.slice(0, hEnd + 1);
+  let tail = inner.slice(inner.length - T2C(CLS_TRANSCRIPT_TAIL));
+  const tStart = tail.indexOf("\n"); if (tStart >= 0) tail = tail.slice(tStart + 1);
+  const omitted = Math.max(0, inner.length - head.length - tail.length);
+  const elision = `…[${Math.round(omitted / 4)} tokens of earlier actions omitted for classification]…\n`;
+  return text.slice(0, open) + "<transcript>" + head + elision + tail + "</transcript>" + text.slice(close + "</transcript>".length);
+}
+// Return `body` with any oversized <transcript> in a user message trimmed; unchanged (same ref) otherwise.
+// The CLI splits the transcript across MANY text blocks (observed: 147), so <transcript> and </transcript>
+// live in different blocks — we must JOIN the message's text, trim the whole, then collapse to one block.
+function trimClassifierBody(body) {
+  if (!Array.isArray(body?.messages)) return body;
+  let changed = false;
+  const messages = body.messages.map((m) => {
+    if (typeof m.content === "string") {
+      if (!m.content.includes("<transcript>")) return m;
+      const t = trimTranscriptText(m.content);
+      if (t !== m.content) { changed = true; return { ...m, content: t }; }
+      return m;
+    }
+    if (Array.isArray(m.content)) {
+      const textBlocks = m.content.filter((b) => b && b.type === "text" && typeof b.text === "string");
+      const joined = textBlocks.map((b) => b.text).join("");
+      if (!joined.includes("<transcript>")) return m;
+      const t = trimTranscriptText(joined);
+      if (t === joined) return m;                                   // not oversized — leave it whole
+      changed = true;
+      const nonText = m.content.filter((b) => !(b && b.type === "text"));   // classifier turns have none, but be safe
+      return { ...m, content: [{ type: "text", text: t }, ...nonText] };
+    }
+    return m;
+  });
+  return changed ? { ...body, messages } : body;
+}
+
 function toOpenAI(body, model, route = routeForRequest(body)) {
+  if (isClassifier(route)) body = trimClassifierBody(body);   // shrink an oversized <transcript> so the verdict beats the CLI deadline
   const policy = policyFor(route);
   const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no system, no tools
   // Exposure is decided FIRST, because the system message, the tools array and tool_choice all read
@@ -2468,6 +2527,7 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
 // ================= OpenAI Responses API path (for codex / responses-only models) =================
 // Anthropic Messages -> Responses request
 function toResponses(body, model, route = routeForRequest(body)) {
+  if (isClassifier(route)) body = trimClassifierBody(body);   // shrink an oversized <transcript> so the verdict beats the CLI deadline
   const policy = policyFor(route);
   const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no instructions, no tools
   // Decided first, for the same reason as in toOpenAI: instructions, tools and tool_choice all read it.

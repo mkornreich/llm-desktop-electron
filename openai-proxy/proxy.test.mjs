@@ -826,6 +826,44 @@ test("askOnBlock also nudges the denial tool-result itself (point of decision), 
     "a normal tool result is not nudged");
 });
 
+test("classifier transcript trim: oversized <transcript> shrunk on a classifier route, whole on MAIN", () => {
+  const P = { id: "gemini", baseURL: "https://x/v1", isOpenAI: false };
+  const filler = "a\n".repeat(60000);   // ~120k chars of middle history
+  const transcript = `<transcript>\nUser: ORIGINAL_INTENT_MARKER do the task\n${filler}Bash FINAL_ACTION_MARKER\n</transcript>\n\nErr on the side of blocking. begin with <block>.`;
+  const body = { system: "You are a security classifier for Claude Code.", max_tokens: 100,
+    messages: [{ role: "user", content: transcript }] };
+  const userOf = (r) => r.payload.messages.find((m) => m.role === "user").content;
+  const sysOf = (r) => r.payload.messages.find((m) => m.role === "system").content;
+  // On a SAFETY (classifier) route: trimmed, but the head intent + the final action are preserved.
+  const cls = providerALS.run(P, () => toOpenAI(body, "m", ROUTE.SAFETY_BLOCK));
+  assert.ok(userOf(cls).length < transcript.length / 2, "the transcript is substantially trimmed");
+  assert.match(userOf(cls), /ORIGINAL_INTENT_MARKER/, "the original intent (head) is kept");
+  assert.match(userOf(cls), /FINAL_ACTION_MARKER/, "the action being judged (tail) is kept");
+  assert.match(userOf(cls), /omitted for classification/, "the middle is elided with a marker");
+  assert.match(sysOf(cls), /security classifier/, "the rulebook (system) is untouched");
+  // On a MAIN route the same content is left ALONE — never trim an agent turn.
+  assert.equal(userOf(providerALS.run(P, () => toOpenAI(body, "m", ROUTE.MAIN))).length, transcript.length,
+    "a MAIN turn's content is not trimmed");
+  // And on the responses surface, same behaviour.
+  assert.match(JSON.stringify(providerALS.run(P, () => toResponses(body, "m", ROUTE.SAFETY_BLOCK)).payload.input), /omitted for classification/,
+    "the responses encoder trims too");
+  // A small classifier transcript passes through unchanged.
+  const small = { system: "You are a security classifier for Claude Code.", max_tokens: 100,
+    messages: [{ role: "user", content: "<transcript>\nUser: hi\nBash ls\n</transcript>" }] };
+  assert.doesNotMatch(userOf(providerALS.run(P, () => toOpenAI(small, "m", ROUTE.SAFETY_BLOCK))), /omitted for classification/,
+    "a small transcript is not trimmed");
+  // Real shape: the CLI splits the transcript across MANY text blocks, so <transcript> is in the first and
+  // </transcript> in a later one — the trim must join, trim, then collapse to one block.
+  const split = { system: "You are a security classifier for Claude Code.", max_tokens: 100, messages: [{ role: "user", content:
+    [{ type: "text", text: "<transcript>\nUser: ORIGINAL_INTENT_MARKER\n" },
+     ...Array.from({ length: 200 }, () => ({ type: "text", text: "Bash noise\n".repeat(50) })),
+     { type: "text", text: "Bash FINAL_ACTION_MARKER\n</transcript>" }] }] };
+  const splitOut = userOf(providerALS.run(P, () => toOpenAI(split, "m", ROUTE.SAFETY_BLOCK)));
+  assert.match(splitOut, /ORIGINAL_INTENT_MARKER/, "multi-block: head intent kept");
+  assert.match(splitOut, /FINAL_ACTION_MARKER/, "multi-block: final action kept");
+  assert.match(splitOut, /omitted for classification/, "multi-block: middle elided");
+});
+
 // ---------- auto-continue trigger ----------
 
 test("auto-continue fires on announcements the model did not act on", () => {
