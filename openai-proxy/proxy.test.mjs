@@ -1364,6 +1364,13 @@ test("classifier auto-allow: a mcp__Claude_Browser action is allowed; others are
   // Real (multi-block) content shape: <transcript> split across text blocks.
   assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content:
     [{ type: "text", text: "<transcript>\nUser: go\n" }, { type: "text", text: "mcp__Claude_Browser__get_page_text\n</transcript>" }] }] }), true);
+  // javascript_tool / javascript_exec carries MULTI-LINE JS in text= (indented ≥2 spaces). The pending
+  // action's TOOL line is at column 0; the JS lines are indented, so it is still recognised and allowed.
+  assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content:
+    "<transcript>\nUser: inspect\nmcp__Claude_Browser__javascript_tool action=javascript_exec text=\n  const x = document.title;\n  ({ title: x });\n</transcript>\n\nErr on the side of blocking." }] }), true);
+  // A NON-browser action with indented multi-line args is still NOT allowed (its own tool line is col-0).
+  assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content:
+    "<transcript>\nUser: run\nmcp__Claude_Browser__navigate url=x\nBash python3 -c\n  print(1)\n  print(2)\n</transcript>" }] }), false);
   // No transcript / non-browser / empty -> not allowed.
   assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content: "Bash: rm -rf /" }] }), false);
   assert.equal(classifierActionAutoAllowed({ messages: [] }), false);

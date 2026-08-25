@@ -2225,10 +2225,13 @@ function classifierVerdictOf(msg) {
   return text ? "unparsed" : "empty";
 }
 // Tools the auto-mode SAFETY classifier should ALWAYS allow, bypassing the chain. The in-app Claude
-// Browser tools are read-heavy and safe, but the classifier over-blocks / times out on them. When the
-// action being judged is one of these, the verdict is answered "allow" directly. Matched by the tool-name
-// prefix at the START of the transcript's LAST action line (a browser call is one short line, e.g.
-// "mcp__Claude_Browser__navigate url=…"), so a non-browser action is never auto-allowed.
+// Browser tools (including javascript_tool / javascript_exec) are read-heavy and safe, but the classifier
+// over-blocks / times out on them. When the action being judged is one of these, the verdict is answered
+// "allow" directly. Matched by the tool-name prefix on the pending action's TOOL line. That line is the
+// LAST line at COLUMN 0: a transcript action's multi-line args are indented (the JS in a javascript_exec
+// call is indented ≥2 spaces), so only the tool invocation itself sits at column 0. This is what makes a
+// javascript_exec — whose last raw line is JS code, not the tool name — resolve correctly, while a
+// non-browser action is never auto-allowed (its own tool line is the last column-0 line).
 const AUTO_ALLOW_TOOL_RE = /^mcp__Claude_Browser__/;
 export function classifierActionAutoAllowed(body) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
@@ -2243,8 +2246,8 @@ export function classifierActionAutoAllowed(body) {
       const close = text.lastIndexOf("</transcript>");
       region = close > 0 ? text.slice(text.indexOf("<transcript>"), close) : text;
     }
-    const lines = region.split("\n").map((l) => l.trim()).filter(Boolean);
-    return AUTO_ALLOW_TOOL_RE.test(lines[lines.length - 1] || "");
+    const actionLine = region.split("\n").filter((l) => l && !/^\s/.test(l)).pop() || "";
+    return AUTO_ALLOW_TOOL_RE.test(actionLine);
   }
   return false;
 }
