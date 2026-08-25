@@ -1933,24 +1933,26 @@ function appendSafetyReasoningNudge(messages) {
   }
 }
 
-// Auto-mode command approval (classifier.askOnBlock). In the desktop Code tab's "auto" mode the
-// safety classifier auto-DENIES risky tool calls inside the CLI (the agent just gets a "Permission
-// … denied by the Claude Code auto mode classifier" tool result and silently works around it — no
-// popup, because auto mode never consults the app's permission callback). This appends a standing
-// instruction to MAIN-turn system prompts telling the agent to ask the user via AskUserQuestion on
-// such a denial and retry once on approval: the classifier's own User-Intent rule then clears an
-// over-cautious/local block, while a hard block (exfiltration / remote-code-exec) stays denied even
-// after approval — so the loop-guard tells the agent to stop rather than re-ask. A no-op outside
-// auto mode (that denial string never appears there). Reads the flag at call time (no TDZ on CFG).
+// Auto-mode command approval (classifier.askOnBlock). In the desktop Code tab's "auto" mode the safety
+// classifier blocks risky tool calls inside the CLI and the agent silently works around it — no popup,
+// because auto mode never consults the app's permission callback. It blocks in TWO ways: a genuine verdict
+// ("… denied by the Claude Code auto mode classifier") and, more often, a fail-closed TIMEOUT ("… auto mode
+// cannot determine the safety of <tool>") when the verdict misses the CLI's deadline. This appends a
+// standing instruction to MAIN-turn system prompts (and, below, nudges the block tool-result itself)
+// telling the agent to ask the user via AskUserQuestion on either kind of block and retry once on approval:
+// an over-cautious block or transient timeout clears once the user authorizes it, while a hard block
+// (exfiltration / remote-code-exec) stays denied even after approval — so the loop-guard tells the agent to
+// stop rather than re-ask. A no-op outside auto mode. Reads the flag at call time (no TDZ on CFG).
 const ASK_ON_BLOCK_INSTRUCTION =
-  "\n\n[Auto-mode command approval] If a tool result says \"Permission for this action was denied by " +
-  "the Claude Code auto mode classifier\", do NOT silently skip it or work around it. Use the " +
-  "AskUserQuestion tool to ask the user whether to run that exact command — quote the command and the " +
-  "classifier's stated reason, with options \"Yes, run it\" and \"No\". If the user approves, retry the " +
-  "command ONCE: an over-cautious block clears once the user has explicitly authorized it. If it is " +
-  "STILL denied after the user approved, it is a hard safety block (e.g. data exfiltration, or piping a " +
-  "remote script into a shell) that user approval cannot override — tell the user it cannot be run and " +
-  "continue without it. Never ask more than once for the same command.";
+  "\n\n[Auto-mode command approval] If a tool result says the action was blocked by auto mode — either " +
+  "\"denied by the Claude Code auto mode classifier\", or \"auto mode cannot determine the safety of\" it " +
+  "(a classifier timeout) — do NOT silently skip it or work around it. Use the AskUserQuestion tool to ask " +
+  "the user whether to run that exact command — quote the command and the stated reason, with options " +
+  "\"Yes, run it\" and \"No\". If the user approves, retry the command ONCE: an over-cautious block or a " +
+  "transient timeout usually clears once the user has explicitly authorized it. If it is STILL blocked " +
+  "after the user approved, it is a hard safety block (e.g. data exfiltration, or piping a remote script " +
+  "into a shell) that user approval cannot override — tell the user it cannot be run and continue without " +
+  "it. Never ask more than once for the same command.";
 function withAskOnBlock(content, route) {
   if (route !== ROUTE.MAIN || !content || CFG.PROXY_ASK_ON_BLOCK !== true) return content;
   return content + ASK_ON_BLOCK_INSTRUCTION;
@@ -1958,17 +1960,23 @@ function withAskOnBlock(content, route) {
 
 // The stronger half of askOnBlock: the same directive appended to the DENIAL tool-result itself — the
 // text the agent reads immediately before choosing its next action — so the ask is at the point of
-// decision, not just a standing system-prompt rule it can overlook mid-task. Matches the exact string
-// the CLI's auto-mode classifier emits on a block.
-const DENIED_MARKER = "denied by the Claude Code auto mode classifier";
+// decision, not just a standing system-prompt rule it can overlook mid-task. Matches BOTH forms the CLI's
+// auto-mode classifier emits: a genuine safety verdict ("… denied by the Claude Code auto mode classifier")
+// AND a fail-closed TIMEOUT ("… auto mode cannot determine the safety of <tool>", when the verdict misses
+// the CLI's ~60s deadline under load). Recorded sessions showed the timeout form is the MAJORITY of blocks,
+// so the old single-string match left most of them un-nudged.
+const DENIED_MARKER_RE = /denied by the Claude Code auto mode classifier|auto mode cannot determine the safety of/i;
+const NUDGE_SENTINEL = "[SYSTEM — auto-mode block:";   // guard: never append the nudge twice
 const ASK_ON_DENIAL_NUDGE =
   "\n\n[SYSTEM — auto-mode block: the command above was NOT run. Do not silently skip it or work around " +
   "it. Call the AskUserQuestion tool NOW, quoting the exact command, to ask the user whether to run it " +
   "(options \"Yes, run it\" and \"No\"). If they choose Yes, run that same command again — their explicit " +
-  "approval clears an over-cautious block. If it is denied again after they approved, it is a hard safety " +
-  "block that cannot be overridden: tell the user and move on. Never ask more than once for the same command.]";
+  "approval clears an over-cautious block or a transient timeout. If it is blocked again after they " +
+  "approved, it is a hard safety block that cannot be overridden: tell the user and move on. Never ask " +
+  "more than once for the same command.]";
 function nudgeDeniedToolResult(text, route) {
-  if (route !== ROUTE.MAIN || CFG.PROXY_ASK_ON_BLOCK !== true || typeof text !== "string" || !text.includes(DENIED_MARKER)) return text;
+  if (route !== ROUTE.MAIN || CFG.PROXY_ASK_ON_BLOCK !== true || typeof text !== "string") return text;
+  if (!DENIED_MARKER_RE.test(text) || text.includes(NUDGE_SENTINEL)) return text;   // not a block, or already nudged
   return text + ASK_ON_DENIAL_NUDGE;
 }
 

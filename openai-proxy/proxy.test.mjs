@@ -805,6 +805,19 @@ test("askOnBlock also nudges the denial tool-result itself (point of decision), 
   const toolMsg = providerALS.run(P, () => toOpenAI(denied, "m")).payload.messages.find((m) => m.role === "tool");
   assert.match(toolMsg.content, re, "the denial tool-result is nudged (chat)");
   assert.match(JSON.stringify(providerALS.run(P, () => toResponses(denied, "m")).payload.input), re, "and on the responses surface");
+  // The classifier-TIMEOUT form ("cannot determine the safety of") is a block too — the majority of them,
+  // in fact — so it is nudged as well, not just the exact "denied by …" verdict.
+  const timedOut = { system: "You are a coding agent.", max_tokens: 100, messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "t3", name: "Bash", input: { command: "pip install foo" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t3", content: "qwen3-1.7b is temporarily unavailable, so auto mode cannot determine the safety of Bash." }] } ] };
+  assert.match(providerALS.run(P, () => toOpenAI(timedOut, "m")).payload.messages.find((m) => m.role === "tool").content, re,
+    "a classifier-timeout block is nudged too");
+  // Idempotent: a result that already carries the nudge is not nudged again.
+  const already = { system: "You are a coding agent.", max_tokens: 100, messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "t4", name: "Bash", input: { command: "x" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t4", content: "auto mode cannot determine the safety of Bash.\n\n[SYSTEM — auto-mode block: … Call the AskUserQuestion tool NOW …]" }] } ] };
+  const alreadyMsg = providerALS.run(P, () => toOpenAI(already, "m")).payload.messages.find((m) => m.role === "tool").content;
+  assert.equal((alreadyMsg.match(/Call the AskUserQuestion tool NOW/g) || []).length, 1, "the nudge is not appended twice");
   // An ordinary (non-denial) tool result is left alone.
   const okBody = { system: "You are a coding agent.", max_tokens: 100, messages: [
     { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: "ls" } }] },
