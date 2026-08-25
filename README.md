@@ -202,6 +202,13 @@ its unpacked `app.asar` under a stock Electron runtime, with the proxy wired int
 layer, a provider switch, and a settings GUI over the launcher's config. Runs on **Linux and
 macOS**.
 
+![Claude Desktop Code tab with the multi-provider model picker](docs/images/code-tab-model-picker.png)
+
+*The desktop build's Code tab. The model picker lists **Composite** (the cross-provider fallback
+chain) plus every keyed provider's models as `provider:model` — Gemini, Mistral, nvidia,
+ollama-cloud, llm7, freetoken, cloudflare — each routing that turn to its own upstream through the
+proxy; the local usage dashboard summarises agent activity.*
+
 ### Supplying the bundle
 
 `app/` **is** committed in this repository — Anthropic's code — and that is exactly why it is
@@ -418,6 +425,7 @@ Delete `user-data/`.
 | [ANTHROPIC_ENDPOINTS.md](docs/ANTHROPIC_ENDPOINTS.md) | Every Anthropic endpoint the app calls, with payloads and what each is for |
 | [FINDINGS.md](docs/FINDINGS.md) | Notable things in the bundle — permission modes, the extension registry, companion-hardware pairing, the auto-approved tool list |
 | [LINUX.md](docs/LINUX.md) | The Linux port: native-module harvest, folded-conditional blockers, and what degrades off macOS |
+| [OPENROUTER.md](docs/OPENROUTER.md) | The OpenRouter provider: catalog analysis on a free-tier key, the 11-model free allowlist, quality/speed ordering, and how the allowlist gates the pickers and gateway discovery |
 
 ## Contributing back
 
