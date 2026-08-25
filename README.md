@@ -6,6 +6,13 @@ own GPU**, or stock **Anthropic** — by translating between the Anthropic and O
 locally. The chat window is always the real claude.ai web app; only the agent sub-layer
 (Claude Code) is repointed.
 
+![Claude Desktop Code tab with the multi-provider model picker](docs/images/code-tab-model-picker.png)
+
+*The desktop build's Code tab. The model picker lists **Composite** (the cross-provider fallback
+chain) plus every keyed provider's models as `provider:model` — Gemini, Mistral, nvidia,
+ollama-cloud, llm7, freetoken, cloudflare — each routing that turn to its own upstream through the
+proxy; the local usage dashboard summarises agent activity.*
+
 Two independent things live here, and **you may only want the first**:
 
 | | What it is | What you need |
@@ -201,13 +208,6 @@ Runs Anthropic's Claude Desktop (`@ant/desktop` v1.24012.9, an Electron Forge + 
 its unpacked `app.asar` under a stock Electron runtime, with the proxy wired into the agent
 layer, a provider switch, and a settings GUI over the launcher's config. Runs on **Linux and
 macOS**.
-
-![Claude Desktop Code tab with the multi-provider model picker](docs/images/code-tab-model-picker.png)
-
-*The desktop build's Code tab. The model picker lists **Composite** (the cross-provider fallback
-chain) plus every keyed provider's models as `provider:model` — Gemini, Mistral, nvidia,
-ollama-cloud, llm7, freetoken, cloudflare — each routing that turn to its own upstream through the
-proxy; the local usage dashboard summarises agent activity.*
 
 ### Supplying the bundle
 
