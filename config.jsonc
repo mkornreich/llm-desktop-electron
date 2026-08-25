@@ -67,10 +67,12 @@
       // nudge the proxy adds to safety requests — its snap verdicts over-block, its reasoned ones are right).
       // kvDtype=fp8_e4m3 halves KV bytes/token (--kv-dtype; needs the local FreeToken build's flag),
       // doubling the token budget to ~54k so the full ~55k transcript fits on the 8GB card. GPU-fit knobs:
-      // maxRunningRequests=1 (one verdict at a time), cudaGraphMaxBs=1, memoryRatio=0.85. reasoningParser
+      // maxRunningRequests=1 (one verdict at a time), cudaGraphMaxBs=1, memoryRatio=0.72 (leaves activation
+      // headroom for the 24k-rulebook prefill — 0.85 left only ~0.8GB free and the worker OOM-crashed when
+      // the desktop app was also using the GPU). reasoningParser
       // qwen3 separates the <think> reasoning from the <block> verdict. Full attention => no SWA pool, so
       // the swaFullTokensRatio/numPages/numSwaPages knobs are gone.
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3-1.7b", "reasoningParser": "qwen3", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.85, "kvDtype": "fp8_e4m3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3-1.7b", "reasoningParser": "qwen3", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.72, "kvDtype": "fp8_e4m3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
@@ -177,10 +179,18 @@
   // model FIRST instead if you want speed on every verdict (each verdict then egresses the transcript).
   "classifier": {
     "prefix": "freetoken:qwen3-1.7b",
-    "safety": ["freetoken:qwen3-1.7b", "gemini:gemini-3-flash-preview"],
+    "safety": ["gemini:gemini-3-flash-preview","nvidia:nvidia/llama-3.3-nemotron-super-49b-v1.5","mistral:mistral-large-latest","freetoken:qwen3-1.7b"],
     "background": "freetoken:qwen3-1.7b",
     "maxTools": 4,
-    "slowMs": 20000
+    "slowMs": 20000,
+    // Auto-mode command approval: in the Code tab's auto mode the classifier auto-DENIES risky tool
+    // calls inside the CLI and the agent silently works around them (no popup — auto mode bypasses the
+    // app's permission callback). With this on, the proxy appends an instruction to MAIN-turn system
+    // prompts telling the agent to ask via AskUserQuestion on such a denial and retry once on approval;
+    // the classifier's own User-Intent rule then clears an over-cautious/local block (e.g. rm -rf of the
+    // user's own files) while a hard block (exfiltration / remote-code-exec) stays denied even after
+    // approval. No-op outside auto mode. Toggle in Settings.
+    "askOnBlock": true
   },
 
   // Reasoning. effort is the API-wide max the proxy steps DOWN from per model. minBudget: thinking is

@@ -778,6 +778,41 @@ test("a local on-device safety classifier is nudged to reason first; remote/non-
   assert.doesNotMatch(lastUser(mainLocal), /work through the rulebook's evaluation steps/, "only safety routes are nudged");
 });
 
+test("askOnBlock appends the auto-mode approval instruction to MAIN turns only (both encoders)", () => {
+  // classifier.askOnBlock is true in config.jsonc, so CFG.PROXY_ASK_ON_BLOCK is on here.
+  const P = { id: "gemini", baseURL: "https://x/v1", isOpenAI: false };
+  const re = /Auto-mode command approval/;
+  const mainBody = { system: "You are a helpful coding assistant.", messages: [{ role: "user", content: "hi" }], max_tokens: 100 };
+  const sysOf = (r) => r.payload.messages.find((m) => m.role === "system").content;
+  // MAIN turn, chat encoder -> instruction present.
+  assert.match(sysOf(providerALS.run(P, () => toOpenAI(mainBody, "gemini-3-flash-preview"))), re,
+    "a MAIN turn gets the ask-on-block instruction");
+  // MAIN turn, responses encoder -> present in instructions.
+  assert.match(providerALS.run(P, () => toResponses(mainBody, "gemini-3-flash-preview")).payload.instructions, re,
+    "the responses encoder also appends it");
+  // A classifier (safety) turn is not a MAIN route -> no instruction.
+  const clsBody = { system: AUTO_MODE_SYS, messages: [{ role: "user", content: "Bash: rm -rf /" }], max_tokens: 100 };
+  assert.doesNotMatch(sysOf(providerALS.run(P, () => toOpenAI(clsBody, "gemini-3-flash-preview"))), re,
+    "a classifier turn is not appended");
+});
+
+test("askOnBlock also nudges the denial tool-result itself (point of decision), only for denials", () => {
+  const P = { id: "gemini", baseURL: "https://x/v1", isOpenAI: false };
+  const re = /Call the AskUserQuestion tool NOW/;
+  const denied = { system: "You are a coding agent.", max_tokens: 100, messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "pip install foo" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "Permission for this action was denied by the Claude Code auto mode classifier. Reason: x." }] } ] };
+  const toolMsg = providerALS.run(P, () => toOpenAI(denied, "m")).payload.messages.find((m) => m.role === "tool");
+  assert.match(toolMsg.content, re, "the denial tool-result is nudged (chat)");
+  assert.match(JSON.stringify(providerALS.run(P, () => toResponses(denied, "m")).payload.input), re, "and on the responses surface");
+  // An ordinary (non-denial) tool result is left alone.
+  const okBody = { system: "You are a coding agent.", max_tokens: 100, messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: "ls" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "file1 file2" }] } ] };
+  assert.doesNotMatch(providerALS.run(P, () => toOpenAI(okBody, "m")).payload.messages.find((m) => m.role === "tool").content, re,
+    "a normal tool result is not nudged");
+});
+
 // ---------- auto-continue trigger ----------
 
 test("auto-continue fires on announcements the model did not act on", () => {
@@ -1232,6 +1267,39 @@ test("issue #1: both response paths substitute the notice", () => {
   // The abort path must return, or it would fall through into the normal accounting below it.
   assert.match(src, /sse\(res, "message_stop", \{ type: "message_stop" \}\);\s*\n\s*res\.end\(\);\s*\n\s*return;/,
     "the transport-abort terminal must return rather than fall through");
+});
+
+test("composite: the CHAT stream falls over to the next member on an empty turn, like the responses stream", () => {
+  // The bug: a composite CHAT member (cohere/command-a and friends) that returns status=completed with
+  // output_tokens=0 produced a dead turn — streamAnthropic had no fallover, so the empty completion was
+  // handed straight back ("model returned no content ... nothing ran"). The responses stream already
+  // fell over to the next member; the chat stream must too. These assert the parity structurally.
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("async function streamAnthropic"),
+                       src.indexOf("// ================= OpenAI Responses API path"));
+  assert.ok(fn, "streamAnthropic must exist");
+  // It must accept the remaining same-surface members and the payload to re-issue with.
+  assert.match(fn, /async function streamAnthropic\([^)]*payload = null, fallover = \[\]\)/,
+    "streamAnthropic must take (…, payload, fallover)");
+  // The fallover loop: only fires with members left AND a genuinely empty turn (no text block opened,
+  // no tool call started). A truncation is a real answer, so it is NOT retried.
+  assert.match(fn, /while \(fallover\.length && textIndex === null && toolBlocks\.size === 0 && finish !== "length" && finish !== "content_filter"\)/,
+    "the chat fallover must guard on an empty (non-truncated) turn with members remaining");
+  assert.match(fn, /const next = fallover\.shift\(\);/, "it must advance through the members in order");
+  assert.match(fn, /providerALS\.enterWith\(next\.provider\);/, "each member is tried in its own provider context");
+  assert.match(fn, /await callOpenAI\(\{ \.\.\.payload, model: next\.model \}\)/, "the next member is called on the chat surface");
+  // Accounting parity: every drained upstream response records its own usage (issue #8's lesson — a
+  // retried turn must not lose every attempt but the last). One recordUsage per drain, none at the end.
+  const drains = (fn.match(/await drain\(/g) || []).length;
+  const records = (fn.match(/recordUsage\([^,]+, usage\?\.prompt_tokens/g) || []).length;
+  assert.equal(records, drains, `every drain() must record its member's usage: ${drains} drains, ${records} records`);
+  assert.ok(drains >= 2, "first member + at least one fallover member");
+  // The empty notice is still the final fallback: if EVERY member comes back empty, the turn is honest.
+  assert.match(fn, /if \(textIndex === null && emittedTools === 0 && !withheld\) \{/,
+    "an all-members-empty turn still emits the honest empty-turn notice");
+  // And the call site must actually pass the fallover list through (not an empty default).
+  assert.match(src, /await streamAnthropic\(res, upstream, reqModel, registry, model, route, modelNote, payload, got\.fallover \|\| \[\]\)/,
+    "the chat handler must hand streamAnthropic the composite fallover list");
 });
 
 test("issue #1: verbosity is sent and configurable", () => {

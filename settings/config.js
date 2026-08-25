@@ -233,6 +233,11 @@ const SCHEMA = [
     label: "Ultracode by default",
     help: "When on, EVERY Code-tab session starts in ultracode — xhigh effort plus standing dynamic-workflow orchestration on every turn, without typing the 'ultracode' keyword. (The composer has no ultracode toggle — that UI is served remotely by claude.ai — so this Settings switch is how you turn it on.) Requires an xhigh-capable model and workflows enabled; restart the app to apply." },
 
+  { group: "Code mode", file: ".diagnostics", key: "PROXY_ASK_ON_BLOCK", type: "bool",
+    default: "1",
+    label: "Ask to run auto-mode-blocked commands",
+    help: "In the Code tab's auto mode the safety classifier auto-DENIES risky commands inside the CLI and the agent silently works around them (no popup — auto mode never consults the app's permission dialog). When on, the proxy tells the agent to ASK you (via a question prompt) whether to run a blocked command, and to retry once if you approve. Your explicit approval clears an over-cautious or local block (e.g. removing your own files); a hard safety block (data exfiltration, or piping a remote script into a shell) stays blocked even if you approve. No effect outside auto mode. Restart the app to apply." },
+
   // The Code-tab model dropdown list. An ordered reorderable list of <provider>:<model> ids injected into
   // the picker (run.sh -> LLMD_DROPDOWN_MODELS -> the renderer-unlock preload). Empty = a short built-in
   // default. Reuses the reorderable "composite" widget + /api/composite-choices.
@@ -287,7 +292,7 @@ const PATHS = {
   PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
   DISABLE_TELEMETRY: "privacy.disableTelemetry",
   SYNC_CLAUDE_SESSIONS: "sync.sessions", SYNC_CLAUDE_GROUPING: "sync.grouping",
-  DESKTOP_LOG_LEVEL: "diagnostics.logLevel", PROXY_DUMP_TOOLS: "diagnostics.dumpTools", PROXY_RECORD_SESSION: "diagnostics.recordSession", PROXY_LOG_CLASSIFIER: "diagnostics.logClassifier", ULTRACODE_DEFAULT: "diagnostics.ultracode",
+  DESKTOP_LOG_LEVEL: "diagnostics.logLevel", PROXY_DUMP_TOOLS: "diagnostics.dumpTools", PROXY_RECORD_SESSION: "diagnostics.recordSession", PROXY_LOG_CLASSIFIER: "diagnostics.logClassifier", PROXY_ASK_ON_BLOCK: "classifier.askOnBlock", ULTRACODE_DEFAULT: "diagnostics.ultracode",
 };
 const getPath = (o, dot) => String(dot).split(".").reduce((x, k) => (x == null ? undefined : x[k]), o);
 const isArrayType = (t) => t === "composite";   // composite/compact/dropdown are JSON arrays; every other type is a scalar

@@ -39,27 +39,30 @@ for pid in $(pgrep -f "ft serve" 2>/dev/null || true); do
   echo "[gpu-unload] stopping stray ft serve (pid $pid + group)"; gkill "$pid"
 done
 
-# 3. Ollama — evict every resident model from VRAM (keeps the daemon), then stop the instance we own.
+# 3. Ollama — unload every resident model from VRAM with `ollama stop` (the loaded model, not the
+#    daemon, is what holds the GPU). Ollama typically runs as a systemd service owned by another
+#    user, so we do NOT kill the daemon — we just evict its models. Covers the default host and, if
+#    we launched a managed instance, its own port (config default 11435).
 if command -v ollama >/dev/null 2>&1; then
   ollama ps 2>/dev/null | awk 'NR>1 && $1!="" {print $1}' | while read -r m; do
     echo "[gpu-unload] ollama stop $m"; ollama stop "$m" 2>/dev/null || true
   done
-fi
-if [ -r user-data/ollama-managed ]; then
-  opid="$(awk '{print $1}' user-data/ollama-managed 2>/dev/null || true)"
-  if [ -n "${opid:-}" ] && kill -0 "$opid" 2>/dev/null; then
-    echo "[gpu-unload] stopping managed Ollama (pid $opid + group)"; gkill "$opid"; rm -f user-data/ollama-managed
+  if [ -r user-data/ollama-managed ]; then
+    OLLAMA_HOST=127.0.0.1:11435 ollama ps 2>/dev/null | awk 'NR>1 && $1!="" {print $1}' | while read -r m; do
+      echo "[gpu-unload] ollama stop $m (managed :11435)"; OLLAMA_HOST=127.0.0.1:11435 ollama stop "$m" 2>/dev/null || true
+    done
   fi
 fi
 
 sleep 2
 
-# 4. Safety sweep: kill any process STILL holding GPU compute memory whose cmdline is a
-#    freetoken/ollama worker (orphaned TP scheduler / spawn worker). Others are left alone.
+# 4. Safety sweep: kill any process STILL holding GPU compute memory whose cmdline is a FreeToken
+#    worker (orphaned TP scheduler / spawn worker). Ollama is handled above via `ollama stop` (its
+#    daemon runs as another user and isn't ours to kill), so it is not swept here.
 for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null || true); do
   cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
   case "$cmd" in
-    *freetoken*|*"/ft "*|*ollama*)
+    *freetoken*|*"/ft "*)
       echo "[gpu-unload] killing GPU-resident inference worker (pid $pid)"; kill -KILL "$pid" 2>/dev/null || true;;
   esac
 done

@@ -1928,6 +1928,45 @@ function appendSafetyReasoningNudge(messages) {
   }
 }
 
+// Auto-mode command approval (classifier.askOnBlock). In the desktop Code tab's "auto" mode the
+// safety classifier auto-DENIES risky tool calls inside the CLI (the agent just gets a "Permission
+// … denied by the Claude Code auto mode classifier" tool result and silently works around it — no
+// popup, because auto mode never consults the app's permission callback). This appends a standing
+// instruction to MAIN-turn system prompts telling the agent to ask the user via AskUserQuestion on
+// such a denial and retry once on approval: the classifier's own User-Intent rule then clears an
+// over-cautious/local block, while a hard block (exfiltration / remote-code-exec) stays denied even
+// after approval — so the loop-guard tells the agent to stop rather than re-ask. A no-op outside
+// auto mode (that denial string never appears there). Reads the flag at call time (no TDZ on CFG).
+const ASK_ON_BLOCK_INSTRUCTION =
+  "\n\n[Auto-mode command approval] If a tool result says \"Permission for this action was denied by " +
+  "the Claude Code auto mode classifier\", do NOT silently skip it or work around it. Use the " +
+  "AskUserQuestion tool to ask the user whether to run that exact command — quote the command and the " +
+  "classifier's stated reason, with options \"Yes, run it\" and \"No\". If the user approves, retry the " +
+  "command ONCE: an over-cautious block clears once the user has explicitly authorized it. If it is " +
+  "STILL denied after the user approved, it is a hard safety block (e.g. data exfiltration, or piping a " +
+  "remote script into a shell) that user approval cannot override — tell the user it cannot be run and " +
+  "continue without it. Never ask more than once for the same command.";
+function withAskOnBlock(content, route) {
+  if (route !== ROUTE.MAIN || !content || CFG.PROXY_ASK_ON_BLOCK !== true) return content;
+  return content + ASK_ON_BLOCK_INSTRUCTION;
+}
+
+// The stronger half of askOnBlock: the same directive appended to the DENIAL tool-result itself — the
+// text the agent reads immediately before choosing its next action — so the ask is at the point of
+// decision, not just a standing system-prompt rule it can overlook mid-task. Matches the exact string
+// the CLI's auto-mode classifier emits on a block.
+const DENIED_MARKER = "denied by the Claude Code auto mode classifier";
+const ASK_ON_DENIAL_NUDGE =
+  "\n\n[SYSTEM — auto-mode block: the command above was NOT run. Do not silently skip it or work around " +
+  "it. Call the AskUserQuestion tool NOW, quoting the exact command, to ask the user whether to run it " +
+  "(options \"Yes, run it\" and \"No\"). If they choose Yes, run that same command again — their explicit " +
+  "approval clears an over-cautious block. If it is denied again after they approved, it is a hard safety " +
+  "block that cannot be overridden: tell the user and move on. Never ask more than once for the same command.]";
+function nudgeDeniedToolResult(text, route) {
+  if (route !== ROUTE.MAIN || CFG.PROXY_ASK_ON_BLOCK !== true || typeof text !== "string" || !text.includes(DENIED_MARKER)) return text;
+  return text + ASK_ON_DENIAL_NUDGE;
+}
+
 function toOpenAI(body, model, route = routeForRequest(body)) {
   const policy = policyFor(route);
   const bare = BARE_MODE && route === ROUTE.MAIN;   // send only the messages: no system, no tools
@@ -1952,7 +1991,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
     // Hints are built from the EXPOSED tools, not from the client's full list. Naming a tool the
     // model cannot see is an instruction it cannot follow — latent until a policy hides something,
     // which is exactly what the exposure policy now does.
-    if (sys) messages.push({ role: "system", content: withFormatHint(nameRealModel(sys, curProvider().id, model, body.model === COMPOSITE_ID), policy.hints, exposedTools) });
+    if (sys) messages.push({ role: "system", content: withAskOnBlock(withFormatHint(nameRealModel(sys, curProvider().id, model, body.model === COMPOSITE_ID), policy.hints, exposedTools), route) });
   }
   for (const m of body.messages || []) {
     const content = m.content;
@@ -1972,7 +2011,7 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
       }
       else if (blk.type === "tool_result") {
         const { text, media } = decodeToolResult(blk);
-        const resultText = stripModelNoteAnywhere(text);   // a fed-back summary can carry our own note
+        const resultText = nudgeDeniedToolResult(stripModelNoteAnywhere(text), route);   // a fed-back summary can carry our own note
         toolResults.push({ tool_call_id: blk.tool_use_id,
                            content: blk.is_error ? `[tool error] ${resultText}` : resultText });
         // A tool-role message cannot carry media on this surface either, so it follows as a companion
@@ -2254,7 +2293,7 @@ function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.string
 // `model` is the OpenAI model that actually answered, which is what the usage ledger must be
 // keyed on. They differ on every request (claude-opus-4-8 vs gpt-5.6-sol), and this path used
 // to file its usage under the client's name — the only one of the four that did.
-async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel, route = ROUTE.MAIN, modelNote = null) {
+async function streamAnthropic(res, upstream, reqModel, registry, model = reqModel, route = ROUTE.MAIN, modelNote = null, payload = null, fallover = []) {
   const msgId = rid("msg_");
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   sse(res, "message_start", { type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: reqModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
@@ -2285,10 +2324,14 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     return textIndex;
   };
 
-  const reader = upstream.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
+  // The upstream read loop, factored so it can be re-run for a composite fallover member (below).
+  // NOT named consume(): that token is the responses path's per-attempt accounting idiom (consume →
+  // totalOutTokens += → recordAttempt). The chat path accounts differently (recordUsage per drain).
+  async function drain(up) {
+    const reader = up.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
@@ -2330,6 +2373,33 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
       }
     }
   }
+  }
+  await drain(upstream);
+  recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
+              usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
+  // Composite MID-STREAM fallover on the CHAT surface: mirrors the responses path. If the member
+  // produced NO answer (no text, no tool call) and same-surface composite members remain, try them in
+  // order into this same open message until one answers. Inert (loop skipped) for a non-composite turn
+  // (empty fallover list). Skipped for a truncation (finish "length"/"content_filter") — that IS the answer.
+  while (fallover.length && textIndex === null && toolBlocks.size === 0 && finish !== "length" && finish !== "content_filter") {
+    const next = fallover.shift();
+    log(`  -> no answer streamed; composite falling over to ${next.provider.id}:${next.model}`);
+    noteCompositeModel(`${next.provider.id}:${next.model}`, Date.now(), log, "composite");
+    if (modelNote) {
+      const nIdx = nextIndex++;
+      sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "text", text: "" } });
+      sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: `composite → ${next.provider.id}:${next.model}` } });
+      sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
+    }
+    providerALS.enterWith(next.provider);
+    let up;
+    try { up = await callOpenAI({ ...payload, model: next.model }); } catch (e) { log(`  -> chat fallover fetch failed: ${e.message}`); continue; }
+    if (!up.ok) { log(`  -> chat fallover to ${next.provider.id}:${next.model} got ${up.status}`); continue; }
+    finish = null; usage = null;
+    await drain(up);
+    recordUsage(next.model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
+                usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
+  }
   if (textIndex !== null) {
     const tail = mathFix.flush(); // emit any held-back partial delimiter
     if (tail) sse(res, "content_block_delta", { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: tail } });
@@ -2365,8 +2435,8 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
     sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: notice } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
   }
-  recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
-              usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
+  // Usage is recorded per drained upstream response (once for the first member, once per fallover
+  // member) above — not here — so a fallover turn counts every member's tokens, not just the last.
   // input_tokens goes in the FINAL delta, not message_start: at message_start the upstream has
   // not reported usage yet, and a placeholder there would be double counted by any client that
   // sums the two events. 0 + the truth is the truth either way.
@@ -2418,7 +2488,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
         toolCalls.push({ type: "function_call", call_id: blk.id, name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) });
       else if (blk.type === "tool_result") {
         const { text, media } = decodeToolResult(blk);
-        const resultText = stripModelNoteAnywhere(text);   // a fed-back summary can carry our own note
+        const resultText = nudgeDeniedToolResult(stripModelNoteAnywhere(text), route);   // a fed-back summary can carry our own note
         toolResults.push({ type: "function_call_output", call_id: blk.tool_use_id,
                            output: blk.is_error ? `[tool error] ${resultText}` : resultText });
         // A function_call_output takes a string, so media cannot live there. The text stays PAIRED
@@ -2470,7 +2540,7 @@ function toResponses(body, model, route = routeForRequest(body)) {
   // an OpenAI-proprietary Responses field — other OpenAI-compatible /responses upstreams reject it (Groq
   // 400s: `unknown field verbosity`), so gate it on the same isOpenAI flag as prompt_cache_key.
   if (VERBOSITY && policy.verbosity && curProvider().isOpenAI) out.text = { ...(out.text || {}), verbosity: VERBOSITY };
-  if (!bare && body.system) out.instructions = withFormatHint(nameRealModel(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, curProvider().id, model, body.model === COMPOSITE_ID), policy.hints, exposedTools);
+  if (!bare && body.system) out.instructions = withAskOnBlock(withFormatHint(nameRealModel(Array.isArray(body.system) ? body.system.map((b) => b.text || "").join("\n") : body.system, curProvider().id, model, body.model === COMPOSITE_ID), policy.hints, exposedTools), route);
   // Responses tools are flat: {type,name,description,parameters}
   if (exposedTools.length) {
     out.tools = exposedTools.map((t) => ({
@@ -3861,7 +3931,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Chat post-ok — the winning member's upstream/payload/registry/model come from `got` above.
-    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model, route, modelNote); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
+    if (payload.stream) { try { await streamAnthropic(res, upstream, reqModel, registry, model, route, modelNote, payload, got.fallover || []); } catch (e) { log("stream error:", e.message); try { res.end(); } catch {} } return; }
     const oai = await upstream.json();
     recordUsage(model, oai?.usage?.prompt_tokens, oai?.usage?.completion_tokens,
                 oai?.usage?.completion_tokens_details?.reasoning_tokens,
