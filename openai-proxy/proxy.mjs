@@ -1028,12 +1028,12 @@ function emptyTurnNotice(resp) {
 // the responses path already gives. Without this the chat path rendered an empty turn as a blank (or,
 // with the model note prepended, as a note-only turn) — and a note-only turn becomes an empty assistant
 // message in the next request, which every upstream 400s, taking a whole composite chain down with it.
-function chatEmptyNotice(finish, usage) {
+function chatEmptyNotice(finish, usage, retries = 0) {
   const status = finish === "length" || finish === "content_filter" ? "incomplete"
     : finish ? "completed" : "no terminal event";
   const incomplete_details = finish === "length" ? { reason: "max_output_tokens" }
     : finish === "content_filter" ? { reason: "content_filter" } : undefined;
-  return emptyTurnNotice({ status, incomplete_details, usage: { output_tokens: usage?.completion_tokens } });
+  return emptyTurnNotice({ status, incomplete_details, usage: { output_tokens: usage?.completion_tokens }, retries });
 }
 
 // ---- automatic compaction (github issue #4) ----
@@ -2514,6 +2514,32 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
   recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
               usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
   dropEmptyPlan();
+  // Empty-turn retry on the CHAT surface (mirrors the responses path, which had this but chat did not).
+  // A turn that ended with no text and no tool call — most often a transport drop that closed the stream
+  // with NO terminal event ("status=no terminal event", the retries=0 empty notice the chat path used to
+  // surface directly) — is RESENT, because sending it again usually works. Runs BEFORE composite fallover
+  // so a transient blip on the chosen member is retried before abandoning it for a different model. Gated
+  // on textIndex===null (nothing was streamed to the client yet — text streams live here, so a retry can
+  // never duplicate visible output) via shouldRetryEmpty's textLen check. shouldRetryEmpty also vetoes a
+  // content-filter turn and a truncation-with-content, which the fallover loop below likewise skips.
+  let emptyRetries = 0;
+  while (payload && shouldRetryEmpty({ enabled: EMPTY_RETRY, allowContinue: route === ROUTE.MAIN,
+                                       hasTool: toolBlocks.size > 0, textLen: textIndex === null ? 0 : 1,
+                                       refusalText: null, streamError: null,
+                                       incomplete: finish === "length" || finish === "content_filter",
+                                       incompleteReason: finish === "length" ? "max_output_tokens" : null,
+                                       retries: emptyRetries, maxRetries: MAX_EMPTY_RETRIES })) {
+    emptyRetries++;
+    log(`  -> empty turn, retry ${emptyRetries}/${MAX_EMPTY_RETRIES} (chat; terminal=${finish || "none"})`);
+    let up;
+    try { up = await callOpenAI(payload); } catch (e) { log(`  -> empty-turn retry fetch failed: ${e.message}`); break; }
+    if (!up.ok) { log(`  -> empty-turn retry got ${up.status}; giving up on the retry`); break; }
+    finish = null; usage = null;
+    await drain(up);
+    recordUsage(model, usage?.prompt_tokens, usage?.completion_tokens, usage?.completion_tokens_details?.reasoning_tokens,
+                usage?.prompt_tokens_details?.cached_tokens, { route, surface: "chat" });
+    dropEmptyPlan();
+  }
   // Composite MID-STREAM fallover on the CHAT surface: mirrors the responses path. If the member
   // produced NO answer (no text, no tool call) and same-surface composite members remain, try them in
   // order into this same open message until one answers. Inert (loop skipped) for a non-composite turn
@@ -2568,10 +2594,13 @@ async function streamAnthropic(res, upstream, reqModel, registry, model = reqMod
   // responses path, and keeps a note-only turn from becoming an empty assistant message next request.
   if (textIndex === null && emittedTools === 0 && !withheld) {
     const nIdx = nextIndex++;
-    const notice = chatEmptyNotice(finish, usage);
+    const notice = chatEmptyNotice(finish, usage, emptyRetries);
     sse(res, "content_block_start", { type: "content_block_start", index: nIdx, content_block: { type: "text", text: "" } });
     sse(res, "content_block_delta", { type: "content_block_delta", index: nIdx, delta: { type: "text_delta", text: notice } });
     sse(res, "content_block_stop", { type: "content_block_stop", index: nIdx });
+    log(`  ! empty chat turn after ${emptyRetries} retr${emptyRetries === 1 ? "y" : "ies"} — terminal=${finish || "none"}`);
+  } else if (emptyRetries) {
+    log(`  -> recovered after ${emptyRetries} empty-turn retr${emptyRetries === 1 ? "y" : "ies"} (chat)`);
   }
   // Usage is recorded per drained upstream response (once for the first member, once per fallover
   // member) above — not here — so a fallover turn counts every member's tokens, not just the last.

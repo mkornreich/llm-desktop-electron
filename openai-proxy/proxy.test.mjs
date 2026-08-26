@@ -1616,6 +1616,17 @@ test("reactive context-overflow loops escalate (continue) past a zero-trim rung 
   assert.doesNotMatch(src, /nothing left to compact \(keep=\$\{keep\}\)`\); break;/, "the give-up-early break must be gone");
 });
 
+test("the chat stream retries an empty (no-terminal-event) turn before giving up, like the responses path", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // streamAnthropic must resend on an empty turn (a transport drop that ended the stream with no terminal
+  // event) — the loop calls shouldRetryEmpty and re-drains callOpenAI, mirroring streamResponses.
+  assert.match(src, /while \(payload && shouldRetryEmpty\(\{ enabled: EMPTY_RETRY, allowContinue: route === ROUTE\.MAIN/);
+  assert.match(src, /empty turn, retry \$\{emptyRetries\}\/\$\{MAX_EMPTY_RETRIES\} \(chat/);
+  // and the empty notice carries the retry count (retries=N), same as the responses surface.
+  assert.match(src, /chatEmptyNotice\(finish, usage, emptyRetries\)/);
+  assert.match(emptyTurnNotice({ status: "no terminal event", usage: {}, retries: 2 }), /retries=2/);
+});
+
 // ---------- upstream headers-timeout -> automatic fall-over ----------
 test("upstream headers-timeout knob defaults to 30s and 0 disables it", () => {
   assert.equal(DEFAULTS.OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS, 30000);
