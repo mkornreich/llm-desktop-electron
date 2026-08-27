@@ -3865,8 +3865,13 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
   const rateHeld = [];            // 429'd members awaiting Retry-After: { member, notBefore }
   let allowRequeue = true;        // false during the wait phase, so each held member is retried at most once
   let bestErr = null;             // worst error seen, surfaced when every member fails (composite only)
-  const rank = { transport: 0, http: 1, rate_limit: 2 };
+  const memberFails = new Map();  // "<provider>:<model>" -> short human reason, for the exhaustion summary
+  const rank = { window: 0, transport: 1, http: 2, rate_limit: 3 };
   const worseOf = (a, b) => (!a ? b : (rank[b.kind] >= rank[a.kind] ? b : a));
+  const failReason = (status) => status === 429 ? "rate limited / quota exhausted (429)"
+    : status === 402 ? "out of credits or subscription lapsed (402)"
+    : status === 401 || status === 403 ? `auth rejected (${status})`
+    : status === 400 ? "rejected the request (400)" : `HTTP ${status}`;
 
   // One attempt against ONE member. Returns the winner object on `.ok`; "skip" to fall through (composite
   // only); or null after writing a terminal error (an encode reject, or a single-member failure — which
@@ -3905,9 +3910,23 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
     // trimmed) and for compaction system turns (their input is pre-capped), and inert when the
     // member's window is unknown (contextWindow 0). Reactive 413-compaction still backstops it.
     if (!isCls && !compacting) {
-      const fit = fitPayloadToWindow(payload, surface, contextWindowFor(m.provider, m.model));
+      const window = contextWindowFor(m.provider, m.model);
+      const fit = fitPayloadToWindow(payload, surface, window);
       if (fit.trimmed) log(`  ~ proactive fit for ${m.model} (window ~${kilo(fit.window)}tok): ` +
         `~${kilo(fit.before)}tok -> ~${kilo(fit.after)}tok (trimmed ${fit.trimmed} tool result(s))`);
+      // If, even after trimming every tool result, the payload STILL exceeds this model's hard context
+      // window, sending it is futile: it 413s, or (freetoken) answers with an INSTANT empty stream that
+      // masquerades as a "no terminal event" transport drop. In a composite, skip it so the chain moves on
+      // and — if nothing is left — surfaces the honest "all members unavailable" error instead of that
+      // silent drop. The Code-tab tool definitions alone (~25k) already overflow a small local model, so no
+      // amount of compaction can make the turn fit. Composite-only: a single-model pick is the user's call.
+      if (window && composite && fit.after > window) {
+        const why = `context window too small (~${kilo(fit.after)}tok payload > ~${kilo(window)}tok window)`;
+        log(`  -> ${m.provider.id}:${m.model} skipped — ${why}`);
+        bestErr = worseOf(bestErr, { kind: "window" });
+        memberFails.set(`${m.provider.id}:${m.model}`, why);
+        return "skip";
+      }
     }
     const startedAt = Date.now();
     let upstream;
@@ -3915,6 +3934,7 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
                              : await callOpenAI(payload, policy.reservedPool, sessionId); }
     catch (e) {
       bestErr = worseOf(bestErr, { kind: "transport", message: e.message });
+      memberFails.set(`${m.provider.id}:${m.model}`, "connection failed / no response");
       if (!composite) { anthropicError(res, 502, "api_error", useResp ? `proxy->OpenAI(responses) fetch failed: ${e.message}` : `proxy->OpenAI fetch failed: ${e.message}`); return null; }
       return "skip";
     }
@@ -3923,6 +3943,7 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
     const errTxt = await upstream.text();                // consume ONCE; a failed member is never replayed
     log(useResp ? `OpenAI(responses) ${cls.status}: ${errTxt.slice(0, 300)}` : `OpenAI ${cls.status}: ${errTxt.slice(0, 300)}`);
     bestErr = worseOf(bestErr, { kind: cls.rateLimited ? "rate_limit" : "http", status: cls.status, bodyText: errTxt, retryAfterMs: cls.retryAfterMs });
+    memberFails.set(`${m.provider.id}:${m.model}`, failReason(cls.status));
     if (!composite) { anthropicError(res, cls.status, "api_error", `OpenAI ${cls.status}: ${errTxt.slice(0, 500)}`); return null; }
     if (cls.rateLimited && allowRequeue) rateHeld.push({ member: m, notBefore: Date.now() + (cls.retryAfterMs ?? 0) });
     return "skip";
@@ -3959,10 +3980,19 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
     if (r === null) return null;
     if (r !== "skip") return r;
   }
-  // Every member failed. Surface the worst error; echo Retry-After on a final 429 so the agent backs off.
+  // Every member failed. Say WHY, per model, and that resending will not help — the old message was a bare
+  // upstream status, and when the chain ended on a small local model that answered 200-but-empty the turn
+  // instead surfaced a misleading "no terminal event / transport failure / sending again usually works"
+  // notice. Echo Retry-After on a final 429 so the agent backs off.
   const hdrs = (bestErr?.kind === "rate_limit" && bestErr.retryAfterMs != null) ? { "Retry-After": String(Math.ceil(bestErr.retryAfterMs / 1000)) } : {};
-  if (bestErr?.kind === "transport") anthropicError(res, 502, "api_error", `composite: all members failed; last transport error: ${bestErr.message}`);
-  else anthropicError(res, bestErr?.status ?? 502, "api_error", `composite: all members failed; best upstream ${bestErr?.status}: ${(bestErr?.bodyText || "").slice(0, 500)}`, hdrs);
+  const status = bestErr?.kind === "rate_limit" ? 429 : bestErr?.kind === "window" ? 413 : (bestErr?.status ?? 502);
+  const perModel = memberFails.size ? ` Per model — ${[...memberFails].map(([id, reason]) => `${id}: ${reason}`).join("; ")}.` : "";
+  anthropicError(res, status, "api_error",
+    `All ${attempts.length} models in the composite chain were unavailable for this turn, so nothing could ` +
+    `answer it. This is not a transient transport drop — resending will not help until a provider frees up.` +
+    `${perModel} Fixes: wait for a rate-limited provider's quota to reset, add credits to one that is out, add ` +
+    `a working model to the composite, or start a smaller conversation (a very large turn overflows the small ` +
+    `local fallback model).`, hdrs);
   return null;
 }
 

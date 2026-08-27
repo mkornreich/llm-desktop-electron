@@ -1576,7 +1576,10 @@ test("fitPayloadToWindow: responses payload trims function_call_output items the
 test("proactive fit runs in obtainUpstream before the call, gated on classifier/compaction turns", () => {
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /if \(!isCls && !compacting\) \{/);
-  assert.match(src, /const fit = fitPayloadToWindow\(payload, surface, contextWindowFor\(m\.provider, m\.model\)\)/);
+  assert.match(src, /const window = contextWindowFor\(m\.provider, m\.model\)/);
+  assert.match(src, /const fit = fitPayloadToWindow\(payload, surface, window\)/);
+  // A composite member whose payload still exceeds its window after compaction is skipped, not sent.
+  assert.match(src, /if \(window && composite && fit\.after > window\) \{/);
 });
 
 test("contentChars/payloadInputTokens credit images at a fixed cost, not their base64 length", () => {
@@ -1625,6 +1628,18 @@ test("the chat stream retries an empty (no-terminal-event) turn before giving up
   // and the empty notice carries the retry count (retries=N), same as the responses surface.
   assert.match(src, /chatEmptyNotice\(finish, usage, emptyRetries\)/);
   assert.match(emptyTurnNotice({ status: "no terminal event", usage: {}, retries: 2 }), /retries=2/);
+});
+
+test("composite exhaustion surfaces a per-model 'all unavailable' error, not a transport-drop notice", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  // The message names how many models were tried, says resending won't help, and lists per-model reasons.
+  assert.match(src, /All \$\{attempts\.length\} models in the composite chain were unavailable/);
+  assert.match(src, /resending will not help until a provider frees up/);
+  assert.match(src, /Per model — \$\{\[\.\.\.memberFails\]/);
+  // Failure reasons are classified into human strings (rate limit / out of credits / window too small).
+  assert.match(src, /out of credits or subscription lapsed \(402\)/);
+  assert.match(src, /rate limited \/ quota exhausted \(429\)/);
+  assert.match(src, /context window too small \(~\$\{kilo\(fit\.after\)\}tok payload/);
 });
 
 // ---------- upstream headers-timeout -> automatic fall-over ----------
