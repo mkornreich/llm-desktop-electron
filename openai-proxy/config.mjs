@@ -356,6 +356,13 @@ export function buildProviders(config = loadConfig(), keys) {
       contextWindow: Number(p.contextWindow) || 0,
       context: p.context || null,
       contextWindows: p.contextWindows || null,
+      // Wire protocol. "openai" (default) => the proxy TRANSLATES Anthropic<->OpenAI for this provider
+      // (the historic behaviour). "anthropic" => PASS-THROUGH: the provider natively speaks the Anthropic
+      // Messages API, so the proxy forwards /v1/messages almost verbatim (model swap + auth), skipping the
+      // toOpenAI/toAnthropic round-trip. `anthropicEndpoint` is the ANTHROPIC_BASE_URL (the proxy appends
+      // /v1/messages) — required when protocol is "anthropic". Leaving protocol unset keeps OpenAI mode.
+      protocol: p.protocol === "anthropic" ? "anthropic" : "openai",
+      anthropicEndpoint: fillEndpoint(p.anthropicEndpoint || "", K) || "",
       loopback: !!p.loopback,     // keyless on-device server — exposed so callers key off the flag, not the id
       managed: p.managed || null, // the launcher's autostart block (engine/port/launch/...), or null
       // Curated model allowlist. When non-empty it is the ONLY set of this provider's models offered to

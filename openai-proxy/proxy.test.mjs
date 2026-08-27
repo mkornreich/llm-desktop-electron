@@ -34,7 +34,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
         rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses, classifierVerdictOf, classifierActionAutoAllowed,
         approxTokens, kilo,
-        fitPayloadToWindow, contextWindowFor, payloadInputTokens, contentChars, PROACTIVE_OUTPUT_RESERVE } =
+        fitPayloadToWindow, contextWindowFor, payloadInputTokens, contentChars, PROACTIVE_OUTPUT_RESERVE,
+        anthropicPassthroughPayload, anthropicUpstreamHeaders } =
   await import("./proxy.mjs");
 const { ToolRegistry } = await import("./tool-registry.mjs");
 
@@ -1642,6 +1643,93 @@ test("composite exhaustion surfaces a per-model 'all unavailable' error, not a t
   assert.match(src, /context window too small \(~\$\{kilo\(fit\.after\)\}tok payload/);
 });
 
+// ---------- Anthropic pass-through (protocol: "anthropic") ----------
+test("anthropicPassthroughPayload: swaps model, strips cache_control, keeps custom tools, drops server tools", () => {
+  const body = {
+    model: "claude-opus-4-8",
+    system: [{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
+    tools: [
+      { name: "Read", description: "read a file", input_schema: { type: "object", properties: {} } },
+      { type: "web_search_20260209", name: "web_search" },   // Anthropic SERVER tool — must be dropped
+    ],
+    max_tokens: 100, stream: true,
+  };
+  const out = anthropicPassthroughPayload(body, "qwen3:1.7b");
+  assert.equal(out.model, "qwen3:1.7b", "model swapped");
+  assert.equal(out.stream, true, "unrelated fields preserved");
+  assert.equal(out.max_tokens, 100);
+  // cache_control stripped everywhere
+  assert.ok(!("cache_control" in out.system[0]), "system cache_control stripped");
+  assert.ok(!("cache_control" in out.messages[0].content[0]), "message cache_control stripped");
+  // only the custom tool survives
+  assert.deepEqual(out.tools.map((t) => t.name), ["Read"], "server tool dropped, custom tool kept");
+  // the original body is not mutated
+  assert.ok("cache_control" in body.system[0], "input body left intact");
+});
+
+test("anthropicPassthroughPayload strips cache_control ONLY at block level, not inside tool args or schemas", () => {
+  const body = {
+    model: "x",
+    messages: [
+      // a replayed assistant tool_use whose ARGS legitimately contain a key named cache_control
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "http_get", input: { url: "u", cache_control: "no-store" }, cache_control: { type: "ephemeral" } }] },
+    ],
+    tools: [
+      // a custom tool that declares a PARAMETER named cache_control
+      { name: "http_get", description: "d", input_schema: { type: "object", properties: { url: { type: "string" }, cache_control: { type: "string" } }, required: ["url", "cache_control"] }, cache_control: { type: "ephemeral" } },
+    ],
+  };
+  const out = anthropicPassthroughPayload(body, "y");
+  const tu = out.messages[0].content[0];
+  assert.ok(!("cache_control" in tu), "the block-level breakpoint on the tool_use is stripped");
+  assert.equal(tu.input.cache_control, "no-store", "but the cache_control INSIDE the tool args is preserved");
+  const tool = out.tools[0];
+  assert.ok(!("cache_control" in tool), "the tool's block-level breakpoint is stripped");
+  assert.ok("cache_control" in tool.input_schema.properties, "but a declared cache_control PARAMETER is preserved");
+  assert.ok(tool.input_schema.required.includes("cache_control"), "and it stays in required (no dangling required)");
+});
+
+test("anthropicUpstreamHeaders: sends both x-api-key and Bearer + anthropic-version", () => {
+  const h = anthropicUpstreamHeaders({ auth: "KEY123", extraHeaders: { "X-Extra": "1" } });
+  assert.equal(h["x-api-key"], "KEY123");
+  assert.equal(h.Authorization, "Bearer KEY123");
+  assert.match(h["anthropic-version"], /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(h["X-Extra"], "1");
+});
+
+test("protocol/anthropicEndpoint thread through the registry and resolved members", async () => {
+  const { buildProviders } = await import("./config.mjs");
+  const reg = buildProviders({ providers: {
+    zai: { endpoint: "https://api.z.ai/api/paas/v4", protocol: "anthropic", anthropicEndpoint: "https://api.z.ai/api/anthropic", keyNames: ["zaiApiKey"], api: "chat" },
+    plain: { endpoint: "https://api.example.com/v1", keyNames: ["exApiKey"], api: "chat" },
+  } }, { zaiApiKey: "k" });
+  assert.equal(reg.zai.protocol, "anthropic");
+  assert.equal(reg.zai.anthropicEndpoint, "https://api.z.ai/api/anthropic");
+  assert.equal(reg.plain.protocol, "openai", "default keeps OpenAI mode");
+  assert.equal(reg.plain.anthropicEndpoint, "");
+  // resolvePickedProvider wires the fields onto the trimmed member-provider object it builds
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /protocol: reg\.protocol, anthropicEndpoint: reg\.anthropicEndpoint/);
+});
+
+test("pass-through is wired into obtainUpstream (gated off classifiers) and piped by the handler", () => {
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(m\.provider\.protocol === "anthropic" && !isCls\) \{/);
+  assert.match(src, /passthrough: true/);
+  assert.match(src, /if \(got\.passthrough\) \{/);
+  assert.match(src, /await pipeAnthropic\(res, upstream, model, !!payload\.stream/);
+  // a pass-through winner keeps its own empty fallover
+  assert.match(src, /if \(!r\.passthrough\) r\.fallover = composite/);
+  // an anthropic member is never placed in an OpenAI winner's mid-stream fallover list (would be callOpenAI'd)
+  assert.match(src, /x\.provider\.protocol !== "anthropic" && \(x\.provider\.api === "responses"\) === r\.useResp/);
+  // usage uses the Anthropic convention (input EXCLUDES cache) -> grossInput adds cache_read + cache_creation
+  assert.match(src, /const antGross = \(u\) => \(u\?\.input_tokens \|\| 0\) \+ \(u\?\.cache_read_input_tokens \|\| 0\) \+ \(u\?\.cache_creation_input_tokens \|\| 0\)/);
+  // premature upstream end synthesizes a terminal so the client's Anthropic stream is never left open
+  assert.match(src, /if \(!sawStop\) \{/);
+  assert.match(src, /sse\(res, "message_stop"/);
+});
+
 // ---------- upstream headers-timeout -> automatic fall-over ----------
 test("upstream headers-timeout knob defaults to 30s and 0 disables it", () => {
   assert.equal(DEFAULTS.OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS, 30000);
@@ -2966,7 +3054,7 @@ test("both surfaces log context through the one shared formatter", () => {
   // formatter there would be requiring a field that does not exist yet.
   const sites = (src.match(/log\(`\/v1\/messages \[[a-z]+\][^`]*`/g) || [])
     .filter((s) => !/rejected/.test(s));
-  assert.equal(sites.length, 2, `expected exactly the responses and chat sites, found ${sites.length}`);
+  assert.equal(sites.length, 3, `expected the responses, chat, and anthropic-passthrough sites, found ${sites.length}`);
   for (const s of sites) {
     assert.match(s, /\$\{contextFields\(shape\)\}/, `site must use the shared formatter: ${s.slice(0, 60)}`);
     assert.ok(!/~ctx=/.test(s), "the old ~ctx field excluded tool schemas and must be gone");
@@ -3217,7 +3305,9 @@ test("every recordUsage call site passes the cached figure and the resolved mode
   ];
   assert.ok(calls.length >= 5, `expected at least five call sites, found ${calls.length}`);
   for (const c of calls) {
-    assert.match(c, /cached_tokens/, `call site must pass the cached split: ${c.slice(0, 70)}`);
+    // OpenAI surfaces pass *_tokens_details.cached_tokens; the Anthropic pass-through passes the
+    // equivalent cache_read_input_tokens. Either satisfies "the cached split must be passed".
+    assert.match(c, /cached_tokens|cache_read_input_tokens/, `call site must pass the cached split: ${c.slice(0, 70)}`);
   }
   for (const c of calls.filter((c) => c.startsWith("recordAttempt"))) {
     assert.match(c, /resolvedModel: payload\?\.model/,

@@ -178,11 +178,11 @@ function resolvePickedProvider(reqModel) {
   // and the bare model id — no key required. reg.baseURL already folds LLMD_LOCAL_BASE for the managed
   // Ollama, so it is used directly here (never re-applying the Ollama base to freetoken's 1919 port).
   if (reg.loopback) {
-    return { provider: { id: reg.id, baseURL: reg.baseURL, auth: reg.id, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {} }, model: s.slice(i + 1) };
+    return { provider: { id: reg.id, baseURL: reg.baseURL, auth: reg.id, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {}, protocol: reg.protocol, anthropicEndpoint: reg.anthropicEndpoint }, model: s.slice(i + 1) };
   }
   const auth = providerAuth(reg);
   if (!auth) return null;
-  return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {} }, model: s.slice(i + 1) };
+  return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {}, protocol: reg.protocol, anthropicEndpoint: reg.anthropicEndpoint }, model: s.slice(i + 1) };
 }
 
 // ---------- composite (fallback) model ----------
@@ -3852,6 +3852,95 @@ export function noteCompositeModel(label, now = Date.now(), emit = log, kind = "
   return false;
 }
 
+// ---- Anthropic pass-through (protocol: "anthropic") ----
+// For a provider that natively speaks the Anthropic Messages API, the proxy forwards /v1/messages almost
+// verbatim instead of translating to/from OpenAI — which sidesteps the whole translation-loss class
+// (empty turns, "unsupported content" 400s, tool-call re-encoding). See config.mjs `protocol`.
+const ANTHROPIC_WIRE_VERSION = "2023-06-01";
+// Prepare the client's Anthropic body for a pass-through upstream: swap the model, strip cache_control
+// breakpoints (open upstreams routinely reject them), and drop Anthropic SERVER tools (web_search etc.,
+// which carry a `type` and no input_schema) that only Anthropic itself runs — keeping the custom tools.
+function anthropicPassthroughPayload(body, model) {
+  // Remove ONLY a top-level cache_control breakpoint from a block/tool — NOT recursively: cache_control
+  // lives on system/content BLOCKS and tool DEFINITIONS, never inside a tool_use's `input` args or a
+  // tool's `input_schema`, and blindly deleting every `cache_control` key would corrupt a replayed
+  // tool call or a custom tool that happens to declare a parameter of that name.
+  const noCC = (b) => (b && typeof b === "object" && "cache_control" in b)
+    ? (({ cache_control, ...rest }) => rest)(b) : b;
+  const out = { ...body, model };
+  if (Array.isArray(out.system)) out.system = out.system.map(noCC);              // system may be a string (untouched) or block[]
+  if (Array.isArray(out.messages)) out.messages = out.messages.map((m) =>
+    (m && Array.isArray(m.content)) ? { ...m, content: m.content.map(noCC) } : m);
+  // Drop Anthropic SERVER tools (web_search etc. — a `type` and no input_schema, only Anthropic runs them);
+  // keep the custom tools and strip a breakpoint off each.
+  if (Array.isArray(out.tools)) out.tools = out.tools.filter((t) => t && t.input_schema && !t.type).map(noCC);
+  return out;
+}
+function anthropicUpstreamHeaders(provider) {
+  // Send BOTH auth headers: Anthropic-proper wants x-api-key, but Ollama / Z.ai / SambaNova key off
+  // Authorization: Bearer (Claude Code's ANTHROPIC_AUTH_TOKEN). Sending both is the compatible choice.
+  return { "Content-Type": "application/json", "anthropic-version": ANTHROPIC_WIRE_VERSION,
+           "x-api-key": provider.auth || "", Authorization: `Bearer ${provider.auth || ""}`,
+           ...(provider.extraHeaders || {}) };
+}
+// Pipe a pass-through upstream's response (already in Anthropic format) straight back to the client. For a
+// streaming turn the upstream SSE IS the client's protocol, so it is forwarded byte-for-byte while usage is
+// sniffed off message_start / message_delta; a non-streaming turn forwards the Message JSON verbatim.
+async function pipeAnthropic(res, upstream, model, wantStream, startedAt, route, sessionId, requestedModel) {
+  // Anthropic reports input_tokens EXCLUDING cache reads (unlike OpenAI, whose input_tokens include them);
+  // recordUsage/the ledger want the OpenAI convention, so grossInput = input + cache_read + cache_creation
+  // and the cached SUBSET is cache_read_input_tokens. Getting this wrong reports >100% cache-hit rates.
+  const antGross = (u) => (u?.input_tokens || 0) + (u?.cache_read_input_tokens || 0) + (u?.cache_creation_input_tokens || 0);
+  if (wantStream && upstream.body) {
+    res.writeHead(upstream.status, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    const reader = upstream.body.getReader(); const dec = new TextDecoder();
+    let buf = "", usage = {}, stop = null, openBlock = null, sawStop = false;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        res.write(value);                                   // verbatim — it is already Anthropic SSE
+        buf += dec.decode(value, { stream: true });
+        let nl; while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          try { const e = JSON.parse(line.slice(5).trim());
+            if (e.type === "message_start" && e.message?.usage) usage = { ...usage, ...e.message.usage };
+            else if (e.type === "content_block_start") openBlock = e.index;
+            else if (e.type === "content_block_stop") openBlock = null;
+            else if (e.type === "message_delta") { if (e.usage) usage = { ...usage, ...e.usage }; if (e.delta?.stop_reason) stop = e.delta.stop_reason; }
+            else if (e.type === "message_stop") sawStop = true;
+          } catch { /* not JSON — keep piping */ }
+        }
+      }
+    } catch (e) { log(`  ! anthropic passthrough stream dropped: ${e.message}`); }
+    // Never leave the client an UNTERMINATED Anthropic stream: if the upstream ended before message_stop,
+    // close any still-open content block and synthesize the terminal events so Claude Code finalizes.
+    if (!sawStop) {
+      if (openBlock != null) sse(res, "content_block_stop", { type: "content_block_stop", index: openBlock });
+      // mapUsage wants OpenAI-convention usage (input INCLUDES cache), so feed it the gross figure.
+      sse(res, "message_delta", { type: "message_delta", delta: { stop_reason: stop || "end_turn", stop_sequence: null },
+        usage: mapUsage({ input_tokens: antGross(usage), output_tokens: usage.output_tokens, input_tokens_details: { cached_tokens: usage.cache_read_input_tokens || 0 } }, "responses") });
+      sse(res, "message_stop", { type: "message_stop" });
+    }
+    res.end();
+    const cacheRead = usage.cache_read_input_tokens || 0;
+    recordUsage(model, antGross(usage), usage.output_tokens, undefined, usage.cache_read_input_tokens || 0, { route, surface: "anthropic", requestedModel, sessionId });
+    const uLog = { input_tokens: antGross(usage), input_tokens_details: { cached_tokens: cacheRead } };
+    log(`  <- anthropic passthrough ${Date.now() - startedAt}ms stop_reason=${stop || (sawStop ? "?" : "dropped")} in_tokens=${inTokensField(uLog)} out_tokens=${usage.output_tokens ?? "?"}`);
+    return;
+  }
+  const j = await upstream.json();
+  const u = j?.usage || {};
+  const cacheRead = u.cache_read_input_tokens || 0;
+  recordUsage(model, antGross(u), u.output_tokens, undefined, u.cache_read_input_tokens || 0, { route, surface: "anthropic", requestedModel, sessionId });
+  const tools = (j?.content || []).filter((c) => c.type === "tool_use").map((c) => c.name);
+  if (tools.length) log(`  model called tool(s): ${tools.join(", ")}`);
+  const uLog = { input_tokens: antGross(u), input_tokens_details: { cached_tokens: cacheRead } };
+  log(`  <- anthropic passthrough (non-stream) ${Date.now() - startedAt}ms stop_reason=${j?.stop_reason || "?"} in_tokens=${inTokensField(uLog)} out_tokens=${u.output_tokens ?? "?"}`);
+  return sendJSON(res, upstream.status, j);
+}
+
 // Obtain a working upstream Response for one turn, trying members in order: a single member for every
 // non-composite turn (byte-for-byte today's behaviour), or the ordered composite chain, falling through
 // on any transport/HTTP error until one member answers. Returns the winner
@@ -3878,6 +3967,33 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
   // reproduces today's exact 502 / OpenAI-status error string).
   const tryMember = async (m) => {
     providerALS.enterWith(m.provider);                   // pin THIS member for encode + fetch + headers
+    // Anthropic PASS-THROUGH member: forward the Anthropic body verbatim to the provider's native
+    // Messages API, no OpenAI translation. Gated off classifier turns (their verdict parsing expects the
+    // translated path). A `.ok` upstream is returned as a passthrough winner the handler pipes directly.
+    if (m.provider.protocol === "anthropic" && !isCls) {
+      const id = `${m.provider.id}:${m.model}`;
+      const ptPayload = anthropicPassthroughPayload(body, m.model);
+      const shape = requestShape(body);
+      log(`/v1/messages [anthropic] model=${reqModel}->${m.model} ${contextFields(shape)}` +
+          ` stream=${!!ptPayload.stream}${ptPayload.tools ? ` tools=${ptPayload.tools.length}` : ""}${routeLabel(route)}`);
+      let upstream;
+      try { upstream = await fetch(`${m.provider.anthropicEndpoint}/v1/messages`, { method: "POST", headers: anthropicUpstreamHeaders(m.provider), body: JSON.stringify(ptPayload) }); }
+      catch (e) {
+        bestErr = worseOf(bestErr, { kind: "transport", message: e.message });
+        memberFails.set(id, "connection failed / no response");
+        if (!composite) { anthropicError(res, 502, "api_error", `proxy->Anthropic passthrough fetch failed: ${e.message}`); return null; }
+        return "skip";
+      }
+      const cls = classifyUpstream(upstream);
+      if (cls.ok) return { upstream, provider: m.provider, useResp: false, passthrough: true, payload: ptPayload, registry: null, model: m.model, startedAt: Date.now(), fallover: [] };
+      const errTxt = await upstream.text();
+      log(`Anthropic(passthrough) ${cls.status}: ${errTxt.slice(0, 300)}`);
+      bestErr = worseOf(bestErr, { kind: cls.rateLimited ? "rate_limit" : "http", status: cls.status, bodyText: errTxt, retryAfterMs: cls.retryAfterMs });
+      memberFails.set(id, failReason(cls.status));
+      if (!composite) { anthropicError(res, cls.status, "api_error", `Anthropic upstream ${cls.status}: ${errTxt.slice(0, 500)}`); return null; }
+      if (cls.rateLimited && allowRequeue) rateHeld.push({ member: m, notBefore: Date.now() + (cls.retryAfterMs ?? 0) });
+      return "skip";
+    }
     const useResp = apiForModel(m.model) === "responses";
     const surface = useResp ? "responses" : "chat";
     let payload, registry, imagesSent;
@@ -3957,9 +4073,13 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
       // The remaining SAME-SURFACE members become the winner's mid-stream fallover list: if it starts
       // streaming but drops without producing an answer, the stream path tries these in turn. Only for a
       // composite turn, and same-surface because the stream translator can't switch chat<->responses mid-
-      // message. Empty for every non-composite turn -> the stream path is unaffected.
-      r.fallover = composite
-        ? attempts.slice(i + 1).filter((x) => (x.provider.api === "responses") === r.useResp)
+      // message. Empty for every non-composite turn -> the stream path is unaffected. A pass-through winner
+      // keeps its own [] (pipeAnthropic has no mid-stream fallover; the pre-stream cascade already covered it).
+      // Exclude anthropic-PASS-THROUGH members: they cannot be driven by the OpenAI stream fallover
+      // (callOpenAI would POST an OpenAI body to their OpenAI baseURL, bypassing pass-through / 404ing).
+      // Their turn comes only via the pre-stream cascade above.
+      if (!r.passthrough) r.fallover = composite
+        ? attempts.slice(i + 1).filter((x) => x.provider.protocol !== "anthropic" && (x.provider.api === "responses") === r.useResp)
                                .map((x) => ({ provider: x.provider, model: x.model }))
         : [];
       return r;                                          // winner
@@ -4172,6 +4292,15 @@ const server = http.createServer(async (req, res) => {
       : members ? `composite → ${answeredBy}`
       : `model → ${answeredBy}`;
 
+    // Anthropic pass-through winner: the upstream response is already in Anthropic format — pipe it
+    // straight to the client with no translation. (modelNote is not injected here; the answering model is
+    // in the log line above, and injecting a note would collide with the upstream's own block indices.)
+    if (got.passthrough) {
+      try { await pipeAnthropic(res, upstream, model, !!payload.stream, startedAt, route, req.headers["x-claude-code-session-id"] || null, reqModel); }
+      catch (e) { log("passthrough error:", e.message); try { res.end(); } catch {} }
+      return;
+    }
+
     if (useResp) {
       if (payload.stream) {
         const mayContinue = policy.continuation && !!payload.tools?.length;
@@ -4266,6 +4395,7 @@ export { mapUsage, compactionKind, requestShape, contextFields, compactionWarnin
          compactResponsesInput, compactChatMessages, CONTEXT_ERROR_RE, COMPACT_STEPS, TRIMMED,
          compactStartFor, rememberCompact,
          fitPayloadToWindow, contextWindowFor, payloadInputTokens, contentChars, PROACTIVE_OUTPUT_RESERVE,
+         anthropicPassthroughPayload, anthropicUpstreamHeaders,
          compactResponsesInputSummarised, summariseDropped,
          compactOversizedResponsesText, compactOversizedChatText, MAX_TEXT_CHARS,
          isClassifierRequest, classifierFamily, classifierPrompt, CLASSIFIER_RE, PREFIX_RE, SAFETY_RE,
