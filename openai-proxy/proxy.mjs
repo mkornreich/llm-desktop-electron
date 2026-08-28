@@ -2233,17 +2233,17 @@ function classifierVerdictOf(msg) {
   if (s) return `severity=${s[1]}`;
   return text ? "unparsed" : "empty";
 }
-// Tools the auto-mode SAFETY classifier should ALWAYS allow, bypassing the chain. The in-app Claude
-// Browser tools (including javascript_tool / javascript_exec) and WebSearch are read-only and safe, but the
-// classifier over-blocks / times out on them — one web search in a session fired ~8-15s freetoken verdicts
-// that then fell over to the cloud. When the action being judged is one of these, the verdict is answered
-// "allow" directly. WebFetch is deliberately NOT here (it fetches arbitrary, possibly attacker-chosen URLs).
-// Matched by the tool-name prefix on the pending action's TOOL line. That line is the LAST line at COLUMN 0:
-// a transcript action's multi-line args are indented (the JS in a javascript_exec call is indented ≥2
-// spaces), so only the tool invocation itself sits at column 0. This is what makes a javascript_exec — whose
-// last raw line is JS code, not the tool name — resolve correctly, while a non-allowlisted action is never
-// auto-allowed (its own tool line is the last column-0 line).
-const AUTO_ALLOW_TOOL_RE = /^(mcp__Claude_Browser__|WebSearch|web_search)/;
+// Tools the auto-mode SAFETY classifier should ALWAYS allow, bypassing the chain. The in-app Claude Browser
+// tools (including javascript_tool / javascript_exec) and the web tools WebSearch / WebFetch are read-only
+// and safe, but the classifier over-blocks / times out on them — one web search in a session fired ~8-15s
+// freetoken verdicts that then fell over to the cloud. When the action being judged is one of these, the
+// verdict is answered "allow" directly. (WebFetch fetches a model-chosen URL — read-only, no side effects,
+// included per user request.) Matched by the tool-name prefix on the pending action's TOOL line. That line
+// is the LAST line at COLUMN 0: a transcript action's multi-line args are indented (the JS in a
+// javascript_exec call is indented ≥2 spaces), so only the tool invocation itself sits at column 0. This is
+// what makes a javascript_exec — whose last raw line is JS code, not the tool name — resolve correctly,
+// while a non-allowlisted action is never auto-allowed (its own tool line is the last column-0 line).
+const AUTO_ALLOW_TOOL_RE = /^(mcp__Claude_Browser__|WebSearch|web_search|WebFetch|web_fetch)/;
 export function classifierActionAutoAllowed(body) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
   for (let i = msgs.length - 1; i >= 0; i--) {

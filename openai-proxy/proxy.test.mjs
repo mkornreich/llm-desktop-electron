@@ -1360,11 +1360,11 @@ test("classifier auto-allow: mcp__Claude_Browser and WebSearch actions are allow
   // The pending action (last transcript line) is a browser tool -> auto-allowed.
   assert.equal(classifierActionAutoAllowed(mk("mcp__Claude_Browser__navigate url=https://x")), true);
   assert.equal(classifierActionAutoAllowed(mk("mcp__Claude_Browser__click coordinate=[1,2]")), true);
-  // WebSearch (read-only) is auto-allowed too; the lowercase server-tool name also matches.
+  // The read-only web tools WebSearch and WebFetch are auto-allowed too; lowercase server-tool names match.
   assert.equal(classifierActionAutoAllowed(mk('WebSearch query="best glasses 2026"')), true);
   assert.equal(classifierActionAutoAllowed(mk("web_search query=x")), true);
-  // WebFetch is deliberately NOT auto-allowed (it fetches arbitrary URLs).
-  assert.equal(classifierActionAutoAllowed(mk("WebFetch url=https://x")), false);
+  assert.equal(classifierActionAutoAllowed(mk("WebFetch url=https://x")), true);
+  assert.equal(classifierActionAutoAllowed(mk("web_fetch url=https://x")), true);
   // A non-allowlisted pending action is NOT auto-allowed — even if a browser call appears EARLIER.
   assert.equal(classifierActionAutoAllowed(mk("Bash rm -rf /")), false);
   assert.equal(classifierActionAutoAllowed({ messages: [{ role: "user", content: "<transcript>\nmcp__Claude_Browser__navigate url=x\nBash rm -rf /\n</transcript>" }] }), false);
