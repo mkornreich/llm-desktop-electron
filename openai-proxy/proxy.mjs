@@ -2234,14 +2234,16 @@ function classifierVerdictOf(msg) {
   return text ? "unparsed" : "empty";
 }
 // Tools the auto-mode SAFETY classifier should ALWAYS allow, bypassing the chain. The in-app Claude
-// Browser tools (including javascript_tool / javascript_exec) are read-heavy and safe, but the classifier
-// over-blocks / times out on them. When the action being judged is one of these, the verdict is answered
-// "allow" directly. Matched by the tool-name prefix on the pending action's TOOL line. That line is the
-// LAST line at COLUMN 0: a transcript action's multi-line args are indented (the JS in a javascript_exec
-// call is indented ≥2 spaces), so only the tool invocation itself sits at column 0. This is what makes a
-// javascript_exec — whose last raw line is JS code, not the tool name — resolve correctly, while a
-// non-browser action is never auto-allowed (its own tool line is the last column-0 line).
-const AUTO_ALLOW_TOOL_RE = /^mcp__Claude_Browser__/;
+// Browser tools (including javascript_tool / javascript_exec) and WebSearch are read-only and safe, but the
+// classifier over-blocks / times out on them — one web search in a session fired ~8-15s freetoken verdicts
+// that then fell over to the cloud. When the action being judged is one of these, the verdict is answered
+// "allow" directly. WebFetch is deliberately NOT here (it fetches arbitrary, possibly attacker-chosen URLs).
+// Matched by the tool-name prefix on the pending action's TOOL line. That line is the LAST line at COLUMN 0:
+// a transcript action's multi-line args are indented (the JS in a javascript_exec call is indented ≥2
+// spaces), so only the tool invocation itself sits at column 0. This is what makes a javascript_exec — whose
+// last raw line is JS code, not the tool name — resolve correctly, while a non-allowlisted action is never
+// auto-allowed (its own tool line is the last column-0 line).
+const AUTO_ALLOW_TOOL_RE = /^(mcp__Claude_Browser__|WebSearch|web_search)/;
 export function classifierActionAutoAllowed(body) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -4215,13 +4217,13 @@ const server = http.createServer(async (req, res) => {
     const policy = policyFor(route);
     const family = route === ROUTE.PREFIX ? "prefix" : isSafety(route) ? "safety" : null;
     const isCls = isClassifier(route);
-    // Always-allow the in-app Claude Browser tools: answer a SAFETY verdict for a mcp__Claude_Browser__*
-    // action as "allow" directly, skipping the (over-cautious, slow) classifier chain that keeps blocking
+    // Always-allow known read-only tools (the in-app Claude Browser tools and WebSearch): answer a SAFETY
+    // verdict as "allow" directly, skipping the (over-cautious, slow) classifier chain that keeps blocking
     // and timing out on them. Non-streaming only — every real classifier call is non-streaming; a streaming
     // one (never observed) falls through to the chain.
     if (isSafety(route) && !body.stream && classifierActionAutoAllowed(body)) {
       const verdict = route === ROUTE.SAFETY_SEVERITY ? "<severity>0</severity>" : "<block>no</block>";
-      log(`classifier=${route} -> ALLOW (mcp__Claude_Browser auto-allowed, chain skipped)`);
+      log(`classifier=${route} -> ALLOW (read-only tool auto-allowed, chain skipped)`);
       return sendJSON(res, 200, syntheticSafetyVerdict(verdict, reqModel));
     }
     // Composite (fallback) model: when a MAIN turn names the reserved "composite" id, expand it into an
