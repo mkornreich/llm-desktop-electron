@@ -558,6 +558,19 @@ test("a remembered Gemini thought-signature is echoed back to Gemini and to no o
   const gem = providerALS.run({ id: "gemini", baseURL: "https://x/v1", isOpenAI: false }, () => toOpenAI(body, "gemini-3-flash-preview"));
   const asst = gem.payload.messages.find((m) => m.role === "assistant");
   assert.equal(asst.tool_calls[0].extra_content?.google?.thought_signature, "SIGVALUE");
+
+  // A gemini-bound call with NO stored signature (a composite member authored it, or the sig was lost)
+  // gets Google's documented raw-literal SKIP sentinel, so Gemini 3 does not hard-400 on the missing sig.
+  const body2 = { messages: [
+    { role: "assistant", content: [{ type: "tool_use", id: "unsigned_call", name: "Bash", input: {} }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "unsigned_call", content: "x" }] },
+  ], max_tokens: 100 };
+  const gem2 = providerALS.run({ id: "gemini", baseURL: "https://x/v1", isOpenAI: false }, () => toOpenAI(body2, "gemini-3-flash-preview"));
+  const a2 = gem2.payload.messages.find((m) => m.role === "assistant");
+  assert.equal(a2.tool_calls[0].extra_content.google.thought_signature, "skip_thought_signature_validator",
+    "an unsigned historical call gets the raw-literal skip sentinel");
+  // and a NON-gemini provider still gets no signature at all for the unsigned call.
+  assert.doesNotMatch(JSON.stringify(toOpenAI(body2, "gpt-4.1-mini").payload), /thought_signature/);
 });
 
 test("Cloudflare gets string message content, never OpenAI's array-of-parts", () => {
@@ -1584,8 +1597,10 @@ test("proactive fit runs in obtainUpstream before the call, gated on classifier/
   assert.match(src, /if \(!isCls && !compacting\) \{/);
   assert.match(src, /const window = contextWindowFor\(m\.provider, m\.model\)/);
   assert.match(src, /const fit = fitPayloadToWindow\(payload, surface, window\)/);
-  // A composite member whose payload still exceeds its window after compaction is skipped, not sent.
-  assert.match(src, /if \(window && composite && fit\.after > window\) \{/);
+  // A composite member is skipped when the fitted payload leaves no output headroom (window minus the
+  // reserve) — not merely when it exceeds the raw window — so an oversized turn does not stall a small model.
+  assert.match(src, /const budget = window - PROACTIVE_OUTPUT_RESERVE;/);
+  assert.match(src, /if \(window && composite && fit\.after > budget\) \{/);
 });
 
 test("contentChars/payloadInputTokens credit images at a fixed cost, not their base64 length", () => {
@@ -1645,7 +1660,7 @@ test("composite exhaustion surfaces a per-model 'all unavailable' error, not a t
   // Failure reasons are classified into human strings (rate limit / out of credits / window too small).
   assert.match(src, /out of credits or subscription lapsed \(402\)/);
   assert.match(src, /rate limited \/ quota exhausted \(429\)/);
-  assert.match(src, /context window too small \(~\$\{kilo\(fit\.after\)\}tok payload/);
+  assert.match(src, /no room to answer \(~\$\{kilo\(fit\.after\)\}tok payload leaves/);
 });
 
 // ---------- Anthropic pass-through (protocol: "anthropic") ----------

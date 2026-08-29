@@ -792,6 +792,10 @@ function rememberSignature(id, sig) {
 }
 const recallSignature = (id) => (id ? SIG_STORE.get(id) : undefined);
 const sigFromToolCall = (tc) => tc?.extra_content?.google?.thought_signature;
+// Google's documented sentinel: a function call in history that Gemini did NOT author (a composite member
+// authored it, or the signature was lost on restart / by Gemini's parallel-call bug) carries this instead of
+// a real signature to SKIP validation. Must be the raw literal string — base64-encoding it is rejected.
+const GEMINI_SIG_SKIP = "skip_thought_signature_validator";
 
 // Record one upstream request. THE unit of accounting — every call to the API goes through here,
 // including the retries that used to be invisible.
@@ -2091,9 +2095,14 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
     for (const blk of content) {
       if (blk.type === "tool_use") {
         const call = { id: blk.id, type: "function", function: { name: sanitizeToolName(blk.name), arguments: JSON.stringify(blk.input || {}) } };
-        // Gemini requires its thought_signature echoed back on the historical call, or it 400s.
-        const sig = curProvider().id === "gemini" ? recallSignature(blk.id) : undefined;
-        if (sig) call.extra_content = { google: { thought_signature: sig } };
+        // Gemini 3 hard-400s ("Function call is missing a thought_signature") on any historical function call
+        // without its signature. Echo the REAL one when we captured it (Gemini authored the call); otherwise —
+        // a composite where ANOTHER model authored the call, a post-restart gap, or Gemini's own parallel-call
+        // bug that only signs the first call — inject Google's DOCUMENTED sentinel to skip validation. It must
+        // be the raw literal string, NOT base64 (base64-encoding it is the #1 way this breaks); gemini-cli and
+        // Google's .NET SDK use exactly this. Only for gemini, so a non-Gemini upstream never sees extra_content.
+        if (curProvider().id === "gemini")
+          call.extra_content = { google: { thought_signature: recallSignature(blk.id) || GEMINI_SIG_SKIP } };
         toolCalls.push(call);
       }
       else if (blk.type === "tool_result") {
@@ -4032,14 +4041,17 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
       const fit = fitPayloadToWindow(payload, surface, window);
       if (fit.trimmed) log(`  ~ proactive fit for ${m.model} (window ~${kilo(fit.window)}tok): ` +
         `~${kilo(fit.before)}tok -> ~${kilo(fit.after)}tok (trimmed ${fit.trimmed} tool result(s))`);
-      // If, even after trimming every tool result, the payload STILL exceeds this model's hard context
-      // window, sending it is futile: it 413s, or (freetoken) answers with an INSTANT empty stream that
-      // masquerades as a "no terminal event" transport drop. In a composite, skip it so the chain moves on
-      // and — if nothing is left — surfaces the honest "all members unavailable" error instead of that
-      // silent drop. The Code-tab tool definitions alone (~25k) already overflow a small local model, so no
-      // amount of compaction can make the turn fit. Composite-only: a single-model pick is the user's call.
-      if (window && composite && fit.after > window) {
-        const why = `context window too small (~${kilo(fit.after)}tok payload > ~${kilo(window)}tok window)`;
+      // If, even after trimming every tool result, the payload does not leave OUTPUT HEADROOM (a full
+      // PROACTIVE_OUTPUT_RESERVE below the window), sending it is futile: it 413s, or — as observed on a
+      // small local model (freetoken) — the input fills the whole KV budget so there is no room to GENERATE,
+      // and the turn STALLS for minutes with no answer and no error. A verdict-sized classifier reply fits;
+      // a real answer does not. In a composite, skip the member so the chain moves on and — if nothing is
+      // left — surfaces the honest "all members unavailable" error instead of that silent stall. The Code-tab
+      // tool definitions alone (~25k) already crowd a small local model. Composite-only: a single-model pick
+      // is the user's call (it proceeds and the reactive path / the client's own timeout handle it).
+      const budget = window - PROACTIVE_OUTPUT_RESERVE;
+      if (window && composite && fit.after > budget) {
+        const why = `no room to answer (~${kilo(fit.after)}tok payload leaves < ${kilo(PROACTIVE_OUTPUT_RESERVE)}tok of its ~${kilo(window)}tok window for the reply)`;
         log(`  -> ${m.provider.id}:${m.model} skipped — ${why}`);
         bestErr = worseOf(bestErr, { kind: "window" });
         memberFails.set(`${m.provider.id}:${m.model}`, why);
