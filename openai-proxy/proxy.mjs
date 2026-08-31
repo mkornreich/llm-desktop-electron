@@ -4252,7 +4252,12 @@ const server = http.createServer(async (req, res) => {
     // the default upstream). The safety/prefix classifier stays single-shot on the default. Everything else
     // is a single member.
     const members = route === ROUTE.MAIN ? resolveComposite(reqModel)
-      : (route === ROUTE.COMPACTION && OPENAI_COMPACT_MODELS) ? resolveCompactChain()
+      // A client COMPACTION turn uses the dedicated compact chain ONLY when the COMPOSITE is the model in
+      // use (a composite has no single model to summarise with). When a SPECIFIC model is picked, this
+      // falls through to the single-member routing below (resolving reqModel to that provider+model), so
+      // the summary is produced by the very model the user is running. reqModel carries the pick verbatim
+      // (e.g. "openrouter2:moonshotai/kimi-k3:exacto"), confirmed in the wire logs.
+      : (route === ROUTE.COMPACTION && OPENAI_COMPACT_MODELS && reqModel === COMPOSITE_ID) ? resolveCompactChain()
       : isCls ? resolveClassifierChain(route)   // configurable classifier fallover chain (else single-shot)
       : null;
     // Single-member provider + model. A MAIN turn resolves the REQUEST's "<provider>:<model>". A classifier

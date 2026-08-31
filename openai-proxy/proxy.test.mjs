@@ -1045,6 +1045,14 @@ test("resolveCompactChain: empty -> single default member, else ordered members"
   assert.ok(chain[1].provider && chain[1].provider.baseURL);
 });
 
+test("a client compaction turn uses the compact chain ONLY for the composite; a specific pick self-compacts", () => {
+  // The gate: the dedicated compact chain is used for a COMPACTION route only when reqModel is the
+  // composite id. A picked "<provider>:<model>" falls through to single-member routing, so the model in
+  // use compacts itself (verified against the wire logs, where reqModel carries the pick verbatim).
+  const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
+  assert.match(src, /route === ROUTE\.COMPACTION && OPENAI_COMPACT_MODELS && reqModel === COMPOSITE_ID\) \? resolveCompactChain\(\)/);
+});
+
 test("resolveClassifierChain: single/blank -> null (single-shot), a list -> an ordered fallover chain", () => {
   // A single configured model keeps the single-shot path (returns null so the handler resolves it there).
   assert.equal(resolveClassifierChain(ROUTE.SAFETY_BLOCK, { safetyStr: "freetoken:gemma-4-e2b" }), null);
