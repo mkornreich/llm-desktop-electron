@@ -178,11 +178,11 @@ function resolvePickedProvider(reqModel) {
   // and the bare model id — no key required. reg.baseURL already folds LLMD_LOCAL_BASE for the managed
   // Ollama, so it is used directly here (never re-applying the Ollama base to freetoken's 1919 port).
   if (reg.loopback) {
-    return { provider: { id: reg.id, baseURL: reg.baseURL, auth: reg.id, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {}, protocol: reg.protocol, anthropicEndpoint: reg.anthropicEndpoint }, model: s.slice(i + 1) };
+    return { provider: { id: reg.id, baseURL: reg.baseURL, auth: reg.id, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {}, protocol: reg.protocol, anthropicEndpoint: reg.anthropicEndpoint, reasoning: reg.reasoning }, model: s.slice(i + 1) };
   }
   const auth = providerAuth(reg);
   if (!auth) return null;
-  return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {}, protocol: reg.protocol, anthropicEndpoint: reg.anthropicEndpoint }, model: s.slice(i + 1) };
+  return { provider: { id: reg.id, baseURL: reg.baseURL, auth, api: reg.api, isOpenAI: reg.isOpenAI, extraHeaders: {}, protocol: reg.protocol, anthropicEndpoint: reg.anthropicEndpoint, reasoning: reg.reasoning }, model: s.slice(i + 1) };
 }
 
 // ---------- composite (fallback) model ----------
@@ -3984,6 +3984,9 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
     if (m.provider.protocol === "anthropic" && !isCls) {
       const id = `${m.provider.id}:${m.model}`;
       const ptPayload = anthropicPassthroughPayload(body, m.model);
+      // Pass-through bypasses the proxy's own reasoning-effort injection, so a provider that wants a
+      // forced reasoning level (e.g. OpenRouter Kimi-K3 at effort:high) carries it in its config.
+      if (m.provider.reasoning) ptPayload.reasoning = m.provider.reasoning;
       const shape = requestShape(body);
       log(`/v1/messages [anthropic] model=${reqModel}->${m.model} ${contextFields(shape)}` +
           ` stream=${!!ptPayload.stream}${ptPayload.tools ? ` tools=${ptPayload.tools.length}` : ""}${routeLabel(route)}`);

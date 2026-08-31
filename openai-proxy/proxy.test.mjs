@@ -1721,13 +1721,15 @@ test("anthropicUpstreamHeaders: sends both x-api-key and Bearer + anthropic-vers
 test("protocol/anthropicEndpoint thread through the registry and resolved members", async () => {
   const { buildProviders } = await import("./config.mjs");
   const reg = buildProviders({ providers: {
-    zai: { endpoint: "https://api.z.ai/api/paas/v4", protocol: "anthropic", anthropicEndpoint: "https://api.z.ai/api/anthropic", keyNames: ["zaiApiKey"], api: "chat" },
+    zai: { endpoint: "https://api.z.ai/api/paas/v4", protocol: "anthropic", anthropicEndpoint: "https://api.z.ai/api/anthropic", keyNames: ["zaiApiKey"], api: "chat", reasoning: { effort: "high" } },
     plain: { endpoint: "https://api.example.com/v1", keyNames: ["exApiKey"], api: "chat" },
   } }, { zaiApiKey: "k" });
   assert.equal(reg.zai.protocol, "anthropic");
   assert.equal(reg.zai.anthropicEndpoint, "https://api.z.ai/api/anthropic");
+  assert.deepEqual(reg.zai.reasoning, { effort: "high" }, "per-provider reasoning is carried");
   assert.equal(reg.plain.protocol, "openai", "default keeps OpenAI mode");
   assert.equal(reg.plain.anthropicEndpoint, "");
+  assert.equal(reg.plain.reasoning, null, "no reasoning directive by default");
   // resolvePickedProvider wires the fields onto the trimmed member-provider object it builds
   const src = fs.readFileSync(new URL("./proxy.mjs", import.meta.url), "utf8");
   assert.match(src, /protocol: reg\.protocol, anthropicEndpoint: reg\.anthropicEndpoint/);
@@ -1739,6 +1741,9 @@ test("pass-through is wired into obtainUpstream (gated off classifiers) and pipe
   assert.match(src, /passthrough: true/);
   assert.match(src, /if \(got\.passthrough\) \{/);
   assert.match(src, /await pipeAnthropic\(res, upstream, model, !!payload\.stream/);
+  // a pass-through provider with a configured reasoning directive gets it injected into the forwarded body
+  assert.match(src, /if \(m\.provider\.reasoning\) ptPayload\.reasoning = m\.provider\.reasoning;/);
+  assert.match(src, /reasoning: reg\.reasoning/);
   // a pass-through winner keeps its own empty fallover
   assert.match(src, /if \(!r\.passthrough\) r\.fallover = composite/);
   // an anthropic member is never placed in an OpenAI winner's mid-stream fallover list (would be callOpenAI'd)

@@ -230,8 +230,12 @@ export const SETTINGS = [
     type: "bool01", default: "0" },
   { name: "OPENAI_SHOW_THINKING", env: "OPENAI_SHOW_THINKING", project: ["OPENAI_SHOW_THINKING"],
     type: "bool01", default: "1" },
+  // Default reasoning effort for MAIN turns, applied to every model. "high" is the ceiling every
+  // OpenAI-compatible model here accepts (xhigh/max are Claude-only; the proxy self-heals a rejected
+  // effort DOWN the ladder anyway, so "high" gets each model its real maximum without a per-restart
+  // 400-dance). Classifier/compaction turns override this to their own (lower/none) effort.
   { name: "OPENAI_REASONING_EFFORT", env: "OPENAI_REASONING_EFFORT",
-    project: ["OPENAI_REASONING_EFFORT"], type: "str", default: "medium" },
+    project: ["OPENAI_REASONING_EFFORT"], type: "str", default: "high" },
   // QUIRK: default is 4000 but an explicit 0 resolves to 2000, not 4000. Preserved from the
   // original expression `parseInt(... || "4000", 10) || 2000`. Either number is defensible
   // as a floor; having two is not. Left alone here so the change is its own decision.
@@ -363,6 +367,10 @@ export function buildProviders(config = loadConfig(), keys) {
       // /v1/messages) — required when protocol is "anthropic". Leaving protocol unset keeps OpenAI mode.
       protocol: p.protocol === "anthropic" ? "anthropic" : "openai",
       anthropicEndpoint: fillEndpoint(p.anthropicEndpoint || "", K) || "",
+      // Optional per-provider reasoning directive merged into the request. Mainly for pass-through
+      // providers (whose body bypasses the proxy's own reasoning-effort injection): e.g. OpenRouter
+      // honours a top-level {effort:"high"} on its Anthropic endpoint to force a model's reasoning.
+      reasoning: (p.reasoning && typeof p.reasoning === "object") ? p.reasoning : null,
       loopback: !!p.loopback,     // keyless on-device server — exposed so callers key off the flag, not the id
       managed: p.managed || null, // the launcher's autostart block (engine/port/launch/...), or null
       // Curated model allowlist. When non-empty it is the ONLY set of this provider's models offered to

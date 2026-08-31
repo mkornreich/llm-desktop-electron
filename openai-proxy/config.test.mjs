@@ -34,7 +34,7 @@ test("with nothing configured, every setting resolves to its documented default"
   assert.equal(v.OPENAI_MAX_TURN_OUTPUT_TOKENS, 56000);
   assert.equal(v.OPENAI_MAX_TOOLS, 128);
   assert.equal(v.OPENAI_MAX_TOOLS_RESPONSES, Infinity);
-  assert.equal(v.OPENAI_REASONING_EFFORT, "medium");
+  assert.equal(v.OPENAI_REASONING_EFFORT, "high");
   assert.equal(v.OPENAI_VERBOSITY, "high");
   assert.equal(v.OPENAI_THINKING_MIN_BUDGET, 4000);
   assert.equal(v.OPENAI_MAX_TEXT_CHARS, 400000);
