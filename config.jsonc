@@ -81,7 +81,7 @@
       // chain / responses-only pickers. NB: its ~36k-token KV budget only fits SMALL compactions; a big
       // one overflows and the chain falls over to a cloud member.
       "responses": true,
-      "contextWindow": 32768,
+      "contextWindow": 40960,
       "loopback": true,
       "match": ":1919(/|$)"
     },
@@ -164,6 +164,26 @@
       // sharing enabled at openrouter.ai/settings/privacy. Ordered best-first.
       "suggestions": ["nvidia/nemotron-3-ultra-550b-a55b:free","nvidia/nemotron-3-super-120b-a12b:free","nvidia/nemotron-3.5-lightning:free","nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free","cohere/north-mini-code:free","poolside/laguna-xs-2.1:free","poolside/laguna-s-2.1:free","dots-studio/dots-3-note-preview:free","liquid/lfm-2.5-2.6b:free","stealth/ox-alpha","openrouter/free"]
     },
+    // Second OpenRouter key (openrouterApiKey2), used as an ANTHROPIC PASS-THROUGH provider: OpenRouter
+    // exposes an Anthropic Messages API at /api/v1/messages that routes non-Claude models too (verified with
+    // Kimi K3), so the proxy forwards /v1/messages verbatim — no OpenAI translation. Model uses OpenRouter's
+    // ":exacto" variant (routes to the highest tool-calling-accuracy provider) and a forced reasoning:high
+    // (pass-through bypasses the proxy's own effort injection; OpenRouter honours a top-level `reasoning`).
+    "openrouter2": {
+      "endpoint": "https://openrouter.ai/api/v1",
+      "api": "chat",
+      "protocol": "anthropic",
+      "anthropicEndpoint": "https://openrouter.ai/api",
+      "model": "moonshotai/kimi-k3:exacto",
+      "claudeCodeModel": "claude-opus-4-8[1m]",
+      "label": "OpenRouter · Kimi K3",
+      "keyNames": ["openrouterApiKey2","apiKey"],
+      "isOpenAI": false,
+      "responses": false,
+      "contextWindow": 1000000,
+      "reasoning": { "effort": "high" },
+      "suggestions": ["moonshotai/kimi-k3:exacto","moonshotai/kimi-k3"]
+    },
     "nvidia": {"endpoint":"https://integrate.api.nvidia.com/v1","api":"chat","model":"nvidia/nemotron-3-super-120b-a12b","claudeCodeModel":"claude-opus-4-8[1m]",
   "label": "NVIDIA",
   "keyNames": ["nvidiaApiKey","apiKey"],
@@ -196,7 +216,7 @@
   // It replaced llama-3.3-nemotron-super-49b-v1.5, which under a real multi-tool + reasoning load either timed
   // out (>45s) or wrote tool calls as TEXT (<TOOLCALL>…); the 120b-a12b tool-tested clean-native under that
   // load. freetoken (tiny local) is the last-resort.
-  "composite": ["gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","nvidia:nvidia/nemotron-3-super-120b-a12b","mistral:mistral-large-latest","ollama-cloud:gpt-oss:120b","cohere:command-a-plus-05-2026","cloudflare:@cf/qwen/qwen3.8-27b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b"],
+  "composite": ["gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","mistral:mistral-large-latest","ollama-cloud:gpt-oss:120b","cohere:command-a-plus-05-2026","cloudflare:@cf/qwen/qwen3.8-27b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b"],
   "compositeMaxWaitMs": 30000,
 
   // Time-to-response-headers cap (ms) per upstream member. A model that connects but never responds
@@ -332,7 +352,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","mistral:mistral-large-latest","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","openrouter:stealth/ox-alpha","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:moonshotai/kimi-k3:exacto","mistral:mistral-large-latest","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:stealth/ox-alpha","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"],
     "gatewayModelDiscovery": true
   },
 
