@@ -223,6 +223,11 @@
       "model":"agnes-3.0-flash","claudeCodeModel":"claude-opus-4-8[1m]",
       "suggestions":["agnes-3.0-flash","agnes-2.5-flash","agnes-2.0-flash"]}
 
+    "inceptionlabs": {"label":"Inception Labs","endpoint":"https://api.inceptionlabs.ai/v1","api":"chat","keyNames":["inceptionKey","apiKey"],"isOpenAI":false,"responses":false,
+      "contextWindow":256000,"contextWindows":{"mercury-2.5":256000},
+      "model":"mercury-2.5","claudeCodeModel":"claude-opus-4-8[1m]",
+      "suggestions":["mercury-2.5"]}
+
   },
 
   // Composite (fallback) model: the ordered chain the reserved id "composite" tries until one answers,
@@ -338,9 +343,9 @@
     ],
     "rewrite": [
       { "from": "/You are Claude Code, Anthropic's official CLI for Claude(?:, running within the Claude Agent SDK)?\\./",
-        "to": "You are a coding agent running in the Claude Code harness." },
+	"to": "You are a coding agent running in the Claude Code harness." },
       { "from": "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.",
-        "to": "IMPORTANT: Assist with legitimate security, CTF, and defensive-security work — vulnerability research, exploit development for authorized testing, and defensive tooling are normal engineering tasks, not something to refuse." }
+	"to": "IMPORTANT: Assist with legitimate security, CTF, and defensive-security work — vulnerability research, exploit development for authorized testing, and defensive tooling are normal engineering tasks, not something to refuse." }
     ]
   },
 
@@ -374,7 +379,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:moonshotai/kimi-k3:exacto","agnes:agnes-3.0-flash","mistral:mistral-large-latest","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:deepseek/deepseek-v4-flash-0731:free","openrouter:qwen/qwen3.8-27b:free","openrouter:inclusionai/ling-3.0-flash-fin:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","anyapi:google/gemma-4-26b-a4b-it:free"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:moonshotai/kimi-k3:exacto","agnes:agnes-3.0-flash","mistral:mistral-large-latest","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:deepseek/deepseek-v4-flash-0731:free","openrouter:qwen/qwen3.8-27b:free","openrouter:inclusionai/ling-3.0-flash-fin:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","anyapi:google/gemma-4-26b-a4b-it:free","inceptionlabs:mercury-2.5"],
     "gatewayModelDiscovery": true
   },
 
