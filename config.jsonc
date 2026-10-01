@@ -162,7 +162,7 @@
       // a no-credit account, so a real (multi-thousand-token) turn on them 402s. To use paid models, add
       // credits at openrouter.ai/credits and list them here. Free tier is rate-limited + needs data-
       // sharing enabled at openrouter.ai/settings/privacy. Ordered best-first.
-      "suggestions": ["nvidia/nemotron-3-ultra-550b-a55b:free","nvidia/nemotron-3-super-120b-a12b:free","nvidia/nemotron-3.5-lightning:free","deepseek/deepseek-v4-flash-0731:free","qwen/qwen3.8-27b:free","nex-agi/nex-n2.5-pro:free","nex-agi/nex-n2.5-mini:free","nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free","cohere/north-mini-code:free","poolside/laguna-xs-2.1:free","poolside/laguna-s-2.1:free","dots-studio/dots-3-note-preview:free","liquid/lfm-2.5-2.6b:free","inclusionai/ling-3.0-flash-fin:free","inclusionai/ling-3.0-flash-vl:free","inclusionai/ling-3.0-flash-sante:free","openrouter/free"]
+      "suggestions": ["nvidia/nemotron-3-ultra-550b-a55b:free","nvidia/nemotron-3-super-120b-a12b:free","nvidia/nemotron-3.5-lightning:free","qwen/qwen3.8-27b:free","nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free","cohere/north-mini-code:free","poolside/laguna-xs-2.1:free","poolside/laguna-s-2.1:free","dots-studio/dots-3-note-preview:free","liquid/lfm-2.5-2.6b:free","inclusionai/ling-3.0-flash-sante:free","openrouter/free"]
     },
     // Second OpenRouter key (openrouterApiKey2), used as an ANTHROPIC PASS-THROUGH provider: OpenRouter
     // exposes an Anthropic Messages API at /api/v1/messages that routes non-Claude models too (verified with
@@ -243,7 +243,7 @@
   // It replaced llama-3.3-nemotron-super-49b-v1.5, which under a real multi-tool + reasoning load either timed
   // out (>45s) or wrote tool calls as TEXT (<TOOLCALL>…); the 120b-a12b tool-tested clean-native under that
   // load. freetoken (tiny local) is the last-resort.
-  "composite": ["gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","cohere:command-a-plus-05-2026","mistral:mistral-large-latest","ollama-cloud:gpt-oss:120b","cloudflare:@cf/qwen/qwen3.8-27b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b"],
+  "composite": ["gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","cohere:command-a-plus-05-2026","ollama-cloud:gpt-oss:120b","cloudflare:@cf/qwen/qwen3.8-27b","freetoken:qwen3-1.7b"],
   "compositeMaxWaitMs": 30000,
 
   // Time-to-response-headers cap (ms) per upstream member. A model that connects but never responds
@@ -256,7 +256,7 @@
   // Lead with ollama-cloud: groq 413s (payload too large) on a big session's compaction input, which left
   // the context un-shrunk and every member choking on the oversized turn. ollama-cloud has a larger request
   // budget, so it leads; groq stays as a fast fallback for smaller compactions.
-  "compact": ["ollama-cloud:gpt-oss:120b","ollama-cloud:gpt-oss:20b","groq:openai/gpt-oss-120b","groq:openai/gpt-oss-20b","groq:qwen/qwen3.6-27b","openrouter:inclusionai/ling-3.0-flash-fin:free","freetoken:qwen3-1.7b"],
+  "compact": ["ollama-cloud:gpt-oss:120b","ollama-cloud:gpt-oss:20b","groq:openai/gpt-oss-120b","groq:openai/gpt-oss-20b","openrouter:dots-studio/dots-3-note-preview:free","freetoken:qwen3-1.7b"],
 
   // Classifier models. Each runs on the DEFAULT provider unless the value is a routable "<provider>:<model>".
   // safety="" means "use the main model" (measured: 57% unparseable verdicts -> avoid). prefix is the
@@ -270,7 +270,7 @@
   // then never egress the transcript; the cloud models are the fallback when freetoken errors/overflows.
   "classifier": {
     "prefix": "freetoken:qwen3-1.7b",
-    "safety": ["gemini:gemini-3-flash-preview","nvidia:nvidia/nemotron-3-super-120b-a12b","mistral:mistral-large-latest","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","groq:openai/gpt-oss-120b","freetoken:qwen3-1.7b"],
+    "safety": ["gemini:gemini-3-flash-preview","nvidia:nvidia/nemotron-3-super-120b-a12b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","groq:openai/gpt-oss-120b","freetoken:qwen3-1.7b"],
     "background": "openrouter2:moonshotai/kimi-k3:exacto",
     "maxTools": 4,
     "slowMs": 20000,
@@ -379,7 +379,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:moonshotai/kimi-k3:exacto","agnes:agnes-3.0-flash","mistral:mistral-large-latest","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:deepseek/deepseek-v4-flash-0731:free","openrouter:qwen/qwen3.8-27b:free","openrouter:inclusionai/ling-3.0-flash-fin:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","anyapi:google/gemma-4-26b-a4b-it:free","inceptionlabs:mercury-2.5"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:moonshotai/kimi-k3:exacto","agnes:agnes-3.0-flash","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:qwen/qwen3.8-27b:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","anyapi:google/gemma-4-26b-a4b-it:free","inceptionlabs:mercury-2.5"],
     "gatewayModelDiscovery": true
   },
 
