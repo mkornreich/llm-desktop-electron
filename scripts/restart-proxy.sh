@@ -16,6 +16,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 PORT="$(node -e 'try{console.log(require("./openai-proxy/jsonc.cjs").readConfig().advanced.port||8123)}catch{console.log(8123)}' 2>/dev/null || echo 8123)"
 HEALTH="http://127.0.0.1:${PORT}/health"
 
+# Before touching a running proxy: a config.jsonc that does not parse would turn "restart" into "kill the
+# working proxy, then fail to start its replacement". The resolver names the file:line:column on stderr.
+node openai-proxy/config.mjs --providers >/dev/null \
+  || { echo "[restart] config.jsonc does not parse (above) — not restarting; the running proxy is untouched" >&2; exit 1; }
+
 # The pid the proxy currently reports as healthy (empty if nothing is serving).
 health_pid() {
   curl -s -m 3 "$HEALTH" 2>/dev/null \
@@ -55,7 +60,10 @@ else
   else
     echo "[restart] no running app found to borrow env from — deriving from config.jsonc"
     echo "[restart] (if the proxy's upstream is a managed Ollama, relaunch with ./run.sh instead)"
-    eval "$(node openai-proxy/config.mjs --env 2>/dev/null)" || true
+    # Not `eval "$(… 2>/dev/null)" || true`: that hid a config.jsonc syntax error and went on to start a
+    # proxy that cannot read its config. The resolver prints the error (file:line:column) on stderr.
+    env_out="$(node openai-proxy/config.mjs --env)" || { echo "[restart] config error (above) — fix config.jsonc and rerun" >&2; exit 1; }
+    eval "$env_out"
   fi
   if ! node scripts/ensure-proxy.mjs --port "$PORT"; then
     echo "[restart] ensure-proxy could not start the proxy — see the lines above" >&2

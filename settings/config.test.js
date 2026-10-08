@@ -78,6 +78,21 @@ test("unknown keys are ignored rather than written", () => {
   });
 });
 
+// A malformed config.jsonc (the shared parser is strict) is REFUSED by the editor: splicing a value
+// into spans a bad parse invented would corrupt the file further, and reading it would show the GUI
+// values that are not what the proxy would run. This is the stray-quote typo that once parsed silently.
+const TYPO = SAMPLE.replace('"defaultProvider": "ollama"', '"defaultProvider": ""ollama"');
+
+test("a malformed config.jsonc is refused with its line:column, and never rewritten", () => {
+  withTempConfig(TYPO, (file) => {
+    const syntaxError = (e) => e.name === "JsoncSyntaxError" && e.line === 4 && e.column === 24
+      && e.message.startsWith(`${file}:4:24: expected ',' or '}' after the value of "defaultProvider"`);
+    assert.throws(() => readValues(file), syntaxError);
+    assert.throws(() => writeValues({ PROVIDER: "anthropic" }, file), syntaxError);
+    assert.equal(fs.readFileSync(file, "utf8"), TYPO, "the file is byte-for-byte untouched");
+  });
+});
+
 test("reading falls back to the schema default when a key is absent", () => {
   withTempConfig(`{ "mode": "anthropic" }\n`, (file) => {
     const v = readValues(file);

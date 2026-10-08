@@ -143,7 +143,11 @@ fi
 # OPENAI_*/OLLAMA_*/CLAUDE_CODE_*/LLMD_* var. Env overrides still win (PROVIDER=… / OPENAI_MODEL=… ./run.sh),
 # and it applies the same back-compat (a legacy PROVIDER=cohere selects proxy mode with that upstream). The
 # legacy dotfile reads that remain further down are harmless fallbacks that self-neutralise once the files go.
-eval "$(node openai-proxy/config.mjs --env)" || { echo "[run] config error — run: node openai-proxy/config.mjs --validate"; exit 1; }
+# Captured BEFORE the eval: `eval "$(cmd)" || …` never fires, because when cmd fails its stdout is empty
+# and `eval ""` succeeds — run.sh used to carry on with an empty mode/provider. The resolver prints the
+# reason (e.g. a config.jsonc syntax error at line:column) on stderr; this only adds where to look.
+LLMD_ENV="$(node openai-proxy/config.mjs --env)" || { echo "[run] config error (above) — fix config.jsonc, then: node openai-proxy/config.mjs --validate"; exit 1; }
+eval "$LLMD_ENV"
 PROVIDER="$LLMD_MODE"
 DEFAULT_PROVIDER="$LLMD_DEFAULT_PROVIDER"
 case "$PROVIDER" in

@@ -63,12 +63,30 @@ export const KEY_FILE = fileURLToPath(new URL("../.openai-key", import.meta.url)
 
 // The consolidated config lives in one JSONC file (config.jsonc). This is the single source for every
 // non-secret setting; the four KV files above are legacy (the migration removes all but .openai-key).
-// Tolerant of a missing/broken file — returns {} so a fresh checkout degrades to env-vars + defaults
-// rather than crashing the proxy (mirrors loadKV's forgiveness).
+// Tolerant of a MISSING file — returns {} so a fresh checkout degrades to env-vars + defaults (mirrors
+// loadKV's forgiveness). A file that exists but does not parse THROWS (a JsoncSyntaxError naming
+// file:line:column): this used to return {} too, so a hand-edit typo silently swapped the whole config
+// for defaults — or, before the parser was strict, for whatever a lenient parse salvaged.
 export function loadConfig(file = CONFIG_FILE) {
-  try { return readConfig(file); } catch { return {}; }
+  try { return readConfig(file); }
+  catch (e) { if (e.code === "ENOENT") return {}; throw e; }
 }
 export { CONFIG_FILE };
+
+// Run as a CLI (`--validate` by hand, `--env` eval'd by run.sh), a config.jsonc that does not parse must
+// come out as one clean `error: <file>:<line>:<col>: …` and exit 1 — not as an uncaught stack trace from
+// the module-level registry build below. Imported (the proxy), the error propagates instead: a proxy
+// must refuse to start on a config it cannot read, and the supervisor gives up after its fast failures.
+const IS_CLI = !!process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1]);
+if (IS_CLI) {
+  try { loadConfig(); }
+  catch (e) {
+    // --validate reports on stdout like its other `error:` lines; every other verb's stdout is data
+    // (run.sh evals --env), so the error goes to stderr. writeSync: process.exit must not truncate it.
+    fs.writeSync(process.argv[2] === "--validate" ? 1 : 2, `error: ${e.message}\n`);
+    process.exit(1);
+  }
+}
 const getPath = (obj, dot) => String(dot).split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
 
 // ---------- types ----------
@@ -891,7 +909,7 @@ export function emitEnv({ env = process.env } = {}) {
 // run.sh is bash and needs the hash to decide whether a running proxy is the one it wants.
 // Keeping that in this module rather than reimplementing the precedence in shell is the
 // entire reason this file exists.
-if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
+if (IS_CLI) {
   const arg = process.argv[2] || "--json";
   if (arg === "--hash") process.stdout.write(configHash() + "\n");
   else if (arg === "--code-version") process.stdout.write(codeVersion() + "\n");

@@ -9,10 +9,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   SETTINGS, resolve, snapshot, configHash, keyFingerprint, codeVersion, validate, loadKV,
-  PROVIDERS, providerForBase, activeProviders, isNonToolModel, buildProviders,
+  PROVIDERS, providerForBase, activeProviders, isNonToolModel, buildProviders, loadConfig,
 } from "./config.mjs";
 
 // Resolve against explicit sources so the developer's own dotfiles / config.jsonc cannot change a result.
@@ -430,6 +433,113 @@ test("the project dotfile on disk parses, and holds only declared keys", () => {
   const launcherKeys = /^CLAUDE_CODE_/;
   const unknown = Object.keys(onDisk).filter((k) => !declared.has(k) && !launcherKeys.test(k));
   assert.deepEqual(unknown, [], `unrecognised keys in .openai-model: ${unknown.join(", ")}`);
+});
+
+// ---------- config.jsonc syntax ----------
+//
+// A config.jsonc that does not parse is a hard error naming file:line:column. The parser used to be
+// lenient, and this exact hand-edit (one stray quote) was accepted as `"prefix": ""` plus an invented
+// key `"penrouter2:z-ai/glm-5.3-flash": 0`: the prefix classifier silently fell back to the default
+// provider, and --validate said nothing.
+const TYPO_CONFIG = `{
+  // classifier routing
+  "classifier": {
+    "prefix": ""openrouter2:z-ai/glm-5.3-flash",
+    "maxTools": 4,
+  },
+}
+`;
+
+function withConfigFile(body, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "config-test-"));
+  const file = path.join(dir, "config.jsonc");
+  fs.writeFileSync(file, body);
+  try { return fn(file, dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("the stray-quote typo in classifier.prefix is a parse error at its line:column, not a junk key", () => {
+  withConfigFile(TYPO_CONFIG, (file) => {
+    assert.throws(() => loadConfig(file), (e) => {
+      assert.equal(e.name, "JsoncSyntaxError");
+      assert.ok(e instanceof SyntaxError);
+      assert.equal(e.line, 4);
+      assert.equal(e.column, 17, "the 'o' right after the empty string \"\"");
+      assert.ok(e.message.startsWith(`${file}:4:17: expected ',' or '}' after the value of "prefix", found 'openrouter2'`), e.message);
+      // The offending source line is quoted, with the caret under column 17.
+      const [, src, caret] = e.message.split("\n");
+      assert.match(src, /"prefix": ""openrouter2:z-ai\/glm-5\.3-flash",$/);
+      assert.equal(caret.indexOf("^"), src.indexOf('""openrouter2') + 2);
+      return true;
+    });
+  });
+});
+
+test("other malformed shapes are hard errors too, each at the offending line:column", () => {
+  const cases = [
+    // [shape, body, line, column, reason]
+    ["a bare identifier as a value", `{\n  "mode": proxy\n}`, 2, 11, /expected a value .*found 'proxy'/],
+    ["a bare identifier as a key", `{\n  mode: "proxy"\n}`, 2, 3, /expected a "quoted" property name or '}', found 'mode'/],
+    ["two adjacent strings", `{\n  "mode": "proxy" "defaultProvider": "openai"\n}`, 2, 19,
+      /expected ',' or '}' after the value of "mode", found '"'/],
+    ["a missing comma at a line end", `{\n  "a": { "x": 1 }\n  // note\n  "b": 2\n}`, 4, 3,
+      /after the value of "a", found '"' \(missing ',' at the end of line 2\?\)/],
+    ["an unterminated string", `{\n  "mode": "proxy,\n  "defaultProvider": "openai"\n}`, 2, 11, /unterminated string/],
+    ["an unterminated block comment", `{\n  "mode": "proxy" /* note\n}`, 2, 19, /unterminated \/\* comment/],
+    ["an unclosed object", `{\n  "mode": "proxy",\n`, 3, 1, /unterminated object \(the '\{' at 1:1 is never closed\)/],
+    ["a doubled comma", `{\n  "mode": "proxy",,\n}`, 2, 19, /expected a "quoted" property name or '}', found ','/],
+  ];
+  for (const [shape, body, line, column, reason] of cases) {
+    withConfigFile(body, (file) => {
+      assert.throws(() => loadConfig(file), (e) => {
+        assert.equal(e.name, "JsoncSyntaxError", shape);
+        assert.deepEqual([e.line, e.column], [line, column], `${shape}: ${e.message}`);
+        assert.match(e.reason, reason, shape);
+        return true;
+      }, shape);
+    });
+  }
+});
+
+test("legitimate JSONC still loads: comments, trailing commas; and a missing file is still {}", () => {
+  const body = `{\n  // line comment\n  "mode": "proxy", /* block */\n  "composite": ["a:b", "c:d",],\n` +
+    `  "classifier": { "prefix": "openrouter2:z-ai/glm-5.3-flash", "maxTools": -1.5e3, },\n}\n`;
+  withConfigFile(body, (file, dir) => {
+    assert.deepEqual(loadConfig(file), {
+      mode: "proxy", composite: ["a:b", "c:d"], classifier: { prefix: "openrouter2:z-ai/glm-5.3-flash", maxTools: -1500 },
+    });
+    assert.deepEqual(loadConfig(path.join(dir, "absent.jsonc")), {}, "a fresh checkout still degrades to defaults");
+  });
+});
+
+// The CLI verbs, run against a hermetic copy of this module beside a broken config.jsonc (CONFIG_FILE is
+// <module dir>/../config.jsonc, so the copy reads the scratch file, never the developer's own).
+function runCli(body, verb) {
+  return withConfigFile(body, (file, dir) => {
+    fs.mkdirSync(path.join(dir, "openai-proxy"));
+    for (const f of ["config.mjs", "jsonc.cjs"])
+      fs.copyFileSync(fileURLToPath(new URL(f, import.meta.url)), path.join(dir, "openai-proxy", f));
+    return spawnSync(process.execPath, [path.join(dir, "openai-proxy", "config.mjs"), verb],
+      { encoding: "utf8", env: { ...process.env, HOME: dir } });
+  });
+}
+
+test("--validate reports the typo as an error at its line:column and exits 1", () => {
+  const r = runCli(TYPO_CONFIG, "--validate");
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /^error: \S*config\.jsonc:4:17: expected ',' or '}' after the value of "prefix"/);
+  assert.match(r.stdout, /"prefix": ""openrouter2/, "the offending line is quoted");
+  assert.doesNotMatch(r.stdout + r.stderr, /\n\s+at /, "a clean message, not a stack trace");
+});
+
+test("--env (what run.sh evals) prints nothing to eval, the error on stderr, and exits 1", () => {
+  const r = runCli(TYPO_CONFIG, "--env");
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "", "nothing for run.sh to eval");
+  assert.match(r.stderr, /^error: \S*config\.jsonc:4:17: /);
+  // And a well-formed file still emits exports.
+  const ok = runCli(`{ "mode": "anthropic", }\n`, "--env");
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /^export LLMD_MODE='anthropic'$/m);
 });
 
 // ---------- validation ----------

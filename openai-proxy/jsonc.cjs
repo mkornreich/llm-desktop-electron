@@ -14,6 +14,11 @@
 // commas, double-quoted keys — which is everything `config.jsonc` contains. It is NOT a general JSON5
 // parser (no single quotes, no unquoted keys, no hex/Infinity literals).
 //
+// STRICT outside that subset: anything else is a JsoncSyntaxError naming line:column, never a guess.
+// The parser used to be lenient, and a hand-edit typo — `"prefix": ""openrouter2:z-ai/glm-5.3-flash",`
+// — parsed "successfully" as `"prefix": ""` plus an invented key `"penrouter2:z-ai/glm-5.3-flash": 0`,
+// so the prefix classifier quietly fell back to the default provider with no signal anywhere.
+//
 // Shared by BOTH module systems: config.mjs (ESM) `import`s this .cjs, settings/config.js (CJS)
 // `require`s it — one implementation, no duplicated parser across the ESM/CJS boundary.
 
@@ -26,14 +31,74 @@ const CONFIG_FILE = path.join(__dirname, "..", "config.jsonc");
 const WS = new Set([" ", "\t", "\n", "\r"]);
 const isWs = (c) => WS.has(c);
 
+// A syntax error in a JSONC document. `line`/`column` are 1-based; the message leads with
+// `<file>:<line>:<column>: <reason>` (the shape terminals and editors turn into a jump-to link) and then
+// quotes the offending source line with a caret under the column.
+class JsoncSyntaxError extends SyntaxError {
+  constructor(reason, text, offset, source) {
+    const { line, column, lineStart, lineEnd } = position(text, offset);
+    const where = `${source ? `${source}:` : ""}${line}:${column}`;
+    super(`${where}: ${reason}\n${excerpt(text.slice(lineStart, lineEnd), line, column)}`);
+    this.name = "JsoncSyntaxError";
+    Object.assign(this, { reason, line, column, offset, source });
+  }
+}
+
+// 1-based line/column of `offset`, plus the [lineStart, lineEnd) bounds of that line.
+function position(text, offset) {
+  const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  let lineEnd = text.indexOf("\n", offset);
+  if (lineEnd < 0) lineEnd = text.length;
+  return { line: text.slice(0, lineStart).split("\n").length, column: offset - lineStart + 1, lineStart, lineEnd };
+}
+
+// `  272 |     "prefix": ""openrouter2…` with a `^` under `column`. A very long line (an inline
+// suggestions array) is windowed around the column so the caret stays on screen.
+function excerpt(lineText, line, column) {
+  const WIDTH = 100;
+  let shown = lineText.replace(/\r$/, "").replace(/\t/g, " ");   // one column per char keeps the caret aligned
+  let caret = column - 1;
+  if (shown.length > WIDTH) {
+    const from = Math.max(0, Math.min(caret - WIDTH / 2, shown.length - WIDTH));
+    const tail = from + WIDTH < shown.length ? "…" : "";
+    shown = (from > 0 ? "…" : "") + shown.slice(from, from + WIDTH) + tail;
+    caret = caret - from + (from > 0 ? 1 : 0);
+  }
+  const gutter = String(line);
+  return `  ${gutter} | ${shown}\n  ${" ".repeat(gutter.length)} | ${" ".repeat(caret)}^`;
+}
+
+const WORD = /[A-Za-z0-9_$.+-]/;   // a char that can continue a bare token (number, keyword, typo)
+const NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;   // exactly JSON's number grammar
+const ESC = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
 // Parse `text` into { value, node }. `node` mirrors the structure with source spans:
 //   { start, end, type:"object", props: Map<key, childNode> }
 //   { start, end, type:"array",  items: childNode[] }
 //   { start, end, type:"string"|"literal" }
 // `start`/`end` bound the VALUE token itself (a string node's span includes its quotes).
-function parse(text) {
-  let i = 0;
+// `source` (a file path) only labels error messages. Malformed input throws JsoncSyntaxError.
+function parse(text, source) {
+  let i = text.charCodeAt(0) === 0xfeff ? 1 : 0;   // an editor-added BOM is not content
   const n = text.length;
+
+  const fail = (reason, at = i) => { throw new JsoncSyntaxError(reason, text, at, source); };
+  // What sits at `at`, for an error message: the whole bare word when there is one (the usual typo
+  // is an unquoted or half-quoted token), else the single character.
+  function found(at = i) {
+    if (at >= n) return "end of input";
+    let j = at;
+    while (j < n && WORD.test(text[j]) && j - at < 40) j++;
+    const tok = j > at ? text.slice(at, j) : text[at];
+    return /['\x00-\x1f]/.test(tok) ? JSON.stringify(tok) : `'${tok}'`;
+  }
+  const at = (offset) => { const p = position(text, offset); return `${p.line}:${p.column}`; };
+  // A missing ',' at the END of a line is reported where the next member starts — often lines below,
+  // past comments — so name the line the comma belongs on.
+  function missingComma(valueEnd) {
+    const line = position(text, valueEnd).line;
+    return line < position(text, i).line ? ` (missing ',' at the end of line ${line}?)` : "";
+  }
 
   // Advance past whitespace AND comments. Comments never appear inside a value token, only between
   // structural tokens, so skipping them here is enough for both parsing and span tracking.
@@ -42,42 +107,58 @@ function parse(text) {
       const c = text[i];
       if (isWs(c)) { i++; continue; }
       if (c === "/" && text[i + 1] === "/") { i += 2; while (i < n && text[i] !== "\n") i++; continue; }
-      if (c === "/" && text[i + 1] === "*") { i += 2; while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++; i += 2; continue; }
+      if (c === "/" && text[i + 1] === "*") {
+        const close = text.indexOf("*/", i + 2);
+        if (close < 0) fail("unterminated /* comment (no closing */)");
+        i = close + 2;
+        continue;
+      }
       break;
     }
   }
 
-  const ESC = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
   function parseString() {
     const start = i;
     i++; // opening quote
     let s = "";
-    while (i < n) {
+    for (;;) {
+      if (i >= n) fail("unterminated string (no closing '\"')", start);
       const c = text[i];
+      if (c === '"') { i++; break; }
+      if (c === "\n" || c === "\r") fail("unterminated string (no closing '\"' before the end of the line)", start);
+      if (c < " ") fail(`raw control character ${JSON.stringify(c)} in a string (write it as an escape)`);
       if (c === "\\") {
         const e = text[i + 1];
-        if (e === "u") { s += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16)); i += 6; }
-        else { s += (e in ESC ? ESC[e] : e); i += 2; }
+        if (e === "u") {
+          const hex = text.slice(i + 2, i + 6);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("invalid \\u escape (expected 4 hex digits)");
+          s += String.fromCharCode(parseInt(hex, 16)); i += 6;
+        } else if (e !== undefined && Object.hasOwn(ESC, e)) { s += ESC[e]; i += 2; }
+        else fail(`invalid escape ${JSON.stringify(`\\${e ?? ""}`)} in a string`);
         continue;
       }
-      if (c === '"') { i++; break; }
       s += c; i++;
     }
     return { value: s, node: { start, end: i, type: "string" } };
   }
 
+  // true / false / null / a JSON number — and nothing else. A bare word here (an unquoted string, a
+  // half-quoted typo, a JSON5-ism) is exactly the input the old lenient parser turned into 0.
   function parseLiteral() {
     const start = i;
-    // Consume up to the next structural char / whitespace / comment start.
-    while (i < n && !isWs(text[i]) && text[i] !== "," && text[i] !== "}" && text[i] !== "]"
-           && !(text[i] === "/" && (text[i + 1] === "/" || text[i + 1] === "*"))) i++;
-    const raw = text.slice(start, i);
-    let value;
-    if (raw === "true") value = true;
-    else if (raw === "false") value = false;
-    else if (raw === "null") value = null;
-    else value = Number(raw);
-    return { value, node: { start, end: i, type: "literal" } };
+    for (const [word, value] of [["true", true], ["false", false], ["null", null]]) {
+      if (text.startsWith(word, i) && !WORD.test(text[i + word.length] || "")) {
+        i += word.length;
+        return { value, node: { start, end: i, type: "literal" } };
+      }
+    }
+    NUMBER.lastIndex = i;
+    const m = NUMBER.exec(text);
+    if (m && !WORD.test(text[i + m[0].length] || "")) {
+      i += m[0].length;
+      return { value: Number(m[0]), node: { start, end: i, type: "literal" } };
+    }
+    return fail(`expected a value ("string", number, {…}, […], true, false or null), found ${found()}`);
   }
 
   function parseObject() {
@@ -86,15 +167,22 @@ function parse(text) {
     const props = new Map();
     const obj = {};
     skip();
-    while (i < n && text[i] !== "}") {
+    for (;;) {
+      if (text[i] === "}") break;                           // empty object, or after a trailing comma
+      if (i >= n) fail(`unterminated object (the '{' at ${at(start)} is never closed)`);
+      if (text[i] !== '"') fail(`expected a "quoted" property name or '}', found ${found()}`);
       const key = parseString();
       skip();
-      if (text[i] === ":") i++;               // colon
+      if (text[i] !== ":") fail(`expected ':' after property name ${JSON.stringify(key.value)}, found ${found()}`);
+      i++;
       const v = parseValue();
       props.set(key.value, v.node);
       obj[key.value] = v.value;
       skip();
-      if (text[i] === ",") { i++; skip(); }   // trailing comma tolerated (loop re-checks for })
+      if (text[i] === ",") { i++; skip(); continue; }       // trailing comma tolerated (loop re-checks for })
+      if (text[i] === "}") break;
+      if (i >= n) fail(`unterminated object (the '{' at ${at(start)} is never closed)`);
+      fail(`expected ',' or '}' after the value of ${JSON.stringify(key.value)}, found ${found()}${missingComma(v.node.end)}`);
     }
     i++; // }
     return { value: obj, node: { start, end: i, type: "object", props } };
@@ -106,12 +194,17 @@ function parse(text) {
     const items = [];
     const arr = [];
     skip();
-    while (i < n && text[i] !== "]") {
+    for (;;) {
+      if (text[i] === "]") break;                           // empty array, or after a trailing comma
+      if (i >= n) fail(`unterminated array (the '[' at ${at(start)} is never closed)`);
       const v = parseValue();
       items.push(v.node);
       arr.push(v.value);
       skip();
-      if (text[i] === ",") { i++; skip(); }   // trailing comma tolerated
+      if (text[i] === ",") { i++; skip(); continue; }       // trailing comma tolerated
+      if (text[i] === "]") break;
+      if (i >= n) fail(`unterminated array (the '[' at ${at(start)} is never closed)`);
+      fail(`expected ',' or ']' after array element ${items.length}, found ${found()}${missingComma(v.node.end)}`);
     }
     i++; // ]
     return { value: arr, node: { start, end: i, type: "array", items } };
@@ -127,18 +220,21 @@ function parse(text) {
   }
 
   const r = parseValue();
+  skip();
+  if (i < n) fail(`unexpected ${found()} after the end of the top-level value`);
   return r;
 }
 
-// Parse a JSONC file (or string) to a plain JS object. Comments and trailing commas are tolerated.
-function readConfigText(text) { return parse(text).value; }
-function readConfig(file = CONFIG_FILE) { return readConfigText(fs.readFileSync(file, "utf8")); }
+// Parse a JSONC file (or string) to a plain JS object. Comments and trailing commas are tolerated;
+// anything else malformed throws JsoncSyntaxError (labelled with `source`/the file path).
+function readConfigText(text, source) { return parse(text, source).value; }
+function readConfig(file = CONFIG_FILE) { return readConfigText(fs.readFileSync(file, "utf8"), file); }
 
 // Walk the node tree to the value node at `pathArr` (["providers","gemini","model"] or a mix with array
 // indices), returning { start, end } of that value's span, or null when any segment is missing. The
 // second return, `parentObject`, is the nearest enclosing OBJECT node — used to insert a missing leaf.
-function locate(text, pathArr) {
-  let node = parse(text).node;
+function locate(text, pathArr, source) {
+  let node = parse(text, source).node;
   let parentObject = node.type === "object" ? node : null;
   for (let k = 0; k < pathArr.length; k++) {
     const seg = pathArr[k];
@@ -156,8 +252,9 @@ function serialize(v) { return JSON.stringify(v); }
 
 // Replace (or, when the leaf key is absent, insert) the value at `pathArr` in `text`, preserving every
 // comment / blank line / key order / indentation outside the edited span. Returns the new text.
-function editText(text, pathArr, value) {
-  const found = locate(text, pathArr);
+// A malformed `text` throws JsoncSyntaxError rather than splicing at spans a bad parse invented.
+function editText(text, pathArr, value, source) {
+  const found = locate(text, pathArr, source);
   if (found.span) {
     return text.slice(0, found.span.start) + serialize(value) + text.slice(found.span.end);
   }
@@ -184,9 +281,9 @@ function editText(text, pathArr, value) {
 
 // File-level edit: read, splice one value, write back atomically-ish (single writeFileSync).
 function editConfig(file, pathArr, value) {
-  const next = editText(fs.readFileSync(file, "utf8"), pathArr, value);
+  const next = editText(fs.readFileSync(file, "utf8"), pathArr, value, file);
   fs.writeFileSync(file, next);
   return next;
 }
 
-module.exports = { CONFIG_FILE, readConfig, readConfigText, editConfig, editText, locate, parse };
+module.exports = { CONFIG_FILE, readConfig, readConfigText, editConfig, editText, locate, parse, JsoncSyntaxError };
