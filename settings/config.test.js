@@ -93,6 +93,18 @@ test("a malformed config.jsonc is refused with its line:column, and never rewrit
   });
 });
 
+test("configSyntaxError names a broken file, and is null for a good or a missing one", () => {
+  const { configSyntaxError } = require("./config.js");
+  withTempConfig(TYPO, (file) => {
+    const e = configSyntaxError(file);
+    assert.ok(e instanceof jsonc.JsoncSyntaxError);
+    assert.deepEqual([e.line, e.column], [4, 24]);
+    assert.match(e.excerpt, /""ollama"/, "the quoted line, for the window to show");
+  });
+  withTempConfig(SAMPLE, (file) => assert.equal(configSyntaxError(file), null));
+  assert.equal(configSyntaxError(path.join(os.tmpdir(), "no-such-dir-xyz", "config.jsonc")), null);
+});
+
 test("reading falls back to the schema default when a key is absent", () => {
   withTempConfig(`{ "mode": "anthropic" }\n`, (file) => {
     const v = readValues(file);

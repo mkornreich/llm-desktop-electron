@@ -303,8 +303,7 @@ const isArrayType = (t) => t === "composite";   // composite/compact/dropdown ar
 // managed via config.jsonc) gets a uniform "<label> model" group — a MODEL + an API-surface field — plus
 // its PATHS entries. So adding a keyed `providers.<id>` block to config.jsonc surfaces the provider in the
 // Settings window with NO code change here. The `file` label (".<id>-model") drives the anthropic dimming.
-function buildProviderSchema() {
-  const provs = jsonc.readConfig().providers || {};
+function buildProviderSchema(provs) {
   const out = [];
   for (const [id, p] of Object.entries(provs)) {
     if (id === "openai" || p.loopback) continue;                  // openai shares a group; loopback ones are special
@@ -326,13 +325,33 @@ function buildProviderSchema() {
   }
   return out;
 }
-{
-  // Splice the generated groups in just before the "OpenAI model" group (their historical position), and
-  // make the DEFAULT_PROVIDER dropdown list exactly the configured providers.
+// Splice the generated groups in just before the "OpenAI model" group (their historical position), and
+// make the DEFAULT_PROVIDER dropdown list exactly the configured providers. Done on the first successful
+// read of config.jsonc — normally at load. A config.jsonc that does not parse must NOT stop this module
+// (and so the Settings server) from loading: the window is where that syntax error gets shown. So a
+// failed build is retried by the next /api/config, after the file is fixed.
+let providerSchemaBuilt = false;
+function ensureProviderSchema() {
+  if (providerSchemaBuilt) return;
+  const provs = jsonc.readConfig().providers || {};   // the one read; throws before SCHEMA is touched
   const at = SCHEMA.findIndex((s) => s.group === "OpenAI model");
-  SCHEMA.splice(at < 0 ? SCHEMA.length : at, 0, ...buildProviderSchema());
+  SCHEMA.splice(at < 0 ? SCHEMA.length : at, 0, ...buildProviderSchema(provs));
   const dp = SCHEMA.find((s) => s.key === "DEFAULT_PROVIDER");
-  if (dp) dp.options = Object.keys(jsonc.readConfig().providers || {});
+  if (dp) dp.options = Object.keys(provs);
+  providerSchemaBuilt = true;
+}
+try { ensureProviderSchema(); }
+catch (e) { if (!(e instanceof jsonc.JsoncSyntaxError) && e.code !== "ENOENT") throw e; }
+
+// config.jsonc's syntax error (a JsoncSyntaxError naming line:column), or null when it parses. A MISSING
+// file is not a syntax error: the proxy's resolver degrades to defaults for that.
+function configSyntaxError(file = jsonc.CONFIG_FILE) {
+  try { jsonc.readConfig(file); return null; }
+  catch (e) {
+    if (e instanceof jsonc.JsoncSyntaxError) return e;
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
 }
 
 // JSONC native value -> the string form the GUI widgets use (bool -> "1"/"0", array -> comma-joined).
@@ -417,4 +436,5 @@ function previewConfig(updates, file = jsonc.CONFIG_FILE) {
 module.exports = {
   SCHEMA, ROOT, readFile, readValues, writeValues, filePath, PATHS, CONFIG_FILE: jsonc.CONFIG_FILE,
   readConfig: jsonc.readConfig, localModelValues, providerModel, previewConfig,
+  ensureProviderSchema, configSyntaxError, JsoncSyntaxError: jsonc.JsoncSyntaxError,
 };

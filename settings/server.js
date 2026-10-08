@@ -54,6 +54,12 @@ async function readJson(req) {
 let esm = null;
 async function mods() {
   if (esm) return esm;
+  // Never import config.mjs while config.jsonc does not parse. It reads the file at module load, and an
+  // ES module that throws while evaluating stays failed for the life of the process — the window could
+  // not recover even after the file was fixed. Throw the syntax error instead (handle() reports it);
+  // the import happens on the first call after the fix.
+  const bad = config.configSyntaxError();
+  if (bad) throw bad;
   const [procs, runtime, cfg, prov] = await Promise.all([
     import("../scripts/lib/procs.mjs"),
     import("../scripts/lib/proxy-runtime.mjs"),
@@ -261,9 +267,11 @@ async function handle(req, res) {
   if (url.pathname === "/api/close") { closeAt = Date.now(); return send(res, 200, { ok: true }); }
 
   try {
-    if (url.pathname === "/api/config" && req.method === "GET")
+    if (url.pathname === "/api/config" && req.method === "GET") {
+      config.ensureProviderSchema();   // a no-op once built; builds it now if config.jsonc was broken at load
       return send(res, 200, { schema: config.SCHEMA, values: config.readValues(), root: config.ROOT,
                               localModel: config.localModelValues() });
+    }
 
     if (url.pathname === "/api/config" && req.method === "POST") {
       const updates = await readJson(req);
@@ -424,6 +432,13 @@ async function handle(req, res) {
       return send(res, 200, await relaunch());
     return send(res, 404, { error: "no route" });
   } catch (e) {
+    // config.jsonc does not parse. Every route that reads it lands here, so the window gets the location
+    // as data — to show in place of a form it cannot fill — and nothing is ever written into the file.
+    if (e instanceof config.JsoncSyntaxError)
+      return send(res, 409, { error: e.message, parseError: {
+        file: e.source ? path.relative(config.ROOT, e.source) : "config.jsonc",
+        line: e.line, column: e.column, reason: e.reason, excerpt: e.excerpt,
+      } });
     return send(res, 500, { error: e.message });
   }
 }

@@ -38,9 +38,11 @@ class JsoncSyntaxError extends SyntaxError {
   constructor(reason, text, offset, source) {
     const { line, column, lineStart, lineEnd } = position(text, offset);
     const where = `${source ? `${source}:` : ""}${line}:${column}`;
-    super(`${where}: ${reason}\n${excerpt(text.slice(lineStart, lineEnd), line, column)}`);
+    const quoted = excerpt(text.slice(lineStart, lineEnd), line, column);
+    super(`${where}: ${reason}\n${quoted}`);
     this.name = "JsoncSyntaxError";
-    Object.assign(this, { reason, line, column, offset, source });
+    // `excerpt` alone (the quoted line + caret) is for a UI that lays the parts out itself (Settings).
+    Object.assign(this, { reason, line, column, offset, source, excerpt: quoted });
   }
 }
 

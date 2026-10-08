@@ -7,6 +7,8 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const net = require("node:net");
 const { spawn } = require("node:child_process");
@@ -21,11 +23,12 @@ function freePort() {
   });
 }
 
-// Boot the server and return { url, token, stop }. The URL it prints carries the token.
-async function boot(env = {}) {
+// Boot the server and return { url, token, stop }. The URL it prints carries the token. `root` runs the
+// server from a scratch copy of the tree instead (see scratchTree).
+async function boot(env = {}, root = ROOT) {
   const port = await freePort();
-  const child = spawn(process.execPath, [path.join(__dirname, "server.js")], {
-    cwd: ROOT,
+  const child = spawn(process.execPath, [path.join(root, "settings", "server.js")], {
+    cwd: root,
     env: { ...process.env, SETTINGS_PORT: String(port), ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -260,4 +263,80 @@ test("a reload is not a close: a beacon followed by a heartbeat keeps the server
     await beatFor(s, 2200, 250);                        // the reloaded page reconnects and keeps beating
     assert.ok(s.alive(), "a reload must not shut the server down");
   } finally { s.stop(); }
+});
+
+// ---- a config.jsonc that does not parse ----
+//
+// The window is where a config.jsonc syntax error gets shown, so the server must start anyway (it used to
+// throw at load, in settings/config.js) and hand the window the location as data. Run from a scratch copy
+// of the tree: the server reads <root>/config.jsonc, and the real one must never be touched.
+function scratchTree(configText) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-server-test-"));
+  for (const f of ["settings/server.js", "settings/config.js", "settings/index.html",
+                   "openai-proxy/jsonc.cjs", "openai-proxy/config.mjs"]) {
+    fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, f), path.join(dir, f));
+  }
+  fs.cpSync(path.join(ROOT, "scripts", "lib"), path.join(dir, "scripts", "lib"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "config.jsonc"), configText);
+  return dir;
+}
+
+const BROKEN = `{
+  "mode": "proxy",
+  "classifier": {
+    "prefix": ""openrouter2:z-ai/glm-5.3-flash",
+  },
+}
+`;
+const FIXED = `{
+  "mode": "proxy",
+  "defaultProvider": "acme",
+  "providers": { "acme": { "endpoint": "https://acme.example/v1", "api": "chat", "model": "acme-1",
+                           "label": "Acme", "keyNames": ["acmeKey"] } },
+  "classifier": { "prefix": "openrouter2:z-ai/glm-5.3-flash" },
+}
+`;
+
+test("a config.jsonc syntax error reaches the window as line:column data, and nothing is written", async () => {
+  const dir = scratchTree(BROKEN);
+  const s = await boot({ HOME: dir, PORT: String(await freePort()) }, dir);
+  try {
+    const read = await s.api("/api/config");
+    assert.equal(read.status, 409);
+    const pe = read.body.parseError;
+    assert.deepEqual([pe.file, pe.line, pe.column], ["config.jsonc", 4, 17]);
+    assert.match(pe.reason, /expected ',' or '}' after the value of "prefix", found 'openrouter2'/);
+    assert.match(pe.excerpt, /"prefix": ""openrouter2/, "the offending line is quoted for the window");
+    assert.match(read.body.error, /config\.jsonc:4:17: /);
+
+    const status = await s.api("/api/status");
+    assert.equal(status.status, 409, "the status line reports it too");
+    assert.equal(status.body.parseError.line, 4);
+
+    const write = await s.api("/api/config", { method: "POST", body: JSON.stringify({ PROVIDER: "anthropic" }) });
+    assert.equal(write.status, 409);
+    assert.equal(fs.readFileSync(path.join(dir, "config.jsonc"), "utf8"), BROKEN, "the file is untouched");
+  } finally { s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("once the file is fixed by hand, the same server recovers without a restart", async () => {
+  const dir = scratchTree(BROKEN);
+  const s = await boot({ HOME: dir, PORT: String(await freePort()) }, dir);
+  try {
+    assert.equal((await s.api("/api/config")).status, 409);
+    assert.equal((await s.api("/api/status")).status, 409);
+    fs.writeFileSync(path.join(dir, "config.jsonc"), FIXED);
+
+    const read = await s.api("/api/config");
+    assert.equal(read.status, 200, JSON.stringify(read.body));
+    assert.ok(read.body.schema.some((x) => x.key === "ACME_MODEL"), "provider groups are generated now");
+    assert.ok(read.body.schema.find((x) => x.key === "DEFAULT_PROVIDER").options.includes("acme"));
+    assert.equal(read.body.values.OPENAI_CLASSIFIER_MODEL.value, "openrouter2:z-ai/glm-5.3-flash");
+    // The proxy resolver was never imported while the file was broken, so it loads cleanly now (an ES
+    // module that throws while evaluating would have stayed failed for the life of this process).
+    const status = await s.api("/api/status");
+    assert.equal(status.status, 200, JSON.stringify(status.body));
+    assert.equal(status.body.configured.provider, "proxy");
+  } finally { s.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

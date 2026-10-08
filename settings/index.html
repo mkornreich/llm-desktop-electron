@@ -88,6 +88,13 @@
      its own display:grid, which would otherwise win over the [hidden] user-agent default. */
   [hidden]{display:none!important}
   mark{background:color-mix(in srgb,var(--accent) 30%,transparent);color:inherit;border-radius:2px}
+  /* config.jsonc does not parse: shown above the form, or instead of it when it never loaded. */
+  .cfgerr{margin:20px 26px 0;max-width:848px;background:var(--panel);border:1px solid var(--warn);
+          border-radius:12px;padding:14px 16px}
+  .cfgerr h2{margin:0 0 3px;font-size:13px;font-weight:650;color:var(--warn)}
+  .cfgerr pre{margin:10px 0 12px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);
+              border-radius:8px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-x:auto}
+  .cfgerr .act{display:flex;align-items:center;gap:12px}
 </style>
 </head>
 <body>
@@ -100,6 +107,7 @@
   <nav id="secnav" class="nav" aria-label="Jump to a settings section"></nav>
 </header>
 
+<div id="cfgerr" class="cfgerr" role="alert" hidden></div>
 <main id="form"><p class="msg">Loading…</p></main>
 
 <footer>
@@ -115,7 +123,11 @@ const TOKEN = "__SETTINGS_TOKEN__";
 const api = async (p, opts = {}) => {
   const r = await fetch(p + (p.includes("?") ? "&" : "?") + "t=" + TOKEN,
     { ...opts, headers: { "content-type": "application/json", "x-settings-token": TOKEN, ...(opts.headers || {}) } });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    // The body rides along: a 409 carries `parseError` (config.jsonc's line:column) for showConfigError.
+    throw Object.assign(new Error(body.error || `HTTP ${r.status}`), { body });
+  }
   return r.json();
 };
 // Same surface the Electron preload would have exposed, backed by the local API.
@@ -508,10 +520,66 @@ function chip(text, value, state) {
   return c;
 }
 
+// config.jsonc does not parse (the server answers 409 with `parseError`). Shown above the form — or
+// instead of it, when it never loaded — with the exact line:column and the offending line quoted. The
+// window cannot repair a file it cannot read, so the fix is a text edit; the status poll then notices
+// the file parses again and recovers on its own (Reload just does that now).
+let FORM_LOADED = false;
+function showConfigError(pe) {
+  const box = $("#cfgerr");
+  box.textContent = "";
+  const h = document.createElement("h2");
+  h.textContent = `${pe.file} has a syntax error at line ${pe.line}, column ${pe.column}`;
+  const why = document.createElement("div");
+  why.textContent = pe.reason;
+  const pre = document.createElement("pre");
+  pre.textContent = pe.excerpt;
+  const note = document.createElement("span");
+  note.className = "msg grow";
+  note.textContent = "Settings can't read or save the file until this is fixed — nothing is written to it. " +
+    "Fix it in a text editor; this window picks the fix up by itself within a few seconds.";
+  const btn = document.createElement("button");
+  btn.textContent = "Reload";
+  btn.onclick = recheck;
+  const act = document.createElement("div");
+  act.className = "act";
+  act.append(note, btn);
+  box.append(h, why, pre, act);
+  box.hidden = false;
+}
+function loadFailed(e) {
+  if (!e.body?.parseError) { $("#form").textContent = "Failed to load settings: " + e.message; return; }
+  showConfigError(e.body.parseError);
+  if (!FORM_LOADED) $("#form").textContent = "";
+}
+// A failed save/restart keeps the form and any unsaved edits; a syntax error is shown above them.
+function actionFailed(what, e) {
+  if (!e.body?.parseError) return setMsg(`${what}: ${e.message}`, "warn");
+  showConfigError(e.body.parseError);
+  scrollTo({ top: 0, behavior: "smooth" });
+  setMsg(`${what} — config.jsonc has a syntax error (shown above); nothing was written`, "warn");
+}
+// Never reloads over a loaded form: that would discard unsaved edits. A status call that succeeds
+// clears the panel (and loads the form if it never loaded).
+function recheck() { return FORM_LOADED ? refreshStatus() : load().then(refreshStatus, loadFailed); }
+
 async function refreshStatus() {
   const el = $("#status");
   let st;
-  try { st = await window.settings.status(); } catch { return; }
+  try { st = await window.settings.status(); }
+  catch (e) {
+    const pe = e.body?.parseError;
+    if (pe) {
+      showConfigError(pe);
+      el.textContent = "";
+      el.append(chip("config.jsonc", `syntax error at ${pe.line}:${pe.column}`, "warn"));
+    }
+    return;
+  }
+  if (!$("#cfgerr").hidden) {
+    $("#cfgerr").hidden = true;
+    if (!FORM_LOADED) load().catch(loadFailed);
+  }
   el.textContent = "";
   el.append(chip("app", st.appRunning ? "running" : "not running", st.appRunning ? "on" : "off"));
 
@@ -584,6 +652,8 @@ async function refreshStatus() {
 
 async function load() {
   const res = await window.settings.read();
+  FORM_LOADED = true;
+  $("#cfgerr").hidden = true;
   SCHEMA = res.schema; CURRENT = res.values; LOCAL_MODEL_FILE = res.localModel || {};
   DRAFT = Object.fromEntries(Object.entries(res.values).map(([k, v]) => [k, v.value]));
   DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT.LOCAL_MODEL);
@@ -623,7 +693,7 @@ async function save() {
   return res;
 }
 
-$("#save").onclick = () => save().catch((e) => setMsg("Save failed: " + e.message, "warn"));
+$("#save").onclick = () => save().catch((e) => actionFailed("Save failed", e));
 $("#revert").onclick = () => {
   DRAFT = Object.fromEntries(Object.entries(CURRENT).map(([k, v]) => [k, v.value]));
   DRAFT.LOCAL_CONTEXT = modelCtx(DRAFT.LOCAL_MODEL);
@@ -655,7 +725,7 @@ $("#relaunch").onclick = async () => {
     if (r.error) setMsg(r.error, "warn");
     else if (r.verified === false) setMsg("Launched, but the new settings are not serving yet", "warn");
     else setMsg(`Restarted — ${r.model || r.verified || "running"}`, "ok");
-  } catch (e) { setMsg("Restart failed: " + e.message, "warn"); }
+  } catch (e) { actionFailed("Restart failed", e); }
   finally { btn.disabled = false; }
 };
 
@@ -672,7 +742,7 @@ addEventListener("keydown", (e) => {
   }
 });
 
-load().catch((e) => { $("#form").textContent = "Failed to load settings: " + e.message; });
+load().catch(loadFailed);
 refreshStatus();
 setInterval(refreshStatus, 5000);
 
