@@ -221,7 +221,7 @@
     "agnes": {"label":"Agnes AI","endpoint":"https://apihub.agnes-ai.com/v1","api":"chat","keyNames":["agnesApiKey","apiKey"],"isOpenAI":false,"responses":false,
       "contextWindow":128000,"contextWindows":{"agnes-3.0-flash":512000},
       "model":"agnes-3.0-flash","claudeCodeModel":"claude-opus-4-8[1m]",
-      "suggestions":["agnes-3.0-flash","agnes-2.5-flash","agnes-2.0-flash"]}
+      "suggestions":["agnes-3.0-flash","agnes-2.5-flash","agnes-2.0-flash"]},
 
     "inceptionlabs": {"label":"Inception Labs","endpoint":"https://api.inceptionlabs.ai/v1","api":"chat","keyNames":["inceptionKey","apiKey"],"isOpenAI":false,"responses":false,
       "contextWindow":256000,"contextWindows":{"mercury-2.5":256000},
