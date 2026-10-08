@@ -477,25 +477,44 @@ function withClsReasoning(payload, surface, level) {
   return usesReasoningObject(surface) ? { ...rest, reasoning: { effort: level } } : { ...rest, reasoning_effort: level };
 }
 const clsReasoningOf = (payload) => payload?.reasoning_effort ?? payload?.reasoning?.effort ?? "default";
-// A classifier call whose reasoning control was rejected (400/422): walk UP the ladder, re-sending each
-// rung, and remember the first level the upstream ACCEPTS. A rejection that does not name reasoning
-// drops straight to omit, so the control can never be why a verdict that worked before now fails —
-// and omit is only remembered if it is then accepted (an unrelated 400 still fails the same way and
-// is left to the caller's other repairs). Returns the last response and the payload that produced it.
+// A classifier call that came back 400/422 while carrying the reasoning control. Three cases, told apart
+// by the error text:
+//   - it NAMES reasoning/thinking: the upstream is saying what it takes. Climb to the next rung (or to
+//     omit when the field itself is unknown) and remember the first rung it ACCEPTS;
+//   - it names a DIFFERENT field ('stop', 'temperature'): not ours. Return untouched, so the caller's
+//     repairs drop that field from the payload that still carries the control;
+//   - it names nothing: re-send THIS call without the control, in case the control is the unnamed cause,
+//     but remember nothing. A transient 400 ("Provider returned error") must not switch suppression off
+//     for the model for the rest of the process — and an omit that "succeeds" on a reasoning-by-default
+//     model is exactly the empty verdict this exists to prevent. If that re-send is rejected the same
+//     way, the control was not the cause: hand back the request that carried it for the caller to repair.
+// Returns the response to act on and the payload that produced it.
+const NAMED_PARAM_RES = [/"param":\s*"([^"]+)"/, /parameter:?\s*'([^']+)'/i, /Field '([^']+)'/i];
 async function stepUpClsReasoning(res, payload, surface, doFetch) {
   let level = payload?.reasoning_effort ?? payload?.reasoning?.effort;
   if (!CLS_REASONING_LADDER.includes(level)) return { res, payload };
   while (res.status === 400 || res.status === 422) {
     const txt = await res.clone().text();
-    const i = CLS_REASONING_LADDER.indexOf(level);
+    const named = NAMED_PARAM_RES.map((re) => txt.match(re)?.[1]).find(Boolean);
+    if (named && !/reasoning|think/i.test(named)) return { res, payload };
     // "reasoning" or "think": some upstreams phrase it as thinking ("this model only works in thinking mode").
-    const next = /reasoning|think/i.test(txt) && !REASONING_FIELD_REJECTED_RE.test(txt) && i + 1 < CLS_REASONING_LADDER.length
+    const aboutReasoning = /reasoning|think/i.test(txt);
+    const i = CLS_REASONING_LADDER.indexOf(level);
+    const next = aboutReasoning && !REASONING_FIELD_REJECTED_RE.test(txt) && i + 1 < CLS_REASONING_LADDER.length
       ? CLS_REASONING_LADDER[i + 1] : CLS_REASONING_OMIT;
-    log(`  ! classifier reasoning '${level}' rejected by ${payload.model} on ${surface} — trying '${next}'`);
+    log(`  ! classifier reasoning '${level}' rejected by ${payload.model} on ${surface}` +
+        `${aboutReasoning ? "" : " (the error does not name it — this call only)"} — trying '${next}'`);
+    const prev = { res, payload };
     payload = withClsReasoning(payload, surface, next);
     res = await doFetch(payload);
-    if (res.ok) clsReasoningByModel.set(capKey(surface, payload.model), next);
-    if (next === CLS_REASONING_OMIT) break;
+    if (res.ok && aboutReasoning) clsReasoningByModel.set(capKey(surface, payload.model), next);
+    if (next === CLS_REASONING_OMIT) {
+      if (!aboutReasoning && (res.status === 400 || res.status === 422)) {
+        try { await res.body?.cancel(); } catch { /* best-effort: release the discarded response */ }
+        return prev;
+      }
+      break;
+    }
     level = next;
   }
   return { res, payload };

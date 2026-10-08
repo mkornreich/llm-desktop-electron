@@ -2094,10 +2094,47 @@ test("classifier reasoning suppression: an unrelated 400 retries the incumbent p
   let calls = 0;
   const doFetch = async () => { calls++; return clsReply(400, { error: { message: "This model's maximum context length is 8192 tokens" } }); };
   const first = { model: "ctx-reject-test", messages: [], reasoning_effort: "none" };
-  const { res } = await providerALS.run(P, async () => stepUpClsReasoning(await doFetch(first), first, "chat", doFetch));
+  const { res, payload } = await providerALS.run(P, async () => stepUpClsReasoning(await doFetch(first), first, "chat", doFetch));
   assert.equal(res.status, 400, "left to the caller's own repairs (a classifier fails closed on overflow)");
   assert.equal(calls, 2, "one omit retry, no ladder walk");
+  assert.equal(payload, first, "the omit retry failed the same way, so the caller gets the request that carried the control");
   assert.equal(clsReasoningByModel.has("chat|ctx-reject-test"), false, "a failure is never remembered as accepted");
+});
+
+// Review finding (reproduced): a transient 400 naming nothing, whose control-free re-send then "succeeds"
+// with the empty verdict, used to memoise omit — switching the fix off for the model until restart.
+test("classifier reasoning suppression: a transient 400 degrades one call and keeps the learned rung", async () => {
+  const P = { id: "openrouter2", baseURL: "https://openrouter.ai/api/v1", isOpenAI: false };
+  clsReasoningByModel.set("chat|glm-transient-test", "minimal");
+  const sent = [];
+  const doFetch = async (p) => { sent.push(p.reasoning?.effort ?? CLS_REASONING_OMIT);
+    return p.reasoning
+      ? clsReply(400, { error: { message: "Provider returned error", code: 400 } })
+      : clsReply(200, { choices: [{ message: { content: "" }, finish_reason: "length" }] }); };
+  const first = providerALS.run(P, () => toOpenAI({ system: AUTO_MODE_SYS, messages: [{ role: "user", content: "x" }] }, "glm-transient-test")).payload;
+  assert.deepEqual(first.reasoning, { effort: "minimal" }, "starts from the learned rung");
+  const { res } = await providerALS.run(P, async () => stepUpClsReasoning(await doFetch(first), first, "chat", doFetch));
+  assert.equal(res.status, 200, "this one call is re-sent without the control");
+  assert.deepEqual(sent, ["minimal", CLS_REASONING_OMIT]);
+  assert.equal(clsReasoningByModel.get("chat|glm-transient-test"), "minimal", "the learned rung survives a transient error");
+  const next = providerALS.run(P, () => toOpenAI({ system: AUTO_MODE_SYS, messages: [{ role: "user", content: "y" }] }, "glm-transient-test")).payload;
+  assert.deepEqual(next.reasoning, { effort: "minimal" }, "the next verdict is suppressed again");
+});
+
+// Review finding: a 400 about ANOTHER field ('stop') was read as the reasoning field being unknown, so the
+// control was dropped and the caller's repair then removed 'stop' from a payload with no control.
+test("classifier reasoning suppression: a 400 naming another field is left to the caller, control intact", async () => {
+  const P = { id: "openai", baseURL: "https://api.openai.example/v1", isOpenAI: true };
+  let calls = 0;
+  const doFetch = async () => { calls++; return clsReply(200, {}); };
+  const first = { model: "stop-reject-test", messages: [], stop: ["\n\nHuman:"], reasoning_effort: "none" };
+  const r400 = clsReply(400, { error: { message: "Unsupported parameter: 'stop' is not supported with this model.",
+    type: "invalid_request_error", param: "stop", code: "unsupported_parameter" } });
+  const { res, payload } = await providerALS.run(P, () => stepUpClsReasoning(r400, first, "chat", doFetch));
+  assert.equal(res.status, 400);
+  assert.equal(payload, first, "the caller drops 'stop' from the payload that still carries the control");
+  assert.equal(calls, 0, "no request spent on the reasoning ladder");
+  assert.equal(clsReasoningByModel.has("chat|stop-reject-test"), false);
 });
 
 test("classifier reasoning suppression: an agent turn's effort is never touched by the ladder", async () => {
