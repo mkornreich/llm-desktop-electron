@@ -35,7 +35,8 @@ const { makeMathFixer, fixMath, selectTools, isEssentialTool, buildFormatHint, f
         rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses, classifierVerdictOf, classifierActionAutoAllowed,
         approxTokens, kilo,
         fitPayloadToWindow, contextWindowFor, payloadInputTokens, contentChars, PROACTIVE_OUTPUT_RESERVE,
-        anthropicPassthroughPayload, anthropicUpstreamHeaders } =
+        anthropicPassthroughPayload, anthropicUpstreamHeaders,
+        stepUpClsReasoning, clsReasoningByModel, CLS_REASONING_LADDER, CLS_REASONING_OMIT } =
   await import("./proxy.mjs");
 const { ToolRegistry } = await import("./tool-registry.mjs");
 
@@ -2005,10 +2006,13 @@ test("issue #6: a turn that merely QUOTES the contract is not misrouted", () => 
   assert.equal(isClassifierRequest({ system: AUTO_MODE_SYS, messages: [], tools: tools.slice(0, 2) }), true);
 });
 
-test("issue #6: a classifier call gets no out-of-band reasoning and no hints", () => {
+test("issue #6: a classifier call gets no reasoning summary, the lowest effort, and no hints", () => {
   const body = { system: AUTO_MODE_SYS, messages: [{ role: "user", content: "run rm -rf /tmp/x" }], max_tokens: 2000 };
   const { payload } = toResponses(body, "gpt-5.3-codex");
-  assert.equal(payload.reasoning, undefined,
+  // Omitting the field is not enough: a reasoning-by-default model then thinks at its default depth and
+  // the verdict comes back empty. So the effort is pinned to the bottom of the suppression ladder, and no
+  // summary (out-of-band reasoning) is ever requested.
+  assert.deepEqual(payload.reasoning, { effort: CLS_REASONING_LADDER[0] },
     "reasoning is charged to the same budget and the verdict must come first");
   assert.equal(payload.text?.verbosity, undefined, "a verdict has a fixed shape");
   assert.equal(payload.instructions, AUTO_MODE_SYS, "the prompt must be passed through verbatim");
@@ -2019,6 +2023,92 @@ test("issue #6: an ordinary turn keeps its reasoning and hints", () => {
   const { payload } = toResponses(body, "gpt-5.3-codex");
   assert.ok(payload.reasoning, "a normal turn still shows thinking");
   assert.notEqual(payload.instructions, "You are Claude Code.", "hints are still appended");
+});
+
+// ---------- classifier reasoning suppression ----------
+// A reasoning-by-default classifier model (measured: openrouter z-ai/glm-5.3-flash on a real ~31k-token
+// safety:block request) spent the whole 1024-token floor on hidden reasoning and returned "" — the empty
+// verdict the CLI reports as "<model> is temporarily unavailable". effort "minimal" returned the verdict.
+
+test("classifier reasoning suppression: chat sends reasoning_effort, OpenRouter its reasoning object", () => {
+  const body = { system: AUTO_MODE_SYS, messages: [{ role: "user", content: "run rm -rf /tmp/x" }], thinking: { type: "disabled" } };
+  const plain = providerALS.run({ id: "gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", isOpenAI: false },
+    () => toOpenAI(body, "gemini-cls-shape-test")).payload;
+  assert.equal(plain.reasoning_effort, "none");
+  assert.equal(plain.reasoning, undefined);
+  const or = providerALS.run({ id: "openrouter2", baseURL: "https://openrouter.ai/api/v1", isOpenAI: false },
+    () => toOpenAI(body, "glm-cls-shape-test")).payload;
+  assert.deepEqual(or.reasoning, { effort: "none" }, "OpenRouter's unified field, on the chat surface too");
+  assert.equal(or.reasoning_effort, undefined);
+});
+
+test("classifier reasoning suppression: not for a local engine, an agent turn, or thinking the client enabled", () => {
+  const cls = { system: AUTO_MODE_SYS, messages: [{ role: "user", content: "run rm -rf /tmp/x" }] };
+  const local = providerALS.run({ id: "freetoken", baseURL: "http://127.0.0.1:1919/v1", isOpenAI: false },
+    () => toOpenAI(cls, "qwen3-1.7b")).payload;
+  assert.equal(local.reasoning_effort, undefined, "the on-device classifier is deliberately nudged to reason");
+  assert.equal(local.reasoning, undefined);
+  const P = { id: "gemini", baseURL: "https://x.example/v1", isOpenAI: false };
+  const main = providerALS.run(P, () => toOpenAI({ system: "You are Claude Code.", messages: [{ role: "user", content: "hi" }] }, "m-main-test")).payload;
+  assert.equal(main.reasoning_effort, undefined, "an agent turn is untouched");
+  const enabled = providerALS.run(P, () => toOpenAI({ ...cls, thinking: { type: "enabled", budget_tokens: 4000 } }, "m-thinks-test")).payload;
+  assert.equal(enabled.reasoning_effort, undefined, "a client that asked for thinking keeps the model's default");
+});
+
+const clsReply = (status, body) => new Response(JSON.stringify(body), { status });
+
+test("classifier reasoning suppression: a rejected 'none' climbs the ladder and the accepted rung is remembered", async () => {
+  const P = { id: "openrouter2", baseURL: "https://openrouter.ai/api/v1", isOpenAI: false };
+  const sent = [];
+  const doFetch = async (p) => { sent.push(p.reasoning?.effort);
+    return p.reasoning?.effort === "none"
+      ? clsReply(400, { error: { message: "Reasoning is mandatory for this endpoint and cannot be disabled." } })
+      : clsReply(200, { choices: [{ message: { content: "<block>no</block>" } }] }); };
+  const first = { model: "glm-ladder-test", messages: [], reasoning: { effort: "none" } };
+  const { res, payload } = await providerALS.run(P, async () => stepUpClsReasoning(await doFetch(first), first, "chat", doFetch));
+  assert.equal(res.status, 200);
+  assert.deepEqual(payload.reasoning, { effort: "minimal" });
+  assert.deepEqual(sent, ["none", "minimal"]);
+  // The next verdict for this model starts at the accepted rung — no 400 spent re-learning it.
+  const next = providerALS.run(P, () => toOpenAI({ system: AUTO_MODE_SYS, messages: [{ role: "user", content: "x" }] }, "glm-ladder-test")).payload;
+  assert.deepEqual(next.reasoning, { effort: "minimal" });
+});
+
+test("classifier reasoning suppression: a field the upstream does not know drops straight to omit", async () => {
+  const P = { id: "cohere", baseURL: "https://api.cohere.example/v1", isOpenAI: false };
+  const sent = [];
+  const doFetch = async (p) => { sent.push("reasoning_effort" in p ? p.reasoning_effort : CLS_REASONING_OMIT);
+    return "reasoning_effort" in p
+      ? clsReply(422, { message: "Extra inputs are not permitted: reasoning_effort" })
+      : clsReply(200, { choices: [{ message: { content: "<block>no</block>" } }] }); };
+  const first = { model: "field-reject-test", messages: [], reasoning_effort: "none" };
+  const { res, payload } = await providerALS.run(P, async () => stepUpClsReasoning(await doFetch(first), first, "chat", doFetch));
+  assert.equal(res.status, 200);
+  assert.equal("reasoning_effort" in payload, false, "omit is exactly the incumbent payload");
+  assert.deepEqual(sent, ["none", CLS_REASONING_OMIT], "no request is spent on rungs the field can never take");
+  assert.equal(clsReasoningByModel.get("chat|field-reject-test"), CLS_REASONING_OMIT);
+});
+
+test("classifier reasoning suppression: an unrelated 400 retries the incumbent payload once and is not remembered", async () => {
+  const P = { id: "gemini", baseURL: "https://x.example/v1", isOpenAI: false };
+  let calls = 0;
+  const doFetch = async () => { calls++; return clsReply(400, { error: { message: "This model's maximum context length is 8192 tokens" } }); };
+  const first = { model: "ctx-reject-test", messages: [], reasoning_effort: "none" };
+  const { res } = await providerALS.run(P, async () => stepUpClsReasoning(await doFetch(first), first, "chat", doFetch));
+  assert.equal(res.status, 400, "left to the caller's own repairs (a classifier fails closed on overflow)");
+  assert.equal(calls, 2, "one omit retry, no ladder walk");
+  assert.equal(clsReasoningByModel.has("chat|ctx-reject-test"), false, "a failure is never remembered as accepted");
+});
+
+test("classifier reasoning suppression: an agent turn's effort is never touched by the ladder", async () => {
+  let calls = 0;
+  const doFetch = async () => { calls++; return clsReply(200, {}); };
+  const main = { model: "main-effort-test", input: [], reasoning: { effort: "high", summary: "detailed" } };
+  const r400 = clsReply(400, { error: { message: "reasoning effort high is not supported" } });
+  const { res, payload } = await stepUpClsReasoning(r400, main, "responses", doFetch);
+  assert.equal(res.status, 400);
+  assert.equal(payload, main);
+  assert.equal(calls, 0, "the existing effort ladder owns agent turns");
 });
 
 test("issue #6: the chat surface also strips hints for a classifier", () => {

@@ -441,6 +441,65 @@ function lowerEffort(model, rejected, surface = "?") {
   log(`  ! reasoning effort '${rejected}' unsupported by ${model} on ${surface} — falling back to '${next}'`);
   return next;
 }
+// Classifier reasoning SUPPRESSION — distinct from the effort above, which requests reasoning
+// summaries and is null for a classifier route. The CLI sends every verdict call with
+// thinking:{type:"disabled"}, and the verdict tag must START the answer; hidden reasoning is charged
+// to the same output budget. Not requesting reasoning was assumed to mean none happens — false for a
+// reasoning-by-default upstream. Measured on a real recorded safety:block request (~31k tokens)
+// against openrouter z-ai/glm-5.3-flash:
+//   no reasoning param      -> 16s, finish=length, 1024/1024 reasoning tokens, content ""  (the
+//                              empty verdict the CLI retries, then reports as "<model> is temporarily
+//                              unavailable, so auto mode cannot determine the safety of …")
+//   effort none / disabled  -> 400 "Reasoning is mandatory for this endpoint and cannot be disabled"
+//   effort minimal          -> 4s, finish=stop, 135 reasoning tokens, "<block>no</block>"
+// So ask for the LOWEST effort the upstream accepts: start at the ladder's bottom, walk UP it on a
+// reasoning-related rejection, and remember the first accepted level per (surface, model). "omit"
+// sends no control at all — the incumbent payload — so a provider that rejects the field outright
+// behaves exactly as before. Local endpoints are exempt: the on-device classifier is deliberately
+// nudged to reason (appendSafetyReasoningNudge) because its snap verdicts over-block. A client that
+// explicitly ENABLES thinking keeps the model's default.
+const CLS_REASONING_LADDER = ["none", "minimal", "low"];
+const CLS_REASONING_OMIT = "omit";
+const clsReasoningByModel = new Map();
+// The upstream rejected the reasoning FIELD itself (not one of its values): no level will be
+// accepted, so go straight to omit instead of spending a request per rung.
+const REASONING_FIELD_REJECTED_RE = /unsupported parameter|unknown (?:field|parameter|name)|unrecognized|not permitted|extra inputs|additional propert/i;
+const clsReasoningApplies = (route, body) =>
+  isClassifier(route) && body?.thinking?.type !== "enabled" && !isLocalEndpoint(curProvider().baseURL || "");
+const clsReasoningLevel = (surface, model) =>
+  clsReasoningByModel.get(capKey(surface, model)) || CLS_REASONING_LADDER[0];
+// OpenRouter takes its unified `reasoning: {effort}` object on BOTH surfaces; elsewhere Chat
+// Completions takes the OpenAI `reasoning_effort` string and Responses the `reasoning` object.
+const usesReasoningObject = (surface) => surface === "responses" || /openrouter\.ai/i.test(curProvider().baseURL || "");
+function withClsReasoning(payload, surface, level) {
+  const { reasoning, reasoning_effort, ...rest } = payload;
+  if (level === CLS_REASONING_OMIT) return rest;
+  return usesReasoningObject(surface) ? { ...rest, reasoning: { effort: level } } : { ...rest, reasoning_effort: level };
+}
+const clsReasoningOf = (payload) => payload?.reasoning_effort ?? payload?.reasoning?.effort ?? "default";
+// A classifier call whose reasoning control was rejected (400/422): walk UP the ladder, re-sending each
+// rung, and remember the first level the upstream ACCEPTS. A rejection that does not name reasoning
+// drops straight to omit, so the control can never be why a verdict that worked before now fails —
+// and omit is only remembered if it is then accepted (an unrelated 400 still fails the same way and
+// is left to the caller's other repairs). Returns the last response and the payload that produced it.
+async function stepUpClsReasoning(res, payload, surface, doFetch) {
+  let level = payload?.reasoning_effort ?? payload?.reasoning?.effort;
+  if (!CLS_REASONING_LADDER.includes(level)) return { res, payload };
+  while (res.status === 400 || res.status === 422) {
+    const txt = await res.clone().text();
+    const i = CLS_REASONING_LADDER.indexOf(level);
+    // "reasoning" or "think": some upstreams phrase it as thinking ("this model only works in thinking mode").
+    const next = /reasoning|think/i.test(txt) && !REASONING_FIELD_REJECTED_RE.test(txt) && i + 1 < CLS_REASONING_LADDER.length
+      ? CLS_REASONING_LADDER[i + 1] : CLS_REASONING_OMIT;
+    log(`  ! classifier reasoning '${level}' rejected by ${payload.model} on ${surface} — trying '${next}'`);
+    payload = withClsReasoning(payload, surface, next);
+    res = await doFetch(payload);
+    if (res.ok) clsReasoningByModel.set(capKey(surface, payload.model), next);
+    if (next === CLS_REASONING_OMIT) break;
+    level = next;
+  }
+  return { res, payload };
+}
 // Reasoning tokens are drawn from the SAME max_output_tokens budget as the answer, so
 // asking for thinking on a small-budget call can consume the whole allowance and return
 // nothing. Observed in the app: background title calls (max_tokens=64, no tools) came back
@@ -2174,6 +2233,8 @@ function toOpenAI(body, model, route = routeForRequest(body)) {
   if (temp != null) out.temperature = temp;
   if (body.top_p != null) out.top_p = body.top_p;
   if (body.stop_sequences?.length) out.stop = body.stop_sequences;
+  // A classifier gets the lowest reasoning effort this upstream accepts (see CLS_REASONING_LADDER).
+  if (clsReasoningApplies(route, body)) Object.assign(out, withClsReasoning({}, "chat", clsReasoningLevel("chat", model)));
   // The registry validated the WHOLE catalog above, before any cap dropped anything, so a name
   // collision cannot depend on which tools happened to survive.
   if (exposedTools.length) {
@@ -2339,6 +2400,8 @@ async function callOpenAI(payload, isClassifier = false, sessionId = null) {
     body: JSON.stringify(stripUnsupported(body, "chat")),
   });
   let res = await doFetch(payload);
+  // A classifier's reasoning-suppression control was rejected: climb its ladder before the other repairs.
+  if (isClassifier) ({ res, payload } = await stepUpClsReasoning(res, payload, "chat", doFetch));
   if (res.status === 400) {
     const txt = await res.clone().text();
     let retry = null;
@@ -2715,6 +2778,9 @@ function toResponses(body, model, route = routeForRequest(body)) {
   if (policy.reasoning && SHOW_THINKING && out.max_output_tokens >= THINKING_MIN_BUDGET) {
     out.reasoning = { effort: effortFor(model, "responses", route), summary: "detailed" };
   }
+  // ...and not requesting it is not enough: a reasoning-by-default model still spends the verdict's
+  // budget thinking. A classifier gets the lowest effort this upstream accepts (see CLS_REASONING_LADDER).
+  if (clsReasoningApplies(route, body)) Object.assign(out, withClsReasoning({}, "responses", clsReasoningLevel("responses", model)));
   // Verbosity shapes agent prose; a verdict has a fixed shape and does not want padding. text.verbosity is
   // an OpenAI-proprietary Responses field — other OpenAI-compatible /responses upstreams reject it (Groq
   // 400s: `unknown field verbosity`), so gate it on the same isOpenAI flag as prompt_cache_key.
@@ -2756,6 +2822,8 @@ async function callResponses(payload, isClassifier = false, sessionId = null) {
   let accepted = payload;                        // updated by each fallback that gets used
   const doFetch = (b) => { accepted = b; return f(`${curProvider().baseURL}/responses`, { method: "POST", headers: upstreamHeaders(), body: JSON.stringify(stripUnsupported(b, "responses")) }); };
   let res = await doFetch(payload);
+  // A classifier's reasoning-suppression control was rejected: climb its ladder before the other repairs.
+  if (isClassifier) ({ res, payload } = await stepUpClsReasoning(res, payload, "responses", doFetch));
   if (res.status === 400) {
     const txt = await res.clone().text();
     let m;   // captures the rejected field name across the unsupported-parameter dialects below
@@ -4027,12 +4095,12 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
       log(`/v1/messages [responses] model=${reqModel}->${m.model} ${contextFields(shape)}` +
         ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
         `${imagesSent ? " images=" + imagesSent : ""} hints=${hintOn ? "on" : "off"}` +
-        `${routeLabel(route)}${isCls ? " reasoning=off tools=none" : ""}` +
+        `${routeLabel(route)}${isCls ? ` reasoning=${clsReasoningOf(payload)} tools=none` : ""}` +
         `${req.headers["x-claude-code-session-id"] ? ` session=${String(req.headers["x-claude-code-session-id"]).slice(0, 8)}` : ""}`);
     } else {
       log(`/v1/messages [chat] model=${reqModel}->${m.model} ${contextFields(shape)}` +
         ` stream=${!!payload.stream}${payload.tools ? ` tools=${payload.tools.length}` : ""}` +
-        `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}`);
+        `${imagesSent ? " images=" + imagesSent : ""}${routeLabel(route) ? " " + routeLabel(route) : ""}${isCls ? ` reasoning=${clsReasoningOf(payload)}` : ""}`);
     }
     if (compacting) log(compactionWarning(compacting, shape, reqModel, m.model));
     // Proactive, size-triggered compaction (per model): fit the encoded payload to THIS member's
@@ -4340,13 +4408,13 @@ const server = http.createServer(async (req, res) => {
         const starved = rj?.status === "incomplete" &&
           rj?.incomplete_details?.reason === "max_output_tokens" &&
           !(rj.output || []).some((it) => it.type === "message" && (it.content || []).some((c) => c.text));
-        if (starved && payload.reasoning) {
+        // Not for a classifier: its `reasoning` is the SUPPRESSION control (the lowest effort the upstream
+        // accepts), so stripping it would hand the budget back to the model's default — more hidden
+        // reasoning, not less, and an even emptier verdict.
+        if (starved && payload.reasoning && !isCls) {
           log("  ! empty answer with status=incomplete/max_output_tokens — retrying without reasoning");
           const { reasoning, ...noThink } = payload;
           try {
-            // isCls: classifiers take this non-streaming path, so the reserved-pool flag has to
-            // ride the retry too. (It cannot fire for them today — a classifier payload carries
-            // no `reasoning` — but the routing must not depend on that staying true.)
             const retry = await callResponses(noThink, policy.reservedPool, sessionId);
             if (retry.ok) rj = await retry.json();
           } catch (e) { log(`  ! retry failed: ${e.message}`); }
@@ -4408,7 +4476,8 @@ const server = http.createServer(async (req, res) => {
 export { mapUsage, compactionKind, requestShape, contextFields, compactionWarning, COMPACTION_EFFECT, cacheKeyFor,
          inTokensField, cacheWarning, recordUsage, usageSummary, recordToolUse, toolUsageSummary, dropDisabledMcpTools, DISABLED_TOOL_PREFIXES,
          rememberSignature, recallSignature, sigFromToolCall, providerALS, toAnthropic, fromResponses,
-         classifierVerdictOf,
+         classifierVerdictOf, withClsReasoning, stepUpClsReasoning, clsReasoningApplies, clsReasoningByModel,
+         CLS_REASONING_LADDER, CLS_REASONING_OMIT,
          approxTokens, kilo, makeMathFixer, fixMath, selectTools, isEssentialTool, withFormatHint, buildFormatHint,
          stripSystemBoilerplate,
          buildPersistenceHint, findWriteTool, findSendFileTool, findRenderTool, findBgTools, toolResultText,
@@ -4484,7 +4553,7 @@ if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`classifier routing: prefix=${OPENAI_CLASSIFIER_MODEL || `(main: ${OPENAI_MODEL})`}` +
       ` safety=${OPENAI_CLASSIFIER_SAFETY_MODEL === "" ? `(blank -> main: ${OPENAI_MODEL})` : OPENAI_CLASSIFIER_SAFETY_MODEL}` +
       ` compaction=${COMPACT_MODEL}` +
-      ` — a classifier gets no tools, no hints, no reasoning, and fails closed on overflow`);
+      ` — a classifier gets no tools, no hints, the lowest reasoning effort its model accepts, and fails closed on overflow`);
   // The identity, on one line, so the log says which configuration produced everything after
   // it. Reconstructing this from a log that only recorded the default model was guesswork.
   log(`instance ${INSTANCE} pid ${process.pid} config ${CONFIG_HASH} code ${codeVersion()} provider ${provider()}`);
