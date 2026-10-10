@@ -195,6 +195,9 @@
   "isOpenAI": false,
   "responses": false,
   "contextWindow": 128000},
+    // LLM7 (llm7ApiKey): free gateway with a small DAILY TOKEN quota — a few agent-sized turns exhaust it (429
+    // "Daily token quota exceeded", Retry-After ~24h). Harmless as a composite member: the Retry-After is far past
+    // compositeMaxWaitMs, so an exhausted llm7 fails over in ~0.4s. Small requests tool-call cleanly (Oct 2026).
     "llm7": {"label":"LLM7","endpoint":"https://api.llm7.io/v1","api":"chat","keyNames":["llm7ApiKey","apiKey"],"isOpenAI":false,"responses":false,"contextWindow":128000,"model":"gpt-oss:20b","claudeCodeModel":"claude-opus-4-8[1m]"},
     // Cloudflare Workers AI. Uses the OpenAI-COMPATIBLE base (.../ai/v1, which serves /chat/completions) —
     // NOT the native .../ai/run, whose request/response shape this proxy doesn't speak. {cloudflareAccountId}
@@ -237,7 +240,7 @@
   // It replaced llama-3.3-nemotron-super-49b-v1.5, which under a real multi-tool + reasoning load either timed
   // out (>45s) or wrote tool calls as TEXT (<TOOLCALL>…); the 120b-a12b tool-tested clean-native under that
   // load. freetoken (tiny local) is the last-resort.
-  "composite": ["gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","cohere:command-a-plus-05-2026","ollama-cloud:gpt-oss:120b","cloudflare:@cf/qwen/qwen3.8-27b","freetoken:qwen3-1.7b"],
+  "composite": ["gemini:gemini-3-flash-preview","groq:openai/gpt-oss-120b","cohere:command-a-plus-05-2026","ollama-cloud:gpt-oss:120b","cloudflare:@cf/qwen/qwen3.8-27b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b"],
   "compositeMaxWaitMs": 30000,
 
   // Time-to-response-headers cap (ms) per upstream member. A model that connects but never responds
@@ -373,7 +376,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:z-ai/glm-5.3-flash","agnes:agnes-3.0-flash","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:apodex/apodex-1.1-mini:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","inceptionlabs:mercury-2.5"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:z-ai/glm-5.3-flash","agnes:agnes-3.0-flash","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:apodex/apodex-1.1-mini:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","inceptionlabs:mercury-2.5"],
     "gatewayModelDiscovery": true
   },
 
