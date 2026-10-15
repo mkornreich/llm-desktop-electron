@@ -297,27 +297,61 @@ freetoken_resize_swa_cache() {
   rr="$(curl -s --max-time 120 -X POST "${base}/v1/cache/rebuild" -H 'Content-Type: application/json' -d "$body" 2>/dev/null)"
   echo "[run] managed FreeToken: SWA cache resize ${body} -> ${rr:-<no response>}"
 }
+# Ready = the ENGINE can serve, not just "the HTTP frontend answers". FreeToken's uvicorn binds — and
+# answers GET /v1/models 200 — BEFORE the engine has loaded weights, and chat 503s until it flips to
+# serving (seen 2026-10-10: /v1/models 200 -> two chat 503s -> "Loading weights"), so a /v1/models probe
+# called it ready while the next ~1-3s of freetoken picks / composite hops failed. healthPath (config.jsonc
+# providers.freetoken.managed) is probed: FreeToken's /health is a lifecycle doc ({"status":"loading"|
+# "ok"|"error","maintenance":...}) and ready = status ok + maintenance serving, the same gate its chat
+# adapter admits on. A healthPath with no lifecycle doc (e.g. /v1/models, or an engine without /health)
+# falls back to a 1-token chat completion that must return 200. Returns 0 ready, 1 not (yet).
+freetoken_engine_ready() {
+  local base="$1" body st code
+  body="$(curl -sf --max-time 2 "${base}${FREETOKEN_HEALTH_PATH:-/health}" 2>/dev/null)" || return 1
+  st="$(printf '%s' "$body" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);if(j&&typeof j.status==="string")process.stdout.write(j.status+":"+(j.maintenance||"serving"))}catch(e){}})' 2>/dev/null)"
+  if [ -n "$st" ]; then [ "$st" = "ok:serving" ]; return; fi
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST "${base}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"${FREETOKEN_SERVED_MODEL:-}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" 2>/dev/null)"
+  [ "$code" = "200" ]
+}
 ensure_freetoken() {
   local base="http://127.0.0.1:${FREETOKEN_PORT:-1919}"
-  local ready="${base}${FREETOKEN_HEALTH_PATH:-/v1/models}"
+  local ready="${base}${FREETOKEN_HEALTH_PATH:-/health}"
+  local i
   if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then
     # A server is up on 1919 — but reuse it ONLY if it serves the model we want. A stale or
     # hand-started FreeToken on a different --model would otherwise be reused and a picked
     # freetoken:<model> would silently run the wrong weights (this bit us: a manual gemma
     # instance shadowed the configured qwen3). Compare /v1/models; on mismatch, stop it and reload.
     local want="${FREETOKEN_SERVED_MODEL:-}" have=""
-    [ -n "$want" ] && have="$(curl -sf --max-time 2 "$ready" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(String((j.data&&j.data[0]&&j.data[0].id)||""))}catch(e){}})' 2>/dev/null)"
+    [ -n "$want" ] && have="$(curl -sf --max-time 2 "${base}/v1/models" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(String((j.data&&j.data[0]&&j.data[0].id)||""))}catch(e){}})' 2>/dev/null)"
     if [ -z "$want" ] || [ -z "$have" ] || [ "$have" = "$want" ]; then
-      echo "[run] managed FreeToken: reusing the server already on ${base}${have:+ (serving ${have})}"; return 0
+      # Up is not ready: a server still loading (another run.sh's, or one just restarted) answers
+      # healthPath while its engine 503s chat — wait for the engine within the same 60s budget. If it
+      # stops answering meanwhile it died mid-load: fall through and start our own.
+      for i in $(seq 1 60); do
+        if freetoken_engine_ready "$base"; then
+          echo "[run] managed FreeToken: reusing the server already on ${base}${have:+ (serving ${have})}$([ "$i" -gt 1 ] && echo " — engine ready after ${i}s")"; return 0
+        fi
+        if ! curl -s -o /dev/null --max-time 2 "$ready" 2>/dev/null; then
+          echo "[run] managed FreeToken: the server on ${base} went away while loading — starting a fresh one"; i=0; break
+        fi
+        sleep 1
+      done
+      if [ "$i" != 0 ]; then
+        echo "[run] managed FreeToken: the server on ${base} is up but its engine was not ready in 60s (continuing; a freetoken: pick won't resolve yet)"; return 1
+      fi
+    else
+      echo "[run] managed FreeToken: ${base} serves '${have}', want '${want}' — stopping it and reloading"
+      local owner; owner="$(ss -ltnp 2>/dev/null | grep '127.0.0.1:1919' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+      if [ -n "${owner:-}" ]; then
+        local pg; pg="$(ps -o pgid= -p "$owner" 2>/dev/null | tr -d ' ')"
+        { [ -n "$pg" ] && kill -TERM "-$pg" 2>/dev/null; } || kill -TERM "$owner" 2>/dev/null || true
+      fi
+      rm -f user-data/freetoken-managed
+      for i in $(seq 1 15); do ss -ltn 2>/dev/null | grep -q '127.0.0.1:1919' || break; sleep 1; done
     fi
-    echo "[run] managed FreeToken: ${base} serves '${have}', want '${want}' — stopping it and reloading"
-    local owner; owner="$(ss -ltnp 2>/dev/null | grep '127.0.0.1:1919' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
-    if [ -n "${owner:-}" ]; then
-      local pg; pg="$(ps -o pgid= -p "$owner" 2>/dev/null | tr -d ' ')"
-      { [ -n "$pg" ] && kill -TERM "-$pg" 2>/dev/null; } || kill -TERM "$owner" 2>/dev/null || true
-    fi
-    rm -f user-data/freetoken-managed
-    for i in $(seq 1 15); do ss -ltn 2>/dev/null | grep -q '127.0.0.1:1919' || break; sleep 1; done
   fi
   local launch="${FREETOKEN_LAUNCH:-}"
   if [ -z "$launch" ] || [ ! -x "$launch" ]; then
@@ -358,7 +392,7 @@ ensure_freetoken() {
   pid=$!
   echo "$pid" > user-data/freetoken-managed
   for i in $(seq 1 60); do
-    if curl -sf --max-time 2 "$ready" >/dev/null 2>&1; then
+    if freetoken_engine_ready "$base"; then
       echo "[run] managed FreeToken: ready after ${i}s (pid ${pid})"
       freetoken_resize_swa_cache "$base" "$swa_load_flag"
       return 0

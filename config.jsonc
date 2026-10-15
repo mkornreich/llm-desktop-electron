@@ -71,8 +71,11 @@
       // headroom for the 24k-rulebook prefill — 0.85 left only ~0.8GB free and the worker OOM-crashed when
       // the desktop app was also using the GPU). reasoningParser
       // qwen3 separates the <think> reasoning from the <block> verdict. Full attention => no SWA pool, so
-      // the swaFullTokensRatio/numPages/numSwaPages knobs are gone.
-      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3-1.7b", "reasoningParser": "qwen3", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.72, "kvDtype": "fp8_e4m3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/v1/models" },
+      // the swaFullTokensRatio/numPages/numSwaPages knobs are gone. healthPath=/health is FreeToken's
+      // engine-lifecycle doc: run.sh calls the server ready only at status ok + maintenance serving (its
+      // uvicorn answers /v1/models 200 while weights are still loading and chat still 503s). Any other
+      // path falls back to a 1-token chat-completion probe that must return 200.
+      "managed": { "engine": "freetoken", "autostart": true, "port": 1919, "modelPath": "/home/mk/models/Qwen3-1.7B", "servedModelName": "qwen3-1.7b", "reasoningParser": "qwen3", "maxRunningRequests": 1, "cudaGraphMaxBs": 1, "memoryRatio": 0.72, "kvDtype": "fp8_e4m3", "launch": "/home/mk/things/freetoken/FreeToken/run-freetoken.sh", "healthPath": "/health" },
       "label": "FreeToken",
       "keyNames": [],
       "isOpenAI": false,
