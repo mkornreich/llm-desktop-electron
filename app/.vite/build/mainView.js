@@ -267,13 +267,19 @@ try {
                 // "composite" id. UNSHIFT (index 0 = first, since order is raw array order) with NO `section`
                 // field — real entries carry none, so array position governs. The default for new sessions is
                 // set via model_selector_state, overriding ONLY the global default (never a user's saved pick).
+                // The Code tab's catalog surface is "ccd" (Claude Code Desktop) or "ccr" when the bootstrap
+                // carries one, else "code" — the picker's own resolver (Oct 2026): ue() ? "ccd" : "ccr", falling
+                // back to "code" when that surface has no catalog. Matching only "code" dropped Composite from
+                // the dropdown once the bootstrap started shipping a "ccd" surface. Inject into all three.
                 try {
                   var COMP = (window.__llmdComposite && window.__llmdComposite()) || null;
                   if (COMP && Array.isArray(COMP.members) && COMP.members.length && Array.isArray(data.model_selector_config)) {
                     var CID = "composite";
+                    var CODE_SURFACES = { code: 1, ccd: 1, ccr: 1 }, INTO = [];
                     data.model_selector_config.forEach(function (surf) {
-                      if (!surf || surf.id !== "code" || !Array.isArray(surf.models)) return;
+                      if (!surf || !CODE_SURFACES[surf.id] || !Array.isArray(surf.models)) return;
                       if (surf.models.some(function (x) { return x && x.id === CID; })) return;
+                      INTO.push(surf.id);
                       surf.models.unshift({
                         id: CID, name: "Composite (fallback)", short_name: "Composite",
                         description: "Tries " + COMP.members.join(" → ") + ", falling over on errors / 429s",
@@ -287,10 +293,11 @@ try {
                       am.models.unshift({ model_id: CID, minimum_tier: "free" });
                     if (Array.isArray(data.model_selector_state)) {
                       data.model_selector_state.forEach(function (st) {
-                        if (st && st.id === "code" && st.source === "global_default") st.model = CID;
+                        if (st && CODE_SURFACES[st.id] && st.source === "global_default") st.model = CID;
                       });
                     }
-                    log("injected composite (first + default) with " + COMP.members.length + " member(s)");
+                    log("injected composite (first + default) with " + COMP.members.length + " member(s) into surface(s) [" + INTO.join(",") + "] of [" +
+                        data.model_selector_config.map(function (x) { return x && x.id; }).join(",") + "]");
                   }
                 } catch (e) { log("composite inject error " + e); }
               } catch (e) { log("inject error " + e); }
