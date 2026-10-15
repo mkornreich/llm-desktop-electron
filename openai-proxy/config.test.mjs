@@ -379,6 +379,7 @@ test("every behaviour-affecting setting is part of the hash", () => {
     PROXY_DUMP_TOOLS: "1", PROXY_RECORD_SESSION: "1", PROXY_LOG_CLASSIFIER: "1", PROXY_ASK_ON_BLOCK: "1", OPENAI_API_KEY: "k2", OPENAI_EXTRA_HEADERS: "X-Test:1",
     PROXY_SEND_CHROME_TOOLS: "0", PROXY_SEND_IOS_TOOLS: "0", PROXY_WEB_SEARCH: "0",
     PROXY_WEB_SEARCH_PROXY: "http://p:1",
+    PROXY_WEB_SEARCH_ENGINES: '[{"name":"Other","url":"https://other.test/?q=%s"}]',
     OPENAI_COMPOSITE_MODELS: "openai:gpt-5.6-sol,local:qwen3:8b", OPENAI_COMPOSITE_MAX_WAIT_MS: "9999",
     OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS: "9999",
     OPENAI_COMPACT_MODELS: "groq:openai/gpt-oss-20b,local:qwen3:8b",
@@ -516,7 +517,7 @@ test("legitimate JSONC still loads: comments, trailing commas; and a missing fil
 function runCli(body, verb) {
   return withConfigFile(body, (file, dir) => {
     fs.mkdirSync(path.join(dir, "openai-proxy"));
-    for (const f of ["config.mjs", "jsonc.cjs"])
+    for (const f of ["config.mjs", "jsonc.cjs", "websearch.mjs"])   // config.mjs's local imports
       fs.copyFileSync(fileURLToPath(new URL(f, import.meta.url)), path.join(dir, "openai-proxy", f));
     return spawnSync(process.execPath, [path.join(dir, "openai-proxy", "config.mjs"), verb],
       { encoding: "utf8", env: { ...process.env, HOME: dir } });
@@ -596,6 +597,34 @@ test("validation catches the cross-field mistakes that are hard to attribute lat
   assert.match(warn({ OPENAI_CLASSIFIER_SLOW_MS: "60000" }), /fail-closed/);
 });
 
+test("web-search engines: config.jsonc's array, env JSON, the Yep-first default, and an explicit []", () => {
+  const r = (config, env = {}) => resolve({ config, env, project: {}, home: {} });
+  const dflt = r({});
+  assert.deepEqual(dflt.values.PROXY_WEB_SEARCH_ENGINES.map((e) => e.name),
+    ["Yep", "Qwant Lite", "Startpage", "Swisscows", "Brave Search", "Bing"]);
+  assert.equal(dflt.values.PROXY_WEB_SEARCH_ENGINES[0].url, "https://yep.com/?q=%s");
+  const mine = [{ name: "Mine", url: "https://mine.test/?q=%s" }];
+  const fromCfg = r({ tools: { webSearchEngines: mine } });
+  assert.deepEqual(fromCfg.values.PROXY_WEB_SEARCH_ENGINES, mine);
+  assert.equal(fromCfg.sources.PROXY_WEB_SEARCH_ENGINES, "config");
+  const fromEnv = r({ tools: { webSearchEngines: mine } }, { PROXY_WEB_SEARCH_ENGINES: '[{"name":"Env","url":"https://env.test/%s"}]' });
+  assert.deepEqual(fromEnv.values.PROXY_WEB_SEARCH_ENGINES, [{ name: "Env", url: "https://env.test/%s" }], "env wins");
+  // Emptying the list in Settings is a choice, not "unset": it must not snap back to the defaults.
+  assert.deepEqual(r({ tools: { webSearchEngines: [] } }).values.PROXY_WEB_SEARCH_ENGINES, []);
+  assert.notEqual(configHash({ resolved: dflt }), configHash({ resolved: fromCfg }), "a new engine list restarts the proxy");
+});
+
+test("validation warns about unusable web-search engines and an engine-less search", () => {
+  const warn = (cfg, env = {}) => validate({ resolved: resolve({ config: cfg,
+    env: { OPENAI_API_KEY: "k", OPENAI_API: "responses", ...env }, project: {}, home: {} }) }).warnings.join(" | ");
+  const bad = warn({ tools: { webSearchEngines: [{ name: "NoTerm", url: "https://a.test/?q=" }, { name: "Ok", url: "https://b.test/?q=%s" }] } });
+  assert.match(bad, /web-search engine 'NoTerm' has no %s for the search terms — it will be skipped/);
+  assert.doesNotMatch(bad, /no usable web-search engine/);
+  assert.match(warn({ tools: { webSearchEngines: [] } }), /no usable web-search engine is configured/);
+  assert.doesNotMatch(warn({ tools: { webSearchEngines: [] } }, { PROXY_WEB_SEARCH: "0" }), /web-search/, "search off -> no warning");
+  assert.doesNotMatch(warn({}), /web-search/, "the defaults are all usable");
+});
+
 test("every table entry is well formed", () => {
   const names = new Set();
   for (const s of SETTINGS) {
@@ -603,9 +632,9 @@ test("every table entry is well formed", () => {
     assert.ok(!names.has(s.name), `duplicate setting ${s.name}`);
     names.add(s.name);
     if (s.derived) continue;
-    assert.ok(["str", "strBlankOk", "int", "bool01", "flag1"].includes(s.type),
+    assert.ok(["str", "strBlankOk", "int", "bool01", "flag1", "engines"].includes(s.type),
       `${s.name} has type '${s.type}'`);
-    if (s.type === "int" || s.type === "str" || s.type === "strBlankOk" || s.type === "bool01")
+    if (s.type === "int" || s.type === "str" || s.type === "strBlankOk" || s.type === "bool01" || s.type === "engines")
       assert.equal(typeof s.default, "string", `${s.name} default must be the raw string form`);
     if (s.type === "int" && "zero" in s)
       assert.ok(typeof s.zero === "number", `${s.name} zero must be numeric`);

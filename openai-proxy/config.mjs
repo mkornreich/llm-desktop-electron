@@ -30,6 +30,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { DEFAULT_SEARCH_ENGINES, normalizeEngines, engineProblem } from "./websearch.mjs";
 // The comment-preserving JSONC reader/editor is CommonJS so settings/config.js (CJS) can share it too;
 // an ESM module reaches a .cjs through createRequire.
 const require = createRequire(import.meta.url);
@@ -112,6 +113,10 @@ const TYPES = {
   // default. Needed for exactly one setting, where blank has its own meaning ("use the main
   // model") that `||` could never express — see the safety-model entry below.
   strBlankOk: (raw, s) => (raw === undefined ? s.default : raw),
+  // A JSON array of { name, url } search engines (the setting is `json`: config.jsonc's native array is
+  // passed through as JSON text, and the env var takes the same JSON). Unparseable -> [] (validate warns).
+  // An explicit [] survives: no engines is a choice, not "unset".
+  engines: (raw, s) => normalizeEngines(raw === undefined || raw === "" ? s.default : raw),
 };
 
 // ---------- the table ----------
@@ -230,15 +235,19 @@ export const SETTINGS = [
     project: ["PROXY_SEND_CHROME_TOOLS"], type: "bool01", default: "1" },
   { name: "PROXY_SEND_IOS_TOOLS", env: "PROXY_SEND_IOS_TOOLS",
     project: ["PROXY_SEND_IOS_TOOLS"], type: "bool01", default: "1" },
-  // Execute Claude Code's WebSearch locally: the proxy runs the search (DuckDuckGo) and injects the
-  // results, since a local model can't run Anthropic's server-side web_search. Off = leave it broken
+  // Execute Claude Code's WebSearch locally: the proxy runs the search (the engines below) and injects
+  // the results, since a local model can't run Anthropic's server-side web_search. Off = leave it broken
   // (the search sub-request just goes to the model, which can't browse). Default: on. See websearch.mjs.
   { name: "PROXY_WEB_SEARCH", env: "PROXY_WEB_SEARCH", project: ["PROXY_WEB_SEARCH"],
     type: "bool01", default: "1" },
   // Optional proxy for the web-search fetch (curl -x), e.g. http://host:port or socks5://host:port.
-  // Use it when DuckDuckGo rate-limits your IP. Empty = direct.
+  // Use it when a search engine blocks or rate-limits your IP. Empty = direct.
   { name: "PROXY_WEB_SEARCH_PROXY", env: "PROXY_WEB_SEARCH_PROXY", project: ["PROXY_WEB_SEARCH_PROXY"],
     type: "str", default: "" },
+  // The web-search engines, in fallback order: [{ name, url }] with %s in the url for the URL-encoded
+  // query. Each is tried in turn until one yields results; a blocked/failing/empty one falls through.
+  { name: "PROXY_WEB_SEARCH_ENGINES", env: "PROXY_WEB_SEARCH_ENGINES", project: ["PROXY_WEB_SEARCH_ENGINES"],
+    type: "engines", json: true, default: JSON.stringify(DEFAULT_SEARCH_ENGINES) },
 
   { name: "OPENAI_OUTPUT_FIXUPS", env: "OPENAI_OUTPUT_FIXUPS", project: ["OPENAI_OUTPUT_FIXUPS"],
     type: "bool01", default: "1" },
@@ -461,6 +470,7 @@ const PATHS = {
   OPENAI_THINKING_MIN_BUDGET: "reasoning.minBudget", OPENAI_VERBOSITY: "reasoning.verbosity",
   PROXY_SEND_CHROME_TOOLS: "tools.sendChromeTools", PROXY_SEND_IOS_TOOLS: "tools.sendIosTools",
   PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
+  PROXY_WEB_SEARCH_ENGINES: "tools.webSearchEngines",
   PORT: "advanced.port", OPENAI_MAX_TOOLS: "advanced.maxTools", OPENAI_MAX_TOOLS_RESPONSES: "advanced.maxToolsResponses",
   PROXY_DUMP_TOOLS: "diagnostics.dumpTools",
   PROXY_RECORD_SESSION: "diagnostics.recordSession",
@@ -502,7 +512,10 @@ export function resolve({ env = process.env, config, project, home, keyfile } = 
   const cfgRaw = (s) => {
     const p = PATHS[s.name];
     if (!p) return undefined;
-    return toRaw(typeof p === "object" ? getPath(C, `providers.${dp}.${p.field}`) : getPath(C, p));
+    const v = typeof p === "object" ? getPath(C, `providers.${dp}.${p.field}`) : getPath(C, p);
+    // A `json` setting (a structured value, e.g. the search-engine list) keeps its shape as JSON text.
+    if (s.json) return v === undefined || v === null ? undefined : JSON.stringify(v);
+    return toRaw(v);
   };
 
   // First non-empty wins: env > config.jsonc > keyfile (secret only) > home > default. Empty string
@@ -745,6 +758,18 @@ export function validate(opts = {}) {
       else if (PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`compaction member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
       else if (!RESPONSES_PROVIDER_IDS.has(prov)) warnings.push(`compaction member '${id}' uses '${prov}', which does not serve /responses — the summariser will fail over past it`);
     }
+  }
+
+  // Web-search engines: an unusable entry is skipped at search time, so warn rather than fail; an empty
+  // (or wholly unusable) list means every WebSearch reports "unavailable".
+  if (v.PROXY_WEB_SEARCH) {
+    const engines = v.PROXY_WEB_SEARCH_ENGINES || [];
+    for (const e of engines) {
+      const p = engineProblem(e);
+      if (p) warnings.push(`web-search engine '${e.name || e.url || "(unnamed)"}' ${p} — it will be skipped`);
+    }
+    if (!engines.some((e) => !engineProblem(e)))
+      warnings.push("PROXY_WEB_SEARCH is on but no usable web-search engine is configured — every WebSearch will report unavailable");
   }
 
   return { errors, warnings };

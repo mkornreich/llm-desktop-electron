@@ -290,6 +290,7 @@ const DISABLED_TOOL_PREFIXES = [
 // Execute Claude Code's server-side WebSearch locally (proxy runs the search) — see websearch.mjs.
 const WEB_SEARCH_ENABLED = CFG.PROXY_WEB_SEARCH;
 const WEB_SEARCH_PROXY = CFG.PROXY_WEB_SEARCH_PROXY;   // optional curl -x proxy for the search fetch
+const WEB_SEARCH_ENGINES = CFG.PROXY_WEB_SEARCH_ENGINES;   // [{ name, url-with-%s }], tried in order
 function dropDisabledMcpTools(body) {
   if (!DISABLED_TOOL_PREFIXES.length || !Array.isArray(body?.tools)) return body;
   body.tools = body.tools.filter((t) => !DISABLED_TOOL_PREFIXES.some((p) => String(t?.name || "").startsWith(p)));
@@ -4368,7 +4369,7 @@ const server = http.createServer(async (req, res) => {
     if (picked) log(`  routed to provider ${bootProvider.id} (${bootProvider.baseURL})`);
     // Claude Code's WebSearch is Anthropic's server-side tool; the local model can't run it. When this
     // is that search sub-request, run the search here and inject the results, so it actually works.
-    if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log, proxy: WEB_SEARCH_PROXY });
+    if (WEB_SEARCH_ENABLED) await handleWebSearch(body, { log, proxy: WEB_SEARCH_PROXY, engines: WEB_SEARCH_ENGINES });
     dropDisabledMcpTools(body);   // strip MCP tool groups the config disables, before dump/translation
     dropRedundantPlanTool(body, { log });   // in plan mode already? withhold EnterPlanMode so it can't re-enter and loop
     dumpTools(body.tools);

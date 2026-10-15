@@ -273,7 +273,7 @@ test("a reload is not a close: a beacon followed by a heartbeat keeps the server
 function scratchTree(configText) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-server-test-"));
   for (const f of ["settings/server.js", "settings/config.js", "settings/index.html",
-                   "openai-proxy/jsonc.cjs", "openai-proxy/config.mjs"]) {
+                   "openai-proxy/jsonc.cjs", "openai-proxy/config.mjs", "openai-proxy/websearch.mjs"]) {
     fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
     fs.copyFileSync(path.join(ROOT, f), path.join(dir, f));
   }

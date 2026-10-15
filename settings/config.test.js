@@ -52,6 +52,21 @@ test("types round-trip: bool -> JSON boolean, int -> number, composite -> array"
   });
 });
 
+test("the search-engine list round-trips: GUI JSON text <-> a config.jsonc array of { name, url }", async () => {
+  withTempConfig(SAMPLE.replace('"privacy"', '"tools": { "webSearch": true },\n  "privacy"'), (file) => {
+    const engines = [{ name: " Yep ", url: "https://yep.com/?q=%s" }, { name: "", url: "" }, { name: "Bing", url: "https://www.bing.com/search?q=%s" }];
+    writeValues({ PROXY_WEB_SEARCH_ENGINES: JSON.stringify(engines) }, file);
+    const c = jsonc.readConfig(file);
+    assert.deepEqual(c.tools.webSearchEngines, [{ name: "Yep", url: "https://yep.com/?q=%s" }, { name: "Bing", url: "https://www.bing.com/search?q=%s" }],
+      "trimmed, and a blank row is dropped");
+    assert.match(fs.readFileSync(file, "utf8"), /\n {4}\{ "name": "Yep", "url": "https:\/\/yep\.com\/\?q=%s" \},\n/, "one engine per line");
+    assert.equal(readValues(file).PROXY_WEB_SEARCH_ENGINES.value, JSON.stringify(c.tools.webSearchEngines));
+  });
+  // The GUI default mirrors the proxy's (config.mjs/websearch.mjs) default list exactly.
+  const { DEFAULT_SEARCH_ENGINES } = await import("../openai-proxy/websearch.mjs");
+  assert.equal(SCHEMA.find((s) => s.key === "PROXY_WEB_SEARCH_ENGINES").default, JSON.stringify(DEFAULT_SEARCH_ENGINES));
+});
+
 test("reading maps native JSONC values back to the GUI string form", () => {
   withTempConfig(SAMPLE, (file) => {
     const v = readValues(file);
@@ -158,7 +173,7 @@ test("provider groups + DEFAULT_PROVIDER options are generated from config.jsonc
 test("every schema entry is well formed", () => {
   for (const s of SCHEMA) {
     assert.ok(s.file && s.key && s.type && s.label, `incomplete entry: ${s.key}`);
-    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context", "composite", "modelpicker", "classifiermodel"].includes(s.type), `bad type on ${s.key}`);
+    assert.ok(["bool", "int", "text", "enum", "ollama", "ollama-context", "composite", "modelpicker", "classifiermodel", "engines"].includes(s.type), `bad type on ${s.key}`);
     if (s.type === "enum") assert.ok(Array.isArray(s.options) && s.options.length, `enum ${s.key} needs options`);
     assert.ok(s.default !== undefined, `${s.key} needs a default`);
   }

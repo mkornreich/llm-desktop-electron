@@ -249,8 +249,20 @@ function locate(text, pathArr, source) {
 }
 
 // Serialize a JS value the way it should appear in the file (compact — the surrounding formatting is
-// preserved by splicing, so only the value token itself is (re)written).
-function serialize(v) { return JSON.stringify(v); }
+// preserved by splicing, so only the value token itself is (re)written). The one exception is a list of
+// flat objects (e.g. tools.webSearchEngines): one `{ "k": v, … }` per line, indented under the line the
+// value sits on, so a GUI save keeps a hand-formatted list readable instead of collapsing it to one line.
+const isFlatObject = (o) => o && typeof o === "object" && !Array.isArray(o)
+  && Object.values(o).every((x) => x === null || typeof x !== "object");
+function serialize(v, indent = "") {
+  if (Array.isArray(v) && v.length && v.every(isFlatObject)) {
+    const row = (o) => "{ " + Object.entries(o).map(([k, x]) => `${JSON.stringify(k)}: ${JSON.stringify(x)}`).join(", ") + " }";
+    return "[\n" + v.map((o) => indent + "  " + row(o)).join(",\n") + "\n" + indent + "]";
+  }
+  return JSON.stringify(v);
+}
+// The leading whitespace of the line holding `pos` — the indentation a multi-line value continues from.
+const lineIndent = (text, pos) => (text.slice(text.lastIndexOf("\n", pos - 1) + 1, pos).match(/^[ \t]*/) || [""])[0];
 
 // Replace (or, when the leaf key is absent, insert) the value at `pathArr` in `text`, preserving every
 // comment / blank line / key order / indentation outside the edited span. Returns the new text.
@@ -258,7 +270,7 @@ function serialize(v) { return JSON.stringify(v); }
 function editText(text, pathArr, value, source) {
   const found = locate(text, pathArr, source);
   if (found.span) {
-    return text.slice(0, found.span.start) + serialize(value) + text.slice(found.span.end);
+    return text.slice(0, found.span.start) + serialize(value, lineIndent(text, found.span.start)) + text.slice(found.span.end);
   }
   // Leaf key missing but its parent object exists -> insert `"key": value` before the object's `}`.
   // Only supported for a missing FINAL segment in an existing object (e.g. a new CONTEXT_<model>).
@@ -270,7 +282,7 @@ function editText(text, pathArr, value, source) {
     // Reuse the object's existing indentation if we can find a key line; else a two-space bump.
     const indentMatch = inner.match(/\n([ \t]+)"/);
     const indent = indentMatch ? indentMatch[1] : "  ";
-    const entry = `"${found.missingKey}": ${serialize(value)}`;
+    const entry = `"${found.missingKey}": ${serialize(value, indent)}`;
     if (empty) return text.slice(0, obj.start + 1) + `\n${indent}${entry}\n` + text.slice(close);
     // Append after the last non-whitespace char before `}`, adding a comma to the previous entry.
     let j = close - 1;

@@ -54,6 +54,23 @@ test("editing an array value works", () => {
   assert.deepEqual(readConfigText(out).composite, ["groq:openai/gpt-oss-120b", "local:qwen3:8b"]);
 });
 
+test("a list of flat objects is written one entry per line, indented under its key", () => {
+  const engines = [{ name: "Yep", url: "https://yep.com/?q=%s" }, { name: "Bing", url: "https://www.bing.com/search?q=%s" }];
+  const out = editText(SAMPLE, ["composite"], engines);
+  assert.deepEqual(readConfigText(out).composite, engines);
+  assert.ok(out.includes(`  "composite": [
+    { "name": "Yep", "url": "https://yep.com/?q=%s" },
+    { "name": "Bing", "url": "https://www.bing.com/search?q=%s" }
+  ],`), out);
+  assert.match(out, /\/\/ top comment/, "comments outside the span survive");
+  // Inserting the list as a NEW key uses the object's indentation too.
+  const ins = editText(SAMPLE, ["reasoning", "engines"], engines.slice(0, 1));
+  assert.deepEqual(readConfigText(ins).reasoning.engines, engines.slice(0, 1));
+  // An empty list, a string list and a nested object keep the compact form.
+  assert.match(editText(SAMPLE, ["composite"], []), /"composite": \[\],/);
+  assert.match(editText(SAMPLE, ["composite"], ["a", "b"]), /"composite": \["a","b"\],/);
+});
+
 test("editing a number and a boolean", () => {
   let out = editText(SAMPLE, ["reasoning", "minBudget"], 2000);
   assert.equal(readConfigText(out).reasoning.minBudget, 2000);

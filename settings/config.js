@@ -199,12 +199,23 @@ const SCHEMA = [
     default: "1", label: "Send iOS Simulator tools (mcp__Claude_Code_iOS)",
     help: "On: forward the Claude Code iOS Simulator tools to the model. Off: strip them from every request. Useful for shrinking the ~40k-token tool block a small local model has to fit in its context. Changing it restarts the proxy." },
   { group: "Tools", file: ".openai-model", key: "PROXY_WEB_SEARCH", type: "bool",
-    default: "1", label: "Run web search locally (DuckDuckGo)",
-    help: "On: the proxy executes Claude Code's WebSearch by scraping DuckDuckGo and injecting the results, since a local model can't run Anthropic's server-side search. Off: WebSearch is left to the (unrunnable) server tool. Changing it restarts the proxy." },
+    default: "1", label: "Run web search locally",
+    help: "On: the proxy executes Claude Code's WebSearch by fetching the search engines below (in order) and injecting the results, since a local model can't run Anthropic's server-side search. Off: WebSearch is left to the (unrunnable) server tool. Changing it restarts the proxy." },
+  { group: "Tools", file: ".openai-model", key: "PROXY_WEB_SEARCH_ENGINES", type: "engines",
+    default: JSON.stringify([
+      { name: "Yep", url: "https://yep.com/?q=%s" },
+      { name: "Qwant Lite", url: "https://lite.qwant.com/?q=%s" },
+      { name: "Startpage", url: "https://www.startpage.com/sp/search?query=%s" },
+      { name: "Swisscows", url: "https://swisscows.com/en/web?query=%s" },
+      { name: "Brave Search", url: "https://search.brave.com/search?q=%s" },
+      { name: "Bing", url: "https://www.bing.com/search?q=%s" },
+    ]),
+    label: "Web search engines (fallback order)",
+    help: "Each engine is a name plus its results URL with %s where the search terms go (e.g. https://yep.com/?q=%s). They are tried top to bottom: the first that returns results answers, and a blocked, failing or empty one falls through to the next. An engine that answers with a bot check (Cloudflare, DataDome, a captcha) counts as blocked — measured from this machine, Yep, Qwant Lite, Startpage and Swisscows all do, so Brave and Bing at the end keep search working. Changing it restarts the proxy." },
   { group: "Tools", file: ".openai-model", key: "PROXY_WEB_SEARCH_PROXY", type: "text",
     default: "", placeholder: "http://host:port",
     label: "Web-search proxy (optional)",
-    help: "Route the DuckDuckGo fetch through an HTTP/SOCKS proxy (e.g. http://host:port or socks5://host:port) when DuckDuckGo rate-limits your IP. Empty = direct." },
+    help: "Route the search-engine fetches through an HTTP/SOCKS proxy (e.g. http://host:port or socks5://host:port) when an engine blocks or rate-limits your IP. Empty = direct." },
 
   // Diagnostics. Both live in .diagnostics, which run.sh reads and exports into the launch
   // environment — DESKTOP_LOG_LEVEL for the app, PROXY_DUMP_TOOLS for the proxy.
@@ -290,6 +301,7 @@ const PATHS = {
   OPENAI_COMPACT_MODEL: "compaction.model", CLAUDE_CODE_AUTO_COMPACT_WINDOW: "compaction.autoCompactWindow",
   PROXY_SEND_CHROME_TOOLS: "tools.sendChromeTools", PROXY_SEND_IOS_TOOLS: "tools.sendIosTools",
   PROXY_WEB_SEARCH: "tools.webSearch", PROXY_WEB_SEARCH_PROXY: "tools.webSearchProxy",
+  PROXY_WEB_SEARCH_ENGINES: "tools.webSearchEngines",
   DISABLE_TELEMETRY: "privacy.disableTelemetry",
   SYNC_CLAUDE_SESSIONS: "sync.sessions", SYNC_CLAUDE_GROUPING: "sync.grouping",
   DESKTOP_LOG_LEVEL: "diagnostics.logLevel", PROXY_DUMP_TOOLS: "diagnostics.dumpTools", PROXY_RECORD_SESSION: "diagnostics.recordSession", PROXY_LOG_CLASSIFIER: "diagnostics.logClassifier", PROXY_ASK_ON_BLOCK: "classifier.askOnBlock", ULTRACODE_DEFAULT: "diagnostics.ultracode",
@@ -354,15 +366,23 @@ function configSyntaxError(file = jsonc.CONFIG_FILE) {
   }
 }
 
-// JSONC native value -> the string form the GUI widgets use (bool -> "1"/"0", array -> comma-joined).
+// JSONC native value -> the string form the GUI widgets use (bool -> "1"/"0", array -> comma-joined,
+// a structured list such as the search engines -> its JSON text).
 function toGui(v, type) {
   if (v === undefined || v === null) return undefined;
+  if (type === "engines") return JSON.stringify(Array.isArray(v) ? v : []);
   if (isArrayType(type)) return Array.isArray(v) ? v.join(",") : String(v);
   if (type === "bool") return v ? "1" : "0";
   return String(v);
 }
 // GUI string -> the JSONC native value to store.
 function toNative(s, type) {
+  if (type === "engines") {
+    let a; try { a = JSON.parse(String(s)); } catch { a = []; }
+    return (Array.isArray(a) ? a : []).filter((e) => e && typeof e === "object")
+      .map((e) => ({ name: String(e.name ?? "").trim(), url: String(e.url ?? "").trim() }))
+      .filter((e) => e.name || e.url);
+  }
   if (isArrayType(type)) return String(s).split(",").map((x) => x.trim()).filter(Boolean);
   if (type === "bool") return String(s) !== "0";
   if (type === "int" || type === "ollama-context") { const n = parseInt(s, 10); return Number.isNaN(n) ? 0 : n; }

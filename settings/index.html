@@ -284,6 +284,60 @@ function control(s) {
     }
     return wrap;
   }
+  if (s.type === "engines") {
+    // Ordered search-engine list. DRAFT[key] is JSON text of [{name, url}]; each row is a name field + a
+    // URL-template field (%s = the search terms) + move-up / move-down / remove, then "Add search engine".
+    // Typing updates DRAFT in place (no re-render): re-rendering on blur would replace the very field the
+    // user just clicked into. Only the structural edits (move / remove / add) re-render.
+    let list; try { list = JSON.parse(DRAFT[s.key] || "[]"); } catch { list = []; }
+    if (!Array.isArray(list)) list = [];
+    list = list.map((e) => ({ name: String((e && e.name) || ""), url: String((e && e.url) || "") }));
+    const store = (arr) => { DRAFT[s.key] = JSON.stringify(arr.map((e) => ({ name: e.name.trim(), url: e.url.trim() }))); };
+    const commit = (arr) => { store(arr); render(); };
+    const wrap = document.createElement("div");
+    const mkBtn = (txt, title, fn, disabled) => {
+      const b = document.createElement("button"); b.type = "button"; b.textContent = txt; b.title = title;
+      b.disabled = !!disabled; b.style.cssText = "min-width:2em;padding:2px 6px;";
+      b.onclick = fn; return b;
+    };
+    const problem = (u) => !u ? "" : !/^https?:\/\/[^/\s]+/i.test(u) ? "not an http(s) URL" : !u.includes("%s") ? "needs %s where the search terms go" : "";
+    list.forEach((e, i) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0;";
+      const name = document.createElement("input"); name.type = "text"; name.value = e.name;
+      name.placeholder = "Name"; name.style.cssText = "flex:0 0 9em;min-width:0;";
+      name.setAttribute("aria-label", `Search engine ${i + 1} name`);
+      const url = document.createElement("input"); url.type = "text"; url.value = e.url;
+      url.placeholder = "https://example.com/search?q=%s"; url.style.cssText = "flex:1;min-width:0;";
+      url.setAttribute("aria-label", `Search engine ${i + 1} URL`);
+      const hint = document.createElement("div"); hint.className = "help";
+      // Flag an unusable URL (red border + a note) as it is typed; an untouched blank row stays unflagged.
+      const flag = () => {
+        const bad = problem(list[i].url);
+        url.style.borderColor = bad ? "#d33" : ""; url.title = bad;
+        hint.textContent = bad ? `${list[i].name.trim() || "This engine"}: ${bad} — it will be skipped.` : "";
+        hint.hidden = !bad;
+      };
+      name.oninput = () => { list[i] = { ...list[i], name: name.value }; store(list); flag(); refreshDirty(); };
+      url.oninput = () => { list[i] = { ...list[i], url: url.value }; store(list); flag(); refreshDirty(); };
+      row.append(name, url,
+        mkBtn("▲", "Move up", () => { const a = list.slice(); [a[i - 1], a[i]] = [a[i], a[i - 1]]; commit(a); }, i === 0),
+        mkBtn("▼", "Move down", () => { const a = list.slice(); [a[i + 1], a[i]] = [a[i], a[i + 1]]; commit(a); }, i === list.length - 1),
+        mkBtn("✕", "Remove", () => { const a = list.slice(); a.splice(i, 1); commit(a); }));
+      wrap.append(row, hint);
+      flag();
+    });
+    const add = document.createElement("button"); add.type = "button"; add.textContent = "+ Add search engine";
+    add.style.cssText = "margin-top:4px;padding:3px 10px;";
+    add.onclick = () => { commit([...list, { name: "", url: "" }]); };
+    wrap.append(add);
+    if (!list.length) {
+      const hint = document.createElement("div"); hint.className = "help";
+      hint.textContent = "No engines — every WebSearch will report that search is unavailable.";
+      wrap.append(hint);
+    }
+    return wrap;
+  }
   if (s.type === "modelpicker") {
     // Single-model <select>: the setting's own suggestions + the live aggregated provider catalog
     // (/api/composite-choices) + the current value (so a set-but-unlisted id is never dropped). Falls

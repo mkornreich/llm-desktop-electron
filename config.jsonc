@@ -371,8 +371,23 @@
       "mcp__mcp-registry__",                           // MCP connector discovery — unused for coding
       "NotebookEdit"                                   // Jupyter cell editing — unused
     ],
+    // Run Claude Code's WebSearch in the proxy (a local model can't run Anthropic's server-side search).
     "webSearch": true,
-    "webSearchProxy": ""
+    // Optional curl -x proxy for the search fetches (http://host:port, socks5://host:port) — for when an
+    // engine blocks or rate-limits this IP.
+    "webSearchProxy": "",
+    // Search engines in FALLBACK order: url is the results page with %s for the search terms. Each is
+    // tried in turn until one returns results; a blocked/empty one falls through to the next. Measured
+    // 2026-10-15 from this machine: Yep (Cloudflare), Qwant Lite (DataDome), Startpage (captcha) and
+    // Swisscows (JS-only) give a plain fetch no results, so Brave and Bing are the working fallbacks.
+    "webSearchEngines": [
+      { "name": "Yep", "url": "https://yep.com/?q=%s" },
+      { "name": "Qwant Lite", "url": "https://lite.qwant.com/?q=%s" },
+      { "name": "Startpage", "url": "https://www.startpage.com/sp/search?query=%s" },
+      { "name": "Swisscows", "url": "https://swisscows.com/en/web?query=%s" },
+      { "name": "Brave Search", "url": "https://search.brave.com/search?q=%s" },
+      { "name": "Bing", "url": "https://www.bing.com/search?q=%s" }
+    ]
   },
 
   // Model picker / Code-tab dropdown. models is the id:Label list served on /v1/models; dropdownModels
