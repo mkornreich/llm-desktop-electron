@@ -444,6 +444,22 @@ export function activeProviders(keyfile) {
   const K = providerKeys(keyfile);
   return Object.values(PROVIDERS).filter((p) => p.keyNames.some((n) => K[n]));
 }
+// The default (un-picked-turn) provider after applying the on-device-engine toggle to a starting id.
+// When the default is a managed on-device engine: the ACTIVE engine when the toggle selects one
+// ("freetoken"/"ollama"); when the engine is "off" (run NOTHING on the GPU), the first NON-managed
+// (cloud) provider named in the composite chain that HOLDS a key — so an un-picked turn hits a working
+// cloud upstream instead of the stopped local server. Falls back to the given id when nothing fits (no
+// cloud key -> the local, keyless default still validates). A non-managed default is returned unchanged.
+export function applyEngineToDefault(C, dp, keyfile) {
+  const onDev = C?.onDeviceEngine;
+  if (!onDev || !C?.providers?.[dp]?.managed) return dp;
+  if (onDev !== "off") return C.providers?.[onDev]?.managed ? onDev : dp;
+  const keyed = new Set(activeProviders(keyfile).map((p) => p.id));
+  const cloud = (Array.isArray(C.composite) ? C.composite : [])
+    .map((m) => String(m).split(":")[0])
+    .find((p) => C.providers?.[p] && !C.providers[p].managed && keyed.has(p));
+  return cloud || dp;
+}
 
 // ---------- config.jsonc path map ----------
 //
@@ -508,8 +524,9 @@ export function resolve({ env = process.env, config, project, home, keyfile } = 
   // Which provider backs the active/main turns — its sub-block feeds OPENAI_MODEL/API/BASE_URL/…
   let dp = env.DEFAULT_PROVIDER || C.defaultProvider || "openai";
   // On-device engine toggle: when the default is a managed on-device engine, the ACTIVE one is whichever
-  // onDeviceEngine selects, so the toggle switches the default's model/base/api. Env override still wins.
-  if (!env.DEFAULT_PROVIDER && C.onDeviceEngine && C.providers?.[dp]?.managed && C.providers?.[C.onDeviceEngine]?.managed) dp = C.onDeviceEngine;
+  // onDeviceEngine selects (switching the default's model/base/api); when the engine is "off", a managed
+  // default falls back to a keyed cloud provider from the composite. Env override still wins.
+  if (!env.DEFAULT_PROVIDER) dp = applyEngineToDefault(C, dp, keyfile);
   const values = {};
   const sources = {};
 
@@ -811,11 +828,12 @@ export function emitEnv({ env = process.env } = {}) {
   // Back-compat: a legacy provider-name mode (e.g. PROVIDER=cohere) selects proxy mode with that upstream.
   // Derived from the registry, so a new provider needs no edit here.
   if (PROVIDERS[mode]) { dp = mode; mode = "proxy"; }
-  // On-device engine toggle (mirrors resolve()): the selected managed engine drives the default
-  // provider, the classifier's provider, which engine autostarts, and which engine's models the
-  // Code-tab dropdown shows. swapEngine() re-points an on-device "<engine>:<model>" at the active one.
+  // On-device engine toggle (mirrors resolve()): the selected managed engine drives the default provider,
+  // the classifier's provider, which engine autostarts, and which engine's models the Code-tab dropdown
+  // shows. "off" runs NO engine — a managed default then falls back to a keyed cloud provider from the
+  // composite. swapEngine() re-points an on-device "<engine>:<model>" at the active one.
   const onDev = C.onDeviceEngine;
-  if (!env.DEFAULT_PROVIDER && onDev && C.providers?.[dp]?.managed && C.providers?.[onDev]?.managed) dp = onDev;
+  if (!env.DEFAULT_PROVIDER) dp = applyEngineToDefault(C, dp);
   const swapEngine = (val) => {
     const i = String(val || "").indexOf(":"); const prov = i > 0 ? String(val).slice(0, i) : "";
     return (onDev && prov !== onDev && C.providers?.[prov]?.managed && C.providers?.[onDev]?.managed) ? `${onDev}${String(val).slice(i)}` : val;
@@ -852,11 +870,15 @@ export function emitEnv({ env = process.env } = {}) {
   if (getPath(C, "diagnostics.ultracode")) put("LLMD_ULTRACODE", "1");
   let dd = getPath(C, "picker.dropdownModels");
   if (Array.isArray(dd) && dd.length) {
-    // Hide the DISABLED on-device engine's models — the GPU runs only the one onDeviceEngine selects.
-    if (onDev && C.providers?.[onDev]?.managed) {
-      const hidden = Object.keys(C.providers).filter((id) => C.providers[id].managed && id !== onDev);
-      dd = dd.filter((m) => !hidden.some((h) => String(m).startsWith(h + ":")));
-    }
+    // Hide on-device engine models the GPU is not running: the OTHER engine's when a toggle selects one,
+    // or ALL managed engines' when the engine is "off" (nothing runs locally) — so a dead freetoken: /
+    // local: entry is never offered in the dropdown.
+    const hidden = onDev === "off"
+      ? Object.keys(C.providers || {}).filter((id) => C.providers[id].managed)
+      : (onDev && C.providers?.[onDev]?.managed)
+        ? Object.keys(C.providers).filter((id) => C.providers[id].managed && id !== onDev)
+        : [];
+    if (hidden.length) dd = dd.filter((m) => !hidden.some((h) => String(m).startsWith(h + ":")));
     put("LLMD_DROPDOWN_MODELS", JSON.stringify(dd));
   }
   if (getPath(C, "privacy.disableTelemetry"))

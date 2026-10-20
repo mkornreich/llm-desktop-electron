@@ -24,9 +24,9 @@ const SCHEMA = [
     label: "Default upstream (proxy mode)",
     help: "In proxy mode, which upstream backs the DEFAULT (un-picked) turns, the background classifier and compaction. Configure each provider's model in its own group below (openai -> OpenAI model, ollama -> Ollama model, etc.) and put remote keys in .openai-key. Each turn can still route elsewhere by picking a <provider>:<model> in the Code-tab dropdown. Ignored in anthropic mode." },
   { group: "Provider", file: ".provider", key: "ON_DEVICE_ENGINE", type: "enum",
-    options: ["freetoken", "ollama"], default: "freetoken",
+    options: ["freetoken", "ollama", "off"], default: "freetoken",
     label: "On-device engine",
-    help: "Which local inference engine runs on the GPU — only ONE fits an 8GB card. 'freetoken' = the FreeToken engine on :1919; 'ollama' = the managed Ollama on :11435. The selected engine is the one the launcher autostarts, the one an on-device default/classifier resolves to, and the ONLY one whose models appear in the Code-tab dropdown — the other engine's models are hidden. Restart (or relaunch) to apply." },
+    help: "Which local inference engine runs on the GPU — only ONE fits an 8GB card. 'freetoken' = the FreeToken engine on :1919; 'ollama' = the managed Ollama on :11435; 'off' = run NO on-device engine (the launcher starts neither, freeing the GPU — use this when you work entirely through cloud models / Composite). The selected engine is the one the launcher autostarts, the one an on-device default/classifier resolves to, and the ONLY one whose models appear in the Code-tab dropdown. When 'off', no local models are offered and a default (un-picked) turn falls back to the first cloud provider in your Composite chain that has a key. Restart (or relaunch) to apply." },
 
   // The local (on-device) model, its own file. .ollama-model reuses the OPENAI_MODEL/OPENAI_API
   // keys the proxy reads, so these entries carry a distinct `key` (the unique id the GUI tracks)

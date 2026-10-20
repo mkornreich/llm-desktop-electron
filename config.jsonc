@@ -15,10 +15,12 @@
   "defaultProvider": "freetoken",
 
   // Which on-device engine is active. The 8GB GPU holds only ONE at a time, so this is a toggle
-  // (Settings > On-device engine): "freetoken" or "ollama". The selected engine is the one the launcher
-  // autostarts, the one an on-device defaultProvider/classifier resolves to, and the only one whose
-  // models appear in the Code-tab dropdown — the other's are hidden.
-  "onDeviceEngine": "freetoken",
+  // (Settings > On-device engine): "freetoken", "ollama", or "off". The selected engine is the one the
+  // launcher autostarts, the one an on-device defaultProvider/classifier resolves to, and the only one
+  // whose models appear in the Code-tab dropdown — the other's are hidden. "off" runs NO local engine:
+  // the launcher starts neither (the GPU stays free), no on-device models are offered, and a managed
+  // defaultProvider falls back to the first keyed cloud provider in `composite` (see applyEngineToDefault).
+  "onDeviceEngine": "off",
 
   // Per-provider endpoint + model. "endpoint" moved here from the hardcoded registry; blank falls back
   // to the built-in default. "ollama" is the keyless on-device Ollama (its endpoint is rediscovered at
