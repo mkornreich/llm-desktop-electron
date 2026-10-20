@@ -381,6 +381,7 @@ test("every behaviour-affecting setting is part of the hash", () => {
     PROXY_WEB_SEARCH_PROXY: "http://p:1",
     PROXY_WEB_SEARCH_ENGINES: '[{"name":"Other","url":"https://other.test/?q=%s"}]',
     OPENAI_COMPOSITE_MODELS: "openai:gpt-5.6-sol,local:qwen3:8b", OPENAI_COMPOSITE_MAX_WAIT_MS: "9999",
+    OPENAI_KAGGLE_COMPOSITE_MODELS: "kaggle:gpt-oss-120b,kaggle:deepseek-r1-0528",
     OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS: "9999",
     OPENAI_COMPACT_MODELS: "groq:openai/gpt-oss-20b,local:qwen3:8b",
   };

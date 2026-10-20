@@ -193,6 +193,10 @@ export const SETTINGS = [
   // Settings picker; every OTHER model keeps its current single-shot behaviour.
   { name: "OPENAI_COMPOSITE_MODELS", env: "OPENAI_COMPOSITE_MODELS", project: ["OPENAI_COMPOSITE_MODELS"],
     type: "str", default: "" },
+  // A SECOND composite chain whose members are all Kaggle Model Proxy models (reserved id
+  // "kaggle-composite"). Same shape/fallover as OPENAI_COMPOSITE_MODELS; empty = no Kaggle composite.
+  { name: "OPENAI_KAGGLE_COMPOSITE_MODELS", env: "OPENAI_KAGGLE_COMPOSITE_MODELS", project: ["OPENAI_KAGGLE_COMPOSITE_MODELS"],
+    type: "str", default: "" },
   // Upper bound (ms) on how long the composite waits when EVERY member is rate-limited (429). Fast-
   // failover means a 429 never blocks while another member is still available; only once the whole chain
   // is exhausted does it sleep to the soonest member's Retry-After — capped here per-member AND
@@ -455,6 +459,7 @@ const PATHS = {
   OPENAI_CLASSIFIER_MAX_TOOLS: "classifier.maxTools", OPENAI_CLASSIFIER_SLOW_MS: "classifier.slowMs",
   OPENAI_PICKER_MODELS: "picker.models",
   OPENAI_COMPOSITE_MODELS: "composite", OPENAI_COMPOSITE_MAX_WAIT_MS: "compositeMaxWaitMs",
+  OPENAI_KAGGLE_COMPOSITE_MODELS: "kaggleComposite",
   OPENAI_UPSTREAM_HEADERS_TIMEOUT_MS: "upstreamHeadersTimeoutMs",
   OPENAI_COMPACT_MODELS: "compact", OPENAI_COMPACT_MODEL: "compaction.model",
   OPENAI_COMPACT_SUMMARY: "compaction.summary", OPENAI_MAX_TEXT_CHARS: "compaction.maxTextChars",
@@ -742,7 +747,9 @@ export function validate(opts = {}) {
       const prov = id.slice(0, i);
       if (isNonToolModel(id)) warnings.push(`composite member '${id}' cannot do tool calling — it will be skipped (an agent turn always carries tools)`);
       else if (!PROVIDERS[prov]) warnings.push(`composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
-      else if (PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
+      // 'kaggle' is exempt from the key check: its bearer is a short-lived token minted at runtime from
+      // ~/.kaggle/access_token (see kaggle-proxy-token.mjs), never a static .openai-key value.
+      else if (prov !== "kaggle" && PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
     }
   }
 
@@ -757,6 +764,20 @@ export function validate(opts = {}) {
       else if (!PROVIDERS[prov]) warnings.push(`compaction member '${id}' names an unknown provider '${prov}' — it will be skipped`);
       else if (PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`compaction member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
       else if (!RESPONSES_PROVIDER_IDS.has(prov)) warnings.push(`compaction member '${id}' uses '${prov}', which does not serve /responses — the summariser will fail over past it`);
+    }
+  }
+
+  // Kaggle-only composite ("kaggle-composite"): same checks as the primary composite. 'kaggle' members are
+  // exempt from the .openai-key check — their bearer is minted at runtime, so activeProviders can't see it.
+  if (v.OPENAI_KAGGLE_COMPOSITE_MODELS) {
+    const active = new Set(activeProviders(opts.keyfile).map((p) => p.id));
+    for (const id of v.OPENAI_KAGGLE_COMPOSITE_MODELS.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const i = id.indexOf(":");
+      if (i <= 0) continue;
+      const prov = id.slice(0, i);
+      if (isNonToolModel(id)) warnings.push(`kaggle-composite member '${id}' cannot do tool calling — it will be skipped`);
+      else if (!PROVIDERS[prov]) warnings.push(`kaggle-composite member '${id}' names an unknown provider '${prov}' — it will be skipped`);
+      else if (prov !== "kaggle" && PROVIDERS[prov].keyNames.length > 0 && !active.has(prov)) warnings.push(`kaggle-composite member '${id}' needs a ${prov} key in .openai-key — it will be skipped until one is present`);
     }
   }
 
@@ -862,6 +883,10 @@ export function emitEnv({ env = process.env } = {}) {
   put("PROXY_ANTHROPIC_BASE_URL", `http://127.0.0.1:${v.PORT}`);
   const comp = getPath(C, "composite");
   if (Array.isArray(comp) && comp.length) put("LLMD_COMPOSITE", JSON.stringify({ members: comp }));
+  // The Kaggle-only composite — same bridge as LLMD_COMPOSITE; mainView.js injects it as a second
+  // "Kaggle (fallback)" dropdown entry (reserved id "kaggle-composite"), NOT the new-session default.
+  const kcomp = getPath(C, "kaggleComposite");
+  if (Array.isArray(kcomp) && kcomp.length) put("LLMD_KAGGLE_COMPOSITE", JSON.stringify({ members: kcomp }));
 
   // Compaction window: an on-device provider derives it per-model (explicit compactWindow, else 3/4 of
   // the model's context); every other provider uses the flat configured value. Keyed off the DEFAULT

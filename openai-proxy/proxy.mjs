@@ -55,6 +55,9 @@ import {
   newId as newTurnId,
 } from "./attempts.mjs";
 import { formatMicros, unpricedAmong, RATE_TABLE_VERSION, RATES_SOURCE } from "./model-registry.mjs";
+// Kaggle Model Proxy credentials: mints/refreshes the short-lived proxy token from ~/.kaggle/access_token
+// and publishes it into the generic routing hooks (see the startup block). getQuota reads the AI budget.
+import { start as startKaggle, forceRefresh as refreshKaggleToken, getQuota as getKaggleQuota } from "./kaggle-proxy-token.mjs";
 
 // ---------- config ----------
 // Every setting, its precedence and its coercion now live in config.mjs, which also produces
@@ -128,6 +131,12 @@ const PICKER_MODELS = CFG.OPENAI_PICKER_MODELS
 const COMPOSITE_ID = "composite";
 const OPENAI_COMPOSITE_MODELS = CFG.OPENAI_COMPOSITE_MODELS;
 const OPENAI_COMPOSITE_MAX_WAIT_MS = CFG.OPENAI_COMPOSITE_MAX_WAIT_MS;
+// A SECOND reserved composite id whose members are all Kaggle Model Proxy models
+// (config.jsonc kaggleComposite). Same fallover machinery as COMPOSITE_ID, routed through
+// resolveComposite's compositeId/membersStr overrides, so it spends ONLY the Kaggle AI (USD) quota.
+// Selectable in the Code-tab dropdown as "Kaggle (fallback)" but never the new-session default.
+const KAGGLE_COMPOSITE_ID = "kaggle-composite";
+const OPENAI_KAGGLE_COMPOSITE_MODELS = CFG.OPENAI_KAGGLE_COMPOSITE_MODELS;
 // Time-to-response-headers cap per upstream member (0 = undici default). A member that connects but
 // never sends headers throws UND_ERR_HEADERS_TIMEOUT at this bound, which the composite cascade treats
 // as a fall-over — so a hung model auto-tries the next instead of the client hitting its own timeout.
@@ -4161,6 +4170,13 @@ async function obtainUpstream(res, req, { body, reqModel, route, policy, isCls, 
     }
     const cls = classifyUpstream(upstream);
     if (cls.ok) return { upstream, provider: m.provider, useResp, payload, registry, model: m.model, startedAt };
+    // Kaggle's proxy token is short-lived. A 401/403 means it expired or was revoked between refreshes —
+    // re-mint in the background so the NEXT turn (or a composite's retry phase) has a fresh token. The
+    // current attempt still falls through to the normal skip/error handling below.
+    if ((cls.status === 401 || cls.status === 403) && m.provider.id === "kaggle") {
+      log(`  kaggle: upstream ${cls.status} — re-minting proxy token for the next turn`);
+      refreshKaggleToken().catch(() => {});
+    }
     const errTxt = await upstream.text();                // consume ONCE; a failed member is never replayed
     log(useResp ? `OpenAI(responses) ${cls.status}: ${errTxt.slice(0, 300)}` : `OpenAI ${cls.status}: ${errTxt.slice(0, 300)}`);
     bestErr = worseOf(bestErr, { kind: cls.rateLimited ? "rate_limit" : "http", status: cls.status, bodyText: errTxt, retryAfterMs: cls.retryAfterMs });
@@ -4339,7 +4355,10 @@ const server = http.createServer(async (req, res) => {
     // compaction chain is configured — the client's own COMPACTION turns (its /compact, otherwise pinned to
     // the default upstream). The safety/prefix classifier stays single-shot on the default. Everything else
     // is a single member.
-    const members = route === ROUTE.MAIN ? resolveComposite(reqModel)
+    const members = route === ROUTE.MAIN ? (resolveComposite(reqModel)
+      // The Kaggle-only composite ("kaggle-composite") — same expansion, its own member list. Resolves
+      // to null unless reqModel is exactly that id, so it never shadows the primary composite above.
+      || resolveComposite(reqModel, { compositeId: KAGGLE_COMPOSITE_ID, membersStr: OPENAI_KAGGLE_COMPOSITE_MODELS }))
       // A client COMPACTION turn uses the dedicated compact chain ONLY when the COMPOSITE is the model in
       // use (a composite has no single model to summarise with). When a SPECIFIC model is picked, this
       // falls through to the single-member routing below (resolving reqModel to that provider+model), so
@@ -4558,6 +4577,24 @@ process.on("uncaughtException", (err) => fatal("uncaughtException", err));
 
 if (!process.env.PROXY_NO_LISTEN) server.listen(PORT, "127.0.0.1", () => {
   log(`listening on http://127.0.0.1:${PORT}  ->  ${OPENAI_BASE} (model ${OPENAI_MODEL}, api ${OPENAI_API})`);
+  // Kaggle Model Proxy lifecycle. start() mints/refreshes the short-lived proxy token from
+  // ~/.kaggle/access_token and, via onRefresh, OVERWRITES the two generic routing hooks the hot path
+  // already reads — PROVIDER_KEYS.kaggleProxyToken (the bearer) and PROVIDERS.kaggle.baseURL (the minted
+  // OpenAI-compatible base). No access token -> inert, the provider simply stays inactive. Then log the
+  // AI (USD) quota, which is separate from the GPU/TPU accelerator hours, so none of this burns GPU quota.
+  startKaggle({
+    log,
+    onRefresh: ({ token, baseURL }) => {
+      PROVIDER_KEYS.kaggleProxyToken = token;
+      if (PROVIDERS.kaggle) PROVIDERS.kaggle.baseURL = baseURL;
+    },
+  }).then(async (c) => {
+    if (!c) return;
+    const q = await getKaggleQuota();
+    if (q && q.length)
+      log(`  kaggle AI quota (USD, separate from GPU/TPU hours): ` +
+          q.map((b) => `${b.period} $${b.used.toFixed(2)}/$${b.total.toFixed(2)}`).join("  "));
+  }).catch(() => {});
   // Both classifier models, always. The safety model decides whether a risky action is allowed to
   // run, and it did not appear here at all — so the single most consequential routing decision the
   // proxy makes was invisible in its own startup log.

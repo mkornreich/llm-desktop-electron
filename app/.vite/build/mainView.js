@@ -105,6 +105,11 @@ try {
       __llmdEl.contextBridge.exposeInMainWorld("__llmdComposite", function () {
         try { return JSON.parse(process.env.LLMD_COMPOSITE || "null"); } catch (e) { return null; }
       });
+      // The Kaggle-only composite (run.sh -> LLMD_KAGGLE_COMPOSITE = {members:[...]}). Injected as a
+      // SECOND "Kaggle (fallback)" dropdown entry (id "kaggle-composite"); NOT the new-session default.
+      __llmdEl.contextBridge.exposeInMainWorld("__llmdKaggleComposite", function () {
+        try { return JSON.parse(process.env.LLMD_KAGGLE_COMPOSITE || "null"); } catch (e) { return null; }
+      });
       // The configured Code-tab model list (run.sh -> LLMD_DROPDOWN_MODELS, a JSON array of "<provider>:<model>"
       // ids in order). Empty/unset -> the page uses its short built-in default list.
       __llmdEl.contextBridge.exposeInMainWorld("__llmdDropdownModels", function () {
@@ -215,7 +220,7 @@ try {
                 // first ~9 selectable as keys 1-9. Empty -> the short default. On-device local thinking
                 // models auto-append after it. Each id routes via resolvePickedProvider; minimum_tier:free +
                 // no disabled_reason keeps them selectable; the shape mirrors a real entry.
-                var PROV_LABEL = { cohere: "Cohere", gemini: "Gemini", mistral: "Mistral", groq: "Groq", ollama: "Ollama Cloud", local: "Local", openrouter: "OpenRouter", openai: "OpenAI" };
+                var PROV_LABEL = { cohere: "Cohere", gemini: "Gemini", mistral: "Mistral", groq: "Groq", ollama: "Ollama Cloud", local: "Local", openrouter: "OpenRouter", openai: "OpenAI", kaggle: "Kaggle" };
                 function nameFor(id) { var i = String(id).indexOf(":"); if (i <= 0) return id; return (PROV_LABEL[id.slice(0, i)] || id.slice(0, i)) + ": " + id.slice(i + 1); }
                 function shortFor(id) { var i = String(id).indexOf(":"); return i <= 0 ? id : id.slice(i + 1); }
                 var CFGD = [];
@@ -300,6 +305,34 @@ try {
                         data.model_selector_config.map(function (x) { return x && x.id; }).join(",") + "]");
                   }
                 } catch (e) { log("composite inject error " + e); }
+                // Kaggle-only composite ("kaggle-composite"): a SECOND fallback entry, placed right AFTER
+                // "composite" in each code surface (so Composite stays first + the new-session default).
+                // Members are all Kaggle Model Proxy models, so picking it spends only the Kaggle AI (USD)
+                // quota — never GPU. Selectable only; model_selector_state is deliberately NOT touched.
+                try {
+                  var KCOMP = (window.__llmdKaggleComposite && window.__llmdKaggleComposite()) || null;
+                  if (KCOMP && Array.isArray(KCOMP.members) && KCOMP.members.length && Array.isArray(data.model_selector_config)) {
+                    var KCID = "kaggle-composite";
+                    var KSURFACES = { code: 1, ccd: 1, ccr: 1 }, KINTO = [];
+                    data.model_selector_config.forEach(function (surf) {
+                      if (!surf || !KSURFACES[surf.id] || !Array.isArray(surf.models)) return;
+                      if (surf.models.some(function (x) { return x && x.id === KCID; })) return;
+                      KINTO.push(surf.id);
+                      var at = surf.models.findIndex(function (x) { return x && x.id === "composite"; });
+                      surf.models.splice(at >= 0 ? at + 1 : 0, 0, {
+                        id: KCID, name: "Kaggle (fallback)", short_name: "Kaggle",
+                        description: "Kaggle Model Proxy — tries " + KCOMP.members.map(function (m) { return String(m).split(":").pop(); }).join(" → ") + " (uses the Kaggle AI quota, not GPU)",
+                        capabilities: { compass: false, gsuite_tools: false, mm_images: false, mm_pdf: false, web_search: false },
+                        thinking: { type: "effort_and_mode",
+                          effort_options: [{ id: "low", name: "Low" }, { id: "medium", name: "Medium" }, { id: "high", name: "High" }, { id: "xhigh", name: "Extra" }, { id: "max", name: "Max", recommended: true }],
+                          mode_options: [{ id: "auto", name: "Thinking" }, { id: "off", name: "Off" }] }
+                      });
+                    });
+                    if (am && Array.isArray(am.models) && !am.models.some(function (x) { return x && x.model_id === KCID; }))
+                      am.models.push({ model_id: KCID, minimum_tier: "free" });
+                    log("injected kaggle-composite with " + KCOMP.members.length + " member(s) into surface(s) [" + KINTO.join(",") + "]");
+                  }
+                } catch (e) { log("kaggle-composite inject error " + e); }
               } catch (e) { log("inject error " + e); }
               log("patched response " + url);
             } catch (e) { log("patch error " + e); }

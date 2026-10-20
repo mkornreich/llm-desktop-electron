@@ -140,12 +140,14 @@ window.settings = {
   ollamaModels: ()    => api("/api/ollama-models"),
   compositeChoices: () => api("/api/composite-choices"),
   compactChoices: () => api("/api/composite-choices?responses=1"),
+  kaggleQuota: ()     => api("/api/kaggle-quota"),
   reveal:   (file)    => Promise.resolve(),   // no Finder access from a page; the chip is a label here
 };
 const $ = (s) => document.querySelector(s);
 let SCHEMA = [], CURRENT = {}, DRAFT = {};
 let SEARCH = "";   // current search query; filters rows/sections in applySearch(), re-applied after every render
 let OLLAMA_MODELS = [], LOCAL_MODEL_FILE = {}, OLLAMA_REQUIRE_THINKING = true, OLLAMA_MAX_CONTEXT = {}, COMPOSITE_CHOICES = [], COMPACT_CHOICES = [];
+let KAGGLE_QUOTA = null;   // { available, balances:[{period,used,total,remaining}] } from /api/kaggle-quota
 // The context a given local model launches with: its CONTEXT_<model> line, else the file default.
 const modelCtx = (m) => LOCAL_MODEL_FILE["CONTEXT_" + (m || "")] ?? LOCAL_MODEL_FILE.OLLAMA_CONTEXT_LENGTH ?? "32768";
 // The model's MAXIMUM supported context (from Ollama's model_info) — what the picker snaps the
@@ -429,6 +431,14 @@ function render() {
     if (g === "Provider") {
       const n = document.createElement("div"); n.className = "note";
       n.textContent = "Most settings are read when the app launches, so use “Save & restart app” to apply them.";
+      sec.append(n);
+    }
+    // Kaggle AI quota readout, shown in the Composite section (where the Kaggle fallback chain lives).
+    // USD inference budget, SEPARATE from the GPU/TPU accelerator hours. Read-only, fetched in load().
+    if (g === "Composite model" && KAGGLE_QUOTA && KAGGLE_QUOTA.available && (KAGGLE_QUOTA.balances || []).length) {
+      const n = document.createElement("div"); n.className = "note";
+      n.textContent = "Kaggle AI quota (USD, separate from GPU/TPU hours) — " +
+        KAGGLE_QUOTA.balances.map((b) => `${b.period}: $${b.remaining.toFixed(2)} left of $${b.total.toFixed(2)}`).join("  ·  ");
       sec.append(n);
     }
     for (const s of items) {
@@ -727,6 +737,8 @@ async function load() {
   try { COMPOSITE_CHOICES = (await window.settings.compositeChoices()).choices || []; render(); } catch { /* offline */ }
   // Responses-only subset, for the compaction chain picker (the summariser calls /responses).
   try { COMPACT_CHOICES = (await window.settings.compactChoices()).choices || []; render(); } catch { /* offline */ }
+  // Kaggle AI quota readout (USD) for the Composite section — free to read, never blocks the form.
+  try { KAGGLE_QUOTA = await window.settings.kaggleQuota(); render(); } catch { /* offline / no token */ }
 }
 
 async function save() {

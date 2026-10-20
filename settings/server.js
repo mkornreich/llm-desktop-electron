@@ -392,6 +392,31 @@ async function handle(req, res) {
       return send(res, 200, { choices });
     }
 
+    // Kaggle AI quota (USD): reads ~/.kaggle/access_token (or KAGGLE_API_TOKEN) and calls Kaggle's quota
+    // endpoint. This budget is SEPARATE from the GPU/TPU accelerator hours, and reading it spends nothing.
+    // Never returns the token. Mirrors openai-proxy/kaggle-proxy-token.mjs getQuota (server.js is CommonJS,
+    // so it cannot import that ESM module). { available:false } when no token or Kaggle is unreachable.
+    if (url.pathname === "/api/kaggle-quota" && req.method === "GET") {
+      const fs2 = require("fs"), os2 = require("os"), path2 = require("path");
+      let kgat = (process.env.KAGGLE_API_TOKEN || "").trim();
+      if (!kgat) { try { kgat = fs2.readFileSync(path2.join(os2.homedir(), ".kaggle", "access_token"), "utf8").trim(); } catch { /* no file */ } }
+      if (!kgat) return send(res, 200, { available: false, balances: [] });
+      for (const host of ["https://www.kaggle.com", "https://api.kaggle.com"]) {
+        try {
+          const r = await fetch(host + "/api/v1/models/proxy/quota", { headers: { Authorization: `Bearer ${kgat}` }, signal: AbortSignal.timeout(8000) });
+          if (!r.ok) continue;
+          const j = await r.json();
+          const arr = Array.isArray(j) ? j : (Array.isArray(j.quotaBalances) ? j.quotaBalances : []);
+          const balances = arr.map((b) => {
+            const used = Number(b.quotaUsed ?? b.quota_used ?? 0), total = Number(b.totalQuotaAllowed ?? b.total_quota_allowed ?? 0);
+            return { period: String(b.refillPeriod ?? b.refill_period ?? "").toLowerCase(), used, total, remaining: Math.max(0, total - used) };
+          });
+          return send(res, 200, { available: true, balances });
+        } catch { /* try next host */ }
+      }
+      return send(res, 200, { available: false, balances: [] });
+    }
+
     // (The OpenRouter model picker draws from the providers.openrouter.suggestions allowlist in
     // config.jsonc — surfaced through the generated OPENROUTER_MODEL field and /api/composite-choices —
     // NOT a live catalog fetch. The old /api/openrouter-models endpoint dumped the whole ~400-model

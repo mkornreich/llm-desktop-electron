@@ -91,6 +91,14 @@ const SCHEMA = [
     label: "Max wait when all members are rate-limited (ms)",
     help: "Fast-failover means a 429 never blocks while another member is still available. Only once EVERY member is rate-limited does the proxy wait — for the soonest member's Retry-After, capped here per-member and cumulatively — then retry. Past the cap it returns the 429 with Retry-After so the agent backs off. Default 30000 (30s)." },
 
+  // Kaggle-only composite ("kaggle-composite"): a SECOND fallback chain whose members are all Kaggle Model
+  // Proxy models. Stored at config.jsonc kaggleComposite; appears as a separate "Kaggle (fallback)" entry
+  // in the Code-tab dropdown, but is NOT the default for new sessions.
+  { group: "Composite model", file: ".openai-model", key: "OPENAI_KAGGLE_COMPOSITE_MODELS", type: "composite",
+    default: "", placeholder: "kaggle:gpt-oss-120b,kaggle:deepseek-r1-0528",
+    label: "Kaggle fallback chain (ordered)",
+    help: "The models the separate 'Kaggle (fallback)' dropdown entry tries in turn — all Kaggle Model Proxy models (pick the kaggle: entries below). Kaggle's AI quota is a daily/monthly USD inference budget minted from your ~/.kaggle/access_token, SEPARATE from the GPU/TPU accelerator hours, so this chain never spends GPU quota. Empty = no 'Kaggle (fallback)' entry. Changing this restarts the proxy." },
+
   { group: "Reasoning", file: ".openai-model", key: "OPENAI_REASONING_EFFORT", type: "enum",
     options: ["none", "minimal", "low", "medium", "high", "xhigh", "max"], default: "max",
     label: "Reasoning effort",
@@ -289,6 +297,7 @@ const PATHS = {
   OPENAI_PICKER_MODELS: "picker.models", DROPDOWN_MODELS: "picker.dropdownModels",
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "picker.gatewayModelDiscovery",
   OPENAI_COMPOSITE_MODELS: "composite", OPENAI_COMPOSITE_MAX_WAIT_MS: "compositeMaxWaitMs", OPENAI_COMPACT_MODELS: "compact",
+  OPENAI_KAGGLE_COMPOSITE_MODELS: "kaggleComposite",
   OPENAI_REASONING_EFFORT: "reasoning.effort", OPENAI_SHOW_THINKING: "reasoning.showThinking",
   OPENAI_THINKING_MIN_BUDGET: "reasoning.minBudget", OPENAI_VERBOSITY: "reasoning.verbosity",
   OPENAI_PERSISTENCE: "agent.persistence", OPENAI_AUTO_CONTINUE: "agent.autoContinue",
