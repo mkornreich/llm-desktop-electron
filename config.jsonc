@@ -239,12 +239,18 @@
     // validation placeholder only; the real base comes from the mint (today a STAGING proxy:
     // https://mp-staging.kaggle.net/models/openapi). The proxy exposes NO live /models endpoint, so the
     // Code-tab entries come from `suggestions` + picker.dropdownModels, not gateway discovery. isOpenAI:false
-    // keeps OpenAI-only fields (prompt_cache_key/verbosity) off the wire. Confirmed-serving slugs (staging,
-    // Oct 2026): gpt-oss-120b, deepseek-r1-0528 — EXACT slugs; edit in Settings as Kaggle grows the catalog.
+    // keeps OpenAI-only fields (prompt_cache_key/verbosity) off the wire. Slugs are the catalog's EXACT
+    // modelProxySlug (POST api.kaggle.com/v1/benchmarks.BenchmarksApiService/ListBenchmarkModels); a LOCAL token
+    // can call only a curated subset of its 43 entries (the rest 404). Live-verified Oct 24 2026 — streaming +
+    // tools + max_tokens 64000 + tool-result round trip — best-first, $ per M tokens in/out: claude-sonnet-5
+    // $2/$10, gemini-3.6-flash $0.75/$3.75, gemini-3-flash-preview $0.50/$3, gemini-3.5-flash-lite $0.30/$2.50,
+    // gemini-3.1-flash-lite $0.25/$1.50, gpt-5.4-nano $0.20/$1.25, gpt-oss-120b $0.09/$0.36 (latency spiky).
+    // NOT usable here: deepseek-r1-0528 (400 "Tool calling is not supported"), granite-4.0-h-small (40k context,
+    // rejects max_tokens 64000). contextWindow 128000 = the smallest member's (gpt-oss-120b).
     "kaggle": {"label":"Kaggle","endpoint":"https://mp.kaggle.net/models/openapi","api":"chat","keyNames":["kaggleProxyToken"],"isOpenAI":false,"responses":false,
       "contextWindow":128000,
-      "model":"gpt-oss-120b","claudeCodeModel":"claude-opus-4-8[1m]",
-      "suggestions":["gpt-oss-120b","deepseek-r1-0528"]}
+      "model":"anthropic/claude-sonnet-5@default","claudeCodeModel":"claude-opus-4-8[1m]",
+      "suggestions":["anthropic/claude-sonnet-5@default","google/gemini-3.6-flash","google/gemini-3-flash-preview","google/gemini-3.5-flash-lite","google/gemini-3.1-flash-lite-preview","openai/gpt-5.4-nano-2026-03-17","openai/gpt-oss-120b"]}
 
   },
 
@@ -268,8 +274,11 @@
   // above, but every member is a Kaggle Model Proxy model, so the chain spends ONLY the Kaggle AI (USD)
   // quota and never the GPU quota. Selectable in the Code-tab dropdown as "Kaggle (fallback)"; it is NOT
   // the default (that stays "composite"), so the budget is touched only when you deliberately pick Kaggle.
-  // Ordered best-first; members are kaggle:<slug>. Empty -> no second composite is advertised.
-  "kaggleComposite": ["kaggle:gpt-oss-120b","kaggle:deepseek-r1-0528"],
+  // Ordered QUALITY-first (price tier as the capability proxy). The chain falls over only on an ERROR, so the
+  // first member (Sonnet 5, ~$0.09 per ~40k-token Code-tab turn) takes nearly all the traffic; every member
+  // draws on ONE shared budget ($10/day, $100/month), so an exhausted budget fails them all alike. Members are
+  // kaggle:<slug> (tool-capable only — see providers.kaggle). Empty -> no second composite is advertised.
+  "kaggleComposite": ["kaggle:anthropic/claude-sonnet-5@default","kaggle:google/gemini-3.6-flash","kaggle:google/gemini-3-flash-preview","kaggle:google/gemini-3.5-flash-lite","kaggle:google/gemini-3.1-flash-lite-preview","kaggle:openai/gpt-5.4-nano-2026-03-17","kaggle:openai/gpt-oss-120b"],
 
   // Time-to-response-headers cap (ms) per upstream member. A model that connects but never responds
   // otherwise stalls the whole turn to undici's 300s default — the "API Error: The operation timed out"
@@ -419,7 +428,7 @@
   // is the ordered <provider>:<model> id list injected into the dropdown's 1-9 slots.
   "picker": {
     "models": "",
-    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:z-ai/glm-5.3-flash","agnes:agnes-3.0-flash","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:apodex/apodex-1.1-mini:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","inceptionlabs:mercury-2.5","kaggle:gpt-oss-120b","kaggle:deepseek-r1-0528"],
+    "dropdownModels": ["gemini:gemini-3-flash-preview","openrouter2:z-ai/glm-5.3-flash","agnes:agnes-3.0-flash","nvidia:nvidia/nemotron-3-super-120b-a12b","ollama-cloud:gpt-oss:120b","llm7:gpt-oss:20b","freetoken:qwen3-1.7b","cloudflare:@cf/qwen/qwen3.8-27b","cohere:command-a-03-2025","openrouter:apodex/apodex-1.1-mini:free","openrouter:openrouter/free","openrouter:dots-studio/dots-3-note-preview:free","openrouter:poolside/laguna-s-2.1:free","openrouter:nvidia/nemotron-3-ultra-550b-a55b:free","inceptionlabs:mercury-2.5","kaggle:anthropic/claude-sonnet-5@default","kaggle:google/gemini-3.6-flash","kaggle:google/gemini-3-flash-preview","kaggle:google/gemini-3.5-flash-lite","kaggle:google/gemini-3.1-flash-lite-preview","kaggle:openai/gpt-5.4-nano-2026-03-17","kaggle:openai/gpt-oss-120b"],
     "gatewayModelDiscovery": true
   },
 

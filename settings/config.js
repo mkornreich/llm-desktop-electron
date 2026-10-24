@@ -95,7 +95,7 @@ const SCHEMA = [
   // Proxy models. Stored at config.jsonc kaggleComposite; appears as a separate "Kaggle (fallback)" entry
   // in the Code-tab dropdown, but is NOT the default for new sessions.
   { group: "Composite model", file: ".openai-model", key: "OPENAI_KAGGLE_COMPOSITE_MODELS", type: "composite",
-    default: "", placeholder: "kaggle:gpt-oss-120b,kaggle:deepseek-r1-0528",
+    default: "", placeholder: "kaggle:anthropic/claude-sonnet-5@default,kaggle:google/gemini-3.6-flash",
     label: "Kaggle fallback chain (ordered)",
     help: "The models the separate 'Kaggle (fallback)' dropdown entry tries in turn — all Kaggle Model Proxy models (pick the kaggle: entries below). Kaggle's AI quota is a daily/monthly USD inference budget minted from your ~/.kaggle/access_token, SEPARATE from the GPU/TPU accelerator hours, so this chain never spends GPU quota. Empty = no 'Kaggle (fallback)' entry. Changing this restarts the proxy." },
 
