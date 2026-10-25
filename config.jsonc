@@ -303,8 +303,15 @@
   // the on-device freetoken (qwen3-1.7b, ~54k budget, ~0.2-1s warm, private) viable FIRST — most verdicts
   // then never egress the transcript; the cloud models are the fallback when freetoken errors/overflows.
   "classifier": {
-    "prefix": "openrouter2:z-ai/glm-5.3-flash",
-    "safety": ["openrouter2:z-ai/glm-5.3-flash"],
+    // prefix + safety are FALLOVER CHAINS. Oct 25 2026: openrouter2 ran out of credit (402 "Prompt tokens
+    // limit exceeded: 33083 > 9397") and, as the only member, failed EVERY auto-mode verdict closed — the CLI
+    // reported "<model> is temporarily unavailable" and refused every Agent spawn. Fallbacks were screened
+    // on the real ~30k-token verdict request: all answer a parseable "<block>…</block>" verdict. Free first:
+    // ollama-cloud 1.5s; kaggle flash-lite 1.3s (~$0.0075/verdict of the Kaggle AI quota); agnes 3.7s;
+    // gemini (own key) 7.4s. Rejected: gpt-5.4-nano/cohere (over-block), cloudflare qwen (29s), mercury
+    // (empty at the token cap), groq 403, nvidia 404, mistral 429.
+    "prefix": ["openrouter2:z-ai/glm-5.3-flash","ollama-cloud:gpt-oss:120b","kaggle:google/gemini-3.1-flash-lite-preview","agnes:agnes-3.0-flash","gemini:gemini-3-flash-preview"],
+    "safety": ["openrouter2:z-ai/glm-5.3-flash","ollama-cloud:gpt-oss:120b","kaggle:google/gemini-3.1-flash-lite-preview","agnes:agnes-3.0-flash","gemini:gemini-3-flash-preview"],
     "background": "openrouter2:z-ai/glm-5.3-flash",
     "maxTools": 4,
     "slowMs": 20000,
