@@ -861,12 +861,15 @@ fi
 # Not `exec`. Replacing the shell would leave no way to do anything after the app quits, and
 # the one moment a Local Storage write-back is possible is exactly when the app has released
 # its LevelDB lock. Sessions need no write-back at all now that the directory is shared.
+#
+# `|| STATUS=$?` because of `set -e`: a plain `STATUS=$?` on the next line is never reached when
+# the app exits non-zero, so the launcher stopped here with no message and skipped the write-back.
+STATUS=0
 "$ELECTRON" app \
   --user-data-dir="$PWD/user-data" \
   --enable-logging \
   "${EXTRA[@]+"${EXTRA[@]}"}" \
-  "$@"
-STATUS=$?
+  "$@" || STATUS=$?
 
 # Push grouping changes made in this session back out. This is the reason the launch does not
 # `exec`: the build's LevelDB lock is only free once the app has quit, so this is the one moment
